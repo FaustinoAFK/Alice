@@ -1,0 +1,275 @@
+.app-shell {
+  min-height: 100vh;
+  position: relative;
+  overflow: hidden;
+  background:
+    linear-gradient(135deg, rgba(12, 18, 24, 0.82), rgba(24, 20, 31, 0.74)),
+    #0c1218;
+  color: #eef2f8;
+}
+
+.screen-preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transform: scale(1.01);
+  transition: opacity 220ms ease;
+}
+
+.app-shell--connected .screen-preview,
+.app-shell--configuring .screen-preview {
+  opacity: 0.44;
+}
+
+.capture-canvas {
+  display: none;
+}
+
+.alice-live {
+  min-height: 100vh;
+  width: min(960px, calc(100vw - 48px));
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+  gap: 28px;
+  text-align: center;
+  position: relative;
+  z-index: 1;
+  padding: 64px 0 116px;
+}
+
+.alice-orb {
+  width: min(34vw, 260px);
+  min-width: 160px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background:
+    radial-gradient(circle at 48% 42%, rgba(255, 255, 255, 0.92) 0 8%, transparent 9%),
+    radial-gradient(circle at 32% 30%, rgba(45, 212, 191, 0.82), transparent 24%),
+    radial-gradient(circle at 72% 72%, rgba(250, 204, 21, 0.72), transparent 28%),
+    linear-gradient(145deg, #2563eb, #0f766e);
+  box-shadow:
+    0 32px 96px rgba(0, 0, 0, 0.46),
+    inset 0 0 72px rgba(255, 255, 255, 0.18);
+}
+
+.app-shell--connected .alice-orb {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+.alice-orb span {
+  width: 42%;
+  height: 34%;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  background:
+    radial-gradient(circle at 30% 44%, #eefcff 0 8%, transparent 10%),
+    radial-gradient(circle at 70% 44%, #eefcff 0 8%, transparent 10%),
+    linear-gradient(transparent 58%, rgba(238, 252, 255, 0.7) 59% 63%, transparent 64%),
+    rgba(7, 12, 20, 0.34);
+  backdrop-filter: blur(10px);
+}
+
+.live-copy {
+  max-width: 760px;
+  display: grid;
+  gap: 14px;
+}
+
+.live-name {
+  margin: 0;
+  color: #86efac;
+  font-size: 14px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.live-copy h1 {
+  margin: 0;
+  font-size: clamp(44px, 7vw, 92px);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.live-copy p {
+  margin: 0;
+  color: #d7e3f1;
+  font-size: clamp(18px, 2.2vw, 24px);
+  line-height: 1.4;
+}
+
+.live-copy small {
+  color: #a8bfd8;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.live-copy .error-text {
+  color: #fecaca;
+}
+
+.signal-panel {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 2;
+  width: min(320px, calc(100vw - 36px));
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(8, 13, 22, 0.72);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.28);
+}
+
+.signal-panel span {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(238, 242, 248, 0.08);
+  color: #d7e3f1;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.signal-panel .mic-meter {
+  grid-column: 1 / -1;
+  justify-content: flex-start;
+  padding: 0;
+  overflow: hidden;
+}
+
+.mic-meter i {
+  width: 100%;
+  height: 100%;
+  display: block;
+  transform-origin: left center;
+  background: linear-gradient(90deg, #2dd4bf, #86efac, #fde047);
+  transition: transform 90ms linear;
+}
+
+.control-bar {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 2;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(8, 13, 22, 0.78);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.34);
+}
+
+.status-pill {
+  min-width: 96px;
+  color: #cbd8e8;
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.control-button {
+  min-width: 124px;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: #2dd4bf;
+  color: #07121a;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 900;
+}
+
+.control-button:hover {
+  background: #5eead4;
+}
+
+.control-button:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.button-icon {
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+}
+
+.button-icon--play::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  border-left: 11px solid currentColor;
+  transform: translateX(1px);
+}
+
+.button-icon--stop::before {
+  content: '';
+  width: 12px;
+  height: 12px;
+  background: currentColor;
+  border-radius: 2px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  50% {
+    transform: scale(1.035);
+  }
+}
+
+@media (max-width: 720px) {
+  .alice-live {
+    width: min(100vw - 32px, 620px);
+    padding: 48px 0 112px;
+  }
+
+  .control-bar {
+    width: calc(100vw - 32px);
+    justify-content: space-between;
+  }
+
+  .signal-panel {
+    top: 12px;
+    right: 12px;
+    left: 12px;
+    width: auto;
+  }
+
+  .status-pill {
+    min-width: 84px;
+  }
+
+  .control-button {
+    min-width: 116px;
+  }
+}
