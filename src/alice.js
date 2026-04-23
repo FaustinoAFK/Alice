@@ -8,6 +8,7 @@ export const ALICE_SYSTEM_INSTRUCTION = [
   'Voce tem iniciativa conversacional: percebe contexto, comenta quando for util e faz perguntas boas.',
   'Voce nao e submissa nem generica. Voce tem ponto de vista.',
   'Voce pode pedir ferramentas locais quando a pessoa der um comando direto compativel com apps, pastas, mouse ou teclado.',
+  'Para clicar em botoes, menus, abas e textos visiveis, prefira click_target com o nome do alvo em vez de adivinhar coordenadas.',
   'Use ferramentas apenas para apps, pastas, mouse e teclado. Nunca invente shell, arquivos, senhas, compras, downloads ou acoes fora da lista.',
   'Se nao tiver certeza do alvo do clique, peca uma frase mais especifica.',
   'Use a tela compartilhada apenas para entender contexto visual quando a pessoa pedir ou quando for claramente util.',
@@ -80,12 +81,30 @@ export const ALICE_DESKTOP_TOOLS = [
         },
       },
       {
+        name: 'click_target',
+        description:
+          'Clica em um alvo textual visivel ou acessivel. O app tenta automacao por acessibilidade primeiro e OCR como fallback.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            target: {
+              type: 'STRING',
+              minLength: 1,
+              maxLength: 120,
+            },
+            button: { type: 'STRING', enum: ['left', 'right'] },
+            utteranceHint: utteranceHintProperty,
+          },
+          required: ['target'],
+        },
+      },
+      {
         name: 'type_text',
         description: 'Digita texto no campo atualmente focado.',
         parameters: {
           type: 'OBJECT',
           properties: {
-            text: { type: 'STRING', maxLength: 500 },
+            text: { type: 'STRING' },
             utteranceHint: utteranceHintProperty,
           },
           required: ['text'],
@@ -110,20 +129,52 @@ export const ALICE_DESKTOP_TOOLS = [
   },
 ];
 
-export const createAliceLiveSetup = (model = ALICE_LIVE_MODEL) => ({
-  model: `models/${model}`,
-  generationConfig: {
-    responseModalities: ['AUDIO'],
-    temperature: 0.7,
-    mediaResolution: 'MEDIA_RESOLUTION_LOW',
-  },
-  systemInstruction: {
-    parts: [{ text: ALICE_SYSTEM_INSTRUCTION }],
-  },
-  realtimeInputConfig: {
-    turnCoverage: 'TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO',
-  },
-  tools: ALICE_DESKTOP_TOOLS,
-  inputAudioTranscription: {},
-  outputAudioTranscription: {},
-});
+export const createAliceLiveSetup = (options = {}) => {
+  const normalizedOptions = typeof options === 'string' ? { model: options } : options;
+  const model = normalizedOptions.model || ALICE_LIVE_MODEL;
+  const tools = normalizedOptions.tools || ALICE_DESKTOP_TOOLS;
+  const systemInstruction =
+    normalizedOptions.systemInstruction || ALICE_SYSTEM_INSTRUCTION;
+  const resumptionHandle =
+    typeof normalizedOptions.resumptionHandle === 'string'
+      ? normalizedOptions.resumptionHandle.trim()
+      : '';
+  const memoryPrefixTurns = Array.isArray(normalizedOptions.memoryPrefixTurns)
+    ? normalizedOptions.memoryPrefixTurns.filter(Boolean)
+    : [];
+
+  const setup = {
+    model: `models/${model}`,
+    generationConfig: {
+      responseModalities: ['AUDIO'],
+      temperature: 0.7,
+      mediaResolution: 'MEDIA_RESOLUTION_LOW',
+    },
+    systemInstruction: {
+      parts: [{ text: systemInstruction }],
+    },
+    realtimeInputConfig: {
+      turnCoverage: 'TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO',
+    },
+    contextWindowCompression: {
+      slidingWindow: {},
+    },
+    tools,
+    inputAudioTranscription: {},
+    outputAudioTranscription: {},
+  };
+
+  if (resumptionHandle) {
+    setup.sessionResumption = {
+      handle: resumptionHandle,
+    };
+  }
+
+  if (memoryPrefixTurns.length > 0) {
+    setup.historyConfig = {
+      initialHistoryInClientContent: true,
+    };
+  }
+
+  return setup;
+};

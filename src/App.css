@@ -20,7 +20,8 @@
 }
 
 .app-shell--connected .screen-preview,
-.app-shell--configuring .screen-preview {
+.app-shell--configuring .screen-preview,
+.app-shell--reconnecting .screen-preview {
   opacity: 0.44;
 }
 
@@ -58,7 +59,8 @@
     inset 0 0 72px rgba(255, 255, 255, 0.18);
 }
 
-.app-shell--connected .alice-orb {
+.app-shell--connected .alice-orb,
+.app-shell--reconnecting .alice-orb {
   animation: pulse 1.8s ease-in-out infinite;
 }
 
@@ -107,6 +109,10 @@
   color: #a8bfd8;
   font-size: 15px;
   line-height: 1.5;
+}
+
+.live-copy .session-note {
+  color: #fef08a;
 }
 
 .live-copy .error-text {

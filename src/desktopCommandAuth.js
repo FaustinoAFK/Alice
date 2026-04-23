@@ -28,6 +28,10 @@ const ACTION_ALIASES = {
     verbs: ['clica', 'clicar', 'clique', 'aperta', 'apertar', 'pressiona', 'pressionar', 'toca', 'tocar', 'toque', 'seleciona', 'selecionar'],
     targets: { mouse_click: [] },
   },
+  click_target: {
+    verbs: ['clica', 'clicar', 'clique', 'aperta', 'apertar', 'pressiona', 'pressionar', 'seleciona', 'selecionar', 'abre', 'abrir'],
+    targets: { click_target: [] },
+  },
   type_text: {
     verbs: ['digita', 'digitar', 'escreve', 'escrever'],
     targets: { type_text: ['digita', 'digitar', 'escreve', 'escrever'] },
@@ -136,6 +140,8 @@ export const mapFunctionCallToDesktopAction = (functionCall) => {
       return { type: 'mouse_move', x: args.x, y: args.y };
     case 'mouse_click':
       return { type: 'mouse_click', button: args.button, x: args.x, y: args.y };
+    case 'click_target':
+      return { type: 'click_target', target: args.target, button: args.button || 'left' };
     case 'type_text':
       return { type: 'type_text', text: args.text };
     case 'press_hotkey':
@@ -163,6 +169,33 @@ export const attachCaptureGeometry = (action, geometry) => {
   };
 };
 
+const TARGET_TOKEN_IGNORES = new Set(['a', 'o', 'as', 'os', 'da', 'de', 'do', 'das', 'dos', 'no', 'na', 'nos', 'nas', 'um', 'uma', 'e']);
+
+const extractMeaningfulTargetTokens = (text) =>
+  normalizeUtterance(text)
+    .split(' ')
+    .filter((token) => token && token.length > 1 && !TARGET_TOKEN_IGNORES.has(token));
+
+export const doesUtteranceMatchTargetText = (utterance, targetText) => {
+  const normalizedUtterance = normalizeUtterance(utterance);
+  const normalizedTarget = normalizeUtterance(targetText);
+
+  if (!normalizedUtterance || !normalizedTarget) {
+    return false;
+  }
+
+  if (normalizedUtterance.includes(normalizedTarget)) {
+    return true;
+  }
+
+  const targetTokens = extractMeaningfulTargetTokens(targetText);
+  if (targetTokens.length === 0) {
+    return false;
+  }
+
+  return targetTokens.every((token) => normalizedUtterance.includes(token));
+};
+
 export const isUtteranceCompatibleWithAction = (utterance, action) => {
   const normalized = normalizeUtterance(utterance);
   const aliases = ACTION_ALIASES[action?.type];
@@ -173,6 +206,10 @@ export const isUtteranceCompatibleWithAction = (utterance, action) => {
 
   if (action.type === 'mouse_click' || action.type === 'type_text') {
     return true;
+  }
+
+  if (action.type === 'click_target') {
+    return doesUtteranceMatchTargetText(utterance, action.target);
   }
 
   if (action.type === 'mouse_move') {

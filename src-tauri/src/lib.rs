@@ -1,12 +1,17 @@
 #![cfg_attr(test, allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 const GEMINI_LIVE_WS_ENDPOINT: &str =
     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
-const MAX_TEXT_CHARS: usize = 500;
+const MAX_TARGET_CHARS: usize = 120;
+const MAX_MEMORY_JSON_BYTES: usize = 262_144;
+const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -40,6 +45,10 @@ pub enum DesktopAction {
         #[serde(rename = "captureHeight")]
         capture_height: Option<i32>,
     },
+    ClickTarget {
+        target: String,
+        button: String,
+    },
     TypeText {
         text: String,
     },
@@ -61,6 +70,94 @@ fn gemini_api_key_from_env() -> Result<String, String> {
         .map_err(|_| {
             "GEMINI_API_KEY nao encontrada nas variaveis de ambiente. Reinicie o VS Code/terminal depois de criar a variavel.".to_string()
         })
+}
+
+fn validate_memory_json_payload(json: &str) -> Result<(), String> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Err("Memoria da Alice nao pode ser vazia.".to_string());
+    }
+
+    if trimmed.len() > MAX_MEMORY_JSON_BYTES {
+        return Err(format!(
+            "Memoria da Alice excede o limite de {} bytes.",
+            MAX_MEMORY_JSON_BYTES
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolve_alice_memory_path(base_dir: &std::path::Path) -> PathBuf {
+    base_dir.join(ALICE_MEMORY_FILE_NAME)
+}
+
+fn read_memory_json(path: &std::path::Path) -> Result<Option<String>, String> {
+    match fs::read_to_string(path) {
+        Ok(json) => Ok(Some(json)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Falha ao ler a memoria local da Alice em {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn write_memory_json_atomic(path: &std::path::Path, json: &str) -> Result<(), String> {
+    validate_memory_json_payload(json)?;
+
+    let parent_dir = path.parent().ok_or_else(|| {
+        format!(
+            "Nao consegui resolver a pasta da memoria local da Alice em {}.",
+            path.display()
+        )
+    })?;
+    fs::create_dir_all(parent_dir).map_err(|error| {
+        format!(
+            "Falha ao criar a pasta da memoria local da Alice em {}: {error}",
+            parent_dir.display()
+        )
+    })?;
+
+    let temp_path = path.with_extension("json.tmp");
+    let mut temp_file = File::create(&temp_path).map_err(|error| {
+        format!(
+            "Falha ao criar arquivo temporario da memoria local da Alice em {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    temp_file.write_all(json.as_bytes()).map_err(|error| {
+        format!(
+            "Falha ao gravar o arquivo temporario da memoria local da Alice em {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    temp_file.sync_all().map_err(|error| {
+        format!(
+            "Falha ao sincronizar o arquivo temporario da memoria local da Alice em {}: {error}",
+            temp_path.display()
+        )
+    })?;
+    drop(temp_file);
+
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| {
+            format!(
+                "Falha ao substituir a memoria local da Alice em {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+
+    fs::rename(&temp_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temp_path);
+        format!(
+            "Falha ao concluir a gravacao atomica da memoria local da Alice em {}: {error}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 fn build_gemini_live_url(api_key: &str) -> String {
@@ -90,6 +187,28 @@ fn validate_hotkey(hotkey: &str) -> Result<(), String> {
         | "ctrl_z" => Ok(()),
         _ => Err(format!("Atalho nao permitido: {hotkey}")),
     }
+}
+
+fn validate_mouse_button(button: &str) -> Result<(), String> {
+    match button {
+        "left" | "right" => Ok(()),
+        _ => Err(format!("Botao de mouse nao permitido: {button}")),
+    }
+}
+
+fn validate_click_target_text(target: &str) -> Result<(), String> {
+    let trimmed = target.trim();
+    if trimmed.is_empty() {
+        return Err("Alvo textual nao pode ser vazio.".to_string());
+    }
+
+    if trimmed.chars().count() > MAX_TARGET_CHARS {
+        return Err(format!(
+            "Alvo textual excede {MAX_TARGET_CHARS} caracteres."
+        ));
+    }
+
+    Ok(())
 }
 
 fn validate_coordinate(value: f64, label: &str) -> Result<(), String> {
@@ -183,10 +302,7 @@ fn validate_desktop_action(action: &DesktopAction) -> Result<(), String> {
             capture_width,
             capture_height,
         } => {
-            match button.as_str() {
-                "left" | "right" => {}
-                _ => return Err(format!("Botao de mouse nao permitido: {button}")),
-            }
+            validate_mouse_button(button)?;
 
             validate_capture_extent(*capture_width, "width")?;
             validate_capture_extent(*capture_height, "height")?;
@@ -202,12 +318,11 @@ fn validate_desktop_action(action: &DesktopAction) -> Result<(), String> {
                 }
             }
         }
-        DesktopAction::TypeText { text } => {
-            if text.chars().count() > MAX_TEXT_CHARS {
-                return Err(format!("Texto excede {MAX_TEXT_CHARS} caracteres."));
-            }
-            Ok(())
+        DesktopAction::ClickTarget { target, button } => {
+            validate_click_target_text(target)?;
+            validate_mouse_button(button)
         }
+        DesktopAction::TypeText { .. } => Ok(()),
         DesktopAction::PressHotkey { hotkey } => validate_hotkey(hotkey),
     }
 }
@@ -281,6 +396,7 @@ mod windows_input {
     };
     use std::mem::size_of;
     use std::ptr::null;
+    use std::process::Command;
     use windows_sys::Win32::Foundation::{LPARAM, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
@@ -292,6 +408,130 @@ mod windows_input {
         VK_RETURN, VK_S, VK_TAB, VK_V, VK_Z,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetCursorPos, MONITORINFOF_PRIMARY};
+
+    pub(crate) const UI_AUTOMATION_LOOKUP_SCRIPT: &str = r#"
+Add-Type -AssemblyName UIAutomationClient
+Add-Type -AssemblyName UIAutomationTypes
+
+function Get-SearchRoot {
+  $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+  if ($null -eq $focused) {
+    return [System.Windows.Automation.AutomationElement]::RootElement
+  }
+
+  $walker = [System.Windows.Automation.TreeWalker]::ControlViewWalker
+  $current = $focused
+  $parent = $walker.GetParent($current)
+
+  while ($null -ne $parent -and $parent -ne [System.Windows.Automation.AutomationElement]::RootElement) {
+    $current = $parent
+    $parent = $walker.GetParent($current)
+  }
+
+  return $current
+}
+
+$target = ($env:ALICE_UI_TARGET ?? '').Trim()
+if ([string]::IsNullOrWhiteSpace($target)) {
+  throw 'Alvo textual ausente para UI Automation.'
+}
+
+$needle = $target.ToLowerInvariant()
+$roots = @()
+$searchRoot = Get-SearchRoot
+if ($null -ne $searchRoot) {
+  $roots += $searchRoot
+}
+$roots += [System.Windows.Automation.AutomationElement]::RootElement
+
+$best = $null
+$bestRect = $null
+$bestScore = [int]::MinValue
+
+foreach ($root in $roots) {
+  if ($null -eq $root) {
+    continue
+  }
+
+  $all = $root.FindAll(
+    [System.Windows.Automation.TreeScope]::Subtree,
+    [System.Windows.Automation.Condition]::TrueCondition
+  )
+
+  foreach ($candidate in $all) {
+    try {
+      $name = $candidate.Current.Name
+      if ([string]::IsNullOrWhiteSpace($name)) {
+        continue
+      }
+
+      if ($candidate.Current.IsOffscreen) {
+        continue
+      }
+
+      $rect = $candidate.Current.BoundingRectangle
+      if ($rect.Width -le 1 -or $rect.Height -le 1) {
+        continue
+      }
+
+      $normalizedName = $name.ToLowerInvariant()
+      if ($normalizedName.IndexOf($needle) -lt 0 -and $needle.IndexOf($normalizedName) -lt 0) {
+        continue
+      }
+
+      $score = 0
+      if ($normalizedName -eq $needle) {
+        $score += 1000
+      }
+      $score += [Math]::Max(0, 250 - [Math]::Abs($normalizedName.Length - $needle.Length))
+
+      $controlType = $candidate.Current.LocalizedControlType
+      if ($controlType -match 'button|menu item|tab item|hyperlink|list item') {
+        $score += 100
+      }
+
+      if ($score -gt $bestScore) {
+        $bestScore = $score
+        $best = $candidate
+        $bestRect = $rect
+      }
+    } catch {
+      continue
+    }
+  }
+
+  if ($null -ne $best) {
+    break
+  }
+}
+
+if ($null -eq $best -or $null -eq $bestRect) {
+  [PSCustomObject]@{ found = $false } | ConvertTo-Json -Compress
+  return
+}
+
+[PSCustomObject]@{
+  found = $true
+  name = $best.Current.Name
+  controlType = $best.Current.LocalizedControlType
+  left = [Math]::Round($bestRect.Left)
+  top = [Math]::Round($bestRect.Top)
+  width = [Math]::Round($bestRect.Width)
+  height = [Math]::Round($bestRect.Height)
+} | ConvertTo-Json -Compress
+"#;
+
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct UiAutomationLookupResult {
+        found: bool,
+        name: Option<String>,
+        control_type: Option<String>,
+        left: Option<i32>,
+        top: Option<i32>,
+        width: Option<i32>,
+        height: Option<i32>,
+    }
 
     fn send_inputs(inputs: &[INPUT]) -> Result<(), String> {
         let sent = unsafe {
@@ -404,6 +644,70 @@ mod windows_input {
         Ok(screens)
     }
 
+    fn move_cursor_absolute(pixel_x: i32, pixel_y: i32) -> Result<(), String> {
+        let moved = unsafe { SetCursorPos(pixel_x, pixel_y) };
+
+        if moved == 0 {
+            return Err("Windows recusou mover o cursor.".to_string());
+        }
+
+        Ok(())
+    }
+
+    fn click_current_cursor(button: &str) -> Result<(), String> {
+        let (down, up) = match button {
+            "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            _ => return Err(format!("Botao de mouse nao permitido: {button}")),
+        };
+
+        send_inputs(&[mouse_input(0, 0, down), mouse_input(0, 0, up)])
+    }
+
+    pub(crate) fn parse_ui_automation_lookup_result(
+        output: &[u8],
+    ) -> Result<Option<UiAutomationLookupResult>, String> {
+        let text = String::from_utf8_lossy(output).trim().to_string();
+        if text.is_empty() {
+            return Ok(None);
+        }
+
+        let parsed: UiAutomationLookupResult =
+            serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar UI Automation: {error}"))?;
+
+        if parsed.found {
+            Ok(Some(parsed))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn run_ui_automation_lookup(target: &str) -> Result<Option<UiAutomationLookupResult>, String> {
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                UI_AUTOMATION_LOOKUP_SCRIPT,
+            ])
+            .env("ALICE_UI_TARGET", target)
+            .output()
+            .map_err(|error| format!("Falha ao executar UI Automation via PowerShell: {error}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                "UI Automation falhou ao procurar o alvo acessivel.".to_string()
+            } else {
+                format!("UI Automation falhou ao procurar o alvo acessivel: {stderr}")
+            });
+        }
+
+        parse_ui_automation_lookup_result(&output.stdout)
+    }
+
     pub fn move_mouse(
         x: f64,
         y: f64,
@@ -414,11 +718,7 @@ mod windows_input {
         let screen = choose_target_screen(&screens, capture_width, capture_height)
             .ok_or_else(|| "Nao encontrei um monitor compativel para mover o mouse.".to_string())?;
         let (pixel_x, pixel_y) = normalized_point_to_screen_pixel(x, y, screen)?;
-        let moved = unsafe { SetCursorPos(pixel_x, pixel_y) };
-
-        if moved == 0 {
-            return Err("Windows recusou mover o cursor.".to_string());
-        }
+        move_cursor_absolute(pixel_x, pixel_y)?;
 
         Ok(format!(
             "Mouse movido para {pixel_x},{pixel_y} no monitor {}x{} em {},{}.",
@@ -437,14 +737,44 @@ mod windows_input {
             move_mouse(x, y, capture_width, capture_height)?;
         }
 
-        let (down, up) = match button {
-            "left" => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
-            "right" => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
-            _ => return Err(format!("Botao de mouse nao permitido: {button}")),
-        };
-
-        send_inputs(&[mouse_input(0, 0, down), mouse_input(0, 0, up)])?;
+        click_current_cursor(button)?;
         Ok("Clique executado.".to_string())
+    }
+
+    pub fn click_target(button: &str, target: &str) -> Result<String, String> {
+        let lookup = run_ui_automation_lookup(target)?
+            .ok_or_else(|| format!("Nenhum elemento acessivel corresponde a '{target}'."))?;
+
+        let left = lookup
+            .left
+            .ok_or_else(|| "UI Automation nao retornou a coordenada esquerda.".to_string())?;
+        let top = lookup
+            .top
+            .ok_or_else(|| "UI Automation nao retornou a coordenada superior.".to_string())?;
+        let width = lookup
+            .width
+            .ok_or_else(|| "UI Automation nao retornou a largura do alvo.".to_string())?;
+        let height = lookup
+            .height
+            .ok_or_else(|| "UI Automation nao retornou a altura do alvo.".to_string())?;
+
+        if width <= 1 || height <= 1 {
+            return Err("UI Automation retornou um retangulo invalido para o alvo.".to_string());
+        }
+
+        let pixel_x = left + (width / 2);
+        let pixel_y = top + (height / 2);
+        move_cursor_absolute(pixel_x, pixel_y)?;
+        click_current_cursor(button)?;
+
+        let target_name = lookup.name.unwrap_or_else(|| target.to_string());
+        let control_type = lookup
+            .control_type
+            .unwrap_or_else(|| "controle".to_string());
+
+        Ok(format!(
+            "Clique acessivel executado em '{target_name}' ({control_type}) em {pixel_x},{pixel_y}."
+        ))
     }
 
     pub fn type_text(text: &str) -> Result<String, String> {
@@ -512,6 +842,7 @@ mod windows_input {
                 capture_width,
                 capture_height,
             } => click_mouse(button, *x, *y, *capture_width, *capture_height),
+            DesktopAction::ClickTarget { target, button } => click_target(button, target),
             DesktopAction::TypeText { text } => type_text(text),
             DesktopAction::PressHotkey { hotkey } => press_hotkey(hotkey),
             _ => Err("Acao de entrada invalida.".to_string()),
@@ -534,6 +865,7 @@ fn perform_desktop_action(action: &DesktopAction) -> Result<String, String> {
         DesktopAction::OpenFolder { folder } => open_folder(folder),
         DesktopAction::MouseMove { .. }
         | DesktopAction::MouseClick { .. }
+        | DesktopAction::ClickTarget { .. }
         | DesktopAction::TypeText { .. }
         | DesktopAction::PressHotkey { .. } => windows_input::execute_input_action(action),
     }
@@ -544,6 +876,24 @@ fn create_gemini_live_url() -> Result<GeminiLiveAccess, String> {
     Ok(GeminiLiveAccess {
         url: build_gemini_live_url(&gemini_api_key_from_env()?),
     })
+}
+
+#[tauri::command]
+fn load_alice_memory_json(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    read_memory_json(&resolve_alice_memory_path(&app_data_dir))
+}
+
+#[tauri::command]
+fn save_alice_memory_json(app: tauri::AppHandle, json: String) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    write_memory_json_atomic(&resolve_alice_memory_path(&app_data_dir), &json)
 }
 
 #[tauri::command]
@@ -569,6 +919,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             create_gemini_live_url,
+            load_alice_memory_json,
+            save_alice_memory_json,
             execute_desktop_action
         ])
         .run(tauri::generate_context!())
@@ -618,9 +970,24 @@ mod tests {
     }
 
     #[test]
-    fn validation_rejects_text_above_limit() {
+    fn validation_rejects_invalid_mouse_button() {
+        assert!(validate_mouse_button("middle").is_err());
+    }
+
+    #[test]
+    fn validation_accepts_large_type_text_payload() {
         let action = DesktopAction::TypeText {
-            text: "a".repeat(MAX_TEXT_CHARS + 1),
+            text: "a".repeat(20_000),
+        };
+
+        assert!(validate_desktop_action(&action).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_empty_click_target() {
+        let action = DesktopAction::ClickTarget {
+            target: "   ".to_string(),
+            button: "left".to_string(),
         };
 
         assert!(validate_desktop_action(&action).is_err());
@@ -748,6 +1115,10 @@ mod tests {
                 capture_width: None,
                 capture_height: None,
             },
+            DesktopAction::ClickTarget {
+                target: "Salvar".to_string(),
+                button: "left".to_string(),
+            },
             DesktopAction::TypeText {
                 text: "ola".to_string(),
             },
@@ -759,5 +1130,80 @@ mod tests {
         for action in actions {
             assert!(validate_desktop_action(&action).is_ok());
         }
+    }
+
+    #[test]
+    fn validate_memory_json_payload_rejects_empty_payload() {
+        assert!(validate_memory_json_payload("   ").is_err());
+    }
+
+    #[test]
+    fn resolve_alice_memory_path_appends_expected_file_name() {
+        let path = resolve_alice_memory_path(std::path::Path::new("C:\\temp\\alice"));
+
+        assert_eq!(
+            path,
+            PathBuf::from("C:\\temp\\alice").join(ALICE_MEMORY_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn read_memory_json_returns_none_for_missing_file() {
+        let base_dir =
+            std::env::temp_dir().join(format!("alice-memory-test-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base_dir);
+        let memory_path = resolve_alice_memory_path(&base_dir);
+
+        assert_eq!(read_memory_json(&memory_path), Ok(None));
+    }
+
+    #[test]
+    fn write_memory_json_atomic_creates_and_replaces_file_contents() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "alice-memory-test-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let memory_path = resolve_alice_memory_path(&base_dir);
+
+        write_memory_json_atomic(&memory_path, "{\"ok\":true}").unwrap();
+        assert_eq!(
+            read_memory_json(&memory_path),
+            Ok(Some("{\"ok\":true}".to_string()))
+        );
+
+        write_memory_json_atomic(&memory_path, "{\"ok\":false}").unwrap();
+        assert_eq!(
+            read_memory_json(&memory_path),
+            Ok(Some("{\"ok\":false}".to_string()))
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn ui_automation_script_mentions_the_target_environment_variable() {
+        assert!(windows_input::UI_AUTOMATION_LOOKUP_SCRIPT.contains("ALICE_UI_TARGET"));
+    }
+
+    #[test]
+    fn parse_ui_automation_lookup_result_handles_found_payload() {
+        let parsed = windows_input::parse_ui_automation_lookup_result(
+            br#"{"found":true,"name":"Salvar","controlType":"button","left":100,"top":200,"width":80,"height":24}"#,
+        )
+        .unwrap();
+
+        assert!(parsed.is_some());
+    }
+
+    #[test]
+    fn parse_ui_automation_lookup_result_handles_not_found_payload() {
+        let parsed =
+            windows_input::parse_ui_automation_lookup_result(br#"{"found":false}"#).unwrap();
+
+        assert!(parsed.is_none());
     }
 }

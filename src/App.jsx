@@ -1,24 +1,35 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useEffect, useRef, useState } from 'react';
-import { createAliceLiveSetup } from './alice';
+import { useEffect, useReducer, useRef } from 'react';
+import { ALICE_LIVE_MODEL, createAliceLiveSetup } from './alice';
+import {
+  buildMemoryPrefixTurns,
+  createEmptyAliceMemory,
+  extractImportantFacts,
+  loadAliceMemory,
+  mergeImportantFacts,
+  saveAliceMemory,
+} from './aliceMemory';
+import {
+  createInitialAppUiState,
+  readyCaption,
+  reduceAppUiState,
+  statusCopy,
+} from './appUiState';
 import {
   appendTrustedUtterance,
   attachCaptureGeometry,
   authorizeDesktopAction,
   getRecentTrustedUtterance,
 } from './desktopCommandAuth';
-import { GeminiLiveSession } from './geminiLive';
-import { createLiveDiagnostics, updateLiveDiagnostics } from './liveDiagnostics';
+import { buildOcrClickAction, formatOcrFallbackMessage } from './clickTargetResolution';
+import { GeminiLiveSession, LIVE_CLOSE_REASONS } from './geminiLive';
 import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio';
+import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
+import { buildSessionRehydrationTurns } from './liveSessionRehydration';
+import { createFunctionResponseEnvelope, LiveSessionTransport } from './liveSessionTransport';
+import { locateTextInCanvas } from './ocrTextLocator';
+import { captureVideoFrameToCanvas } from './screenFrameCapture';
 import './App.css';
-
-const statusCopy = {
-  idle: 'pronta',
-  starting: 'iniciando',
-  configuring: 'conectando',
-  connected: 'ao vivo',
-  error: 'erro',
-};
 
 const stopStream = (stream) => {
   stream?.getTracks().forEach((track) => track.stop());
@@ -84,6 +95,7 @@ const readyCheckPrompt =
 
 const TOOL_TRANSCRIPT_WAIT_MS = 5000;
 const TOOL_TRANSCRIPT_POLL_MS = 100;
+const ALICE_MEMORY_SAVE_DELAY_MS = 750;
 
 const wait = (durationMs) =>
   new Promise((resolve) => {
@@ -152,49 +164,117 @@ function App() {
   const screenStreamRef = useRef(null);
   const voiceStreamRef = useRef(null);
   const liveSessionRef = useRef(null);
+  const liveOrchestratorRef = useRef(null);
+  const liveTransportRef = useRef(new LiveSessionTransport());
+  const aliceMemoryRef = useRef(createEmptyAliceMemory());
+  const memorySaveTimerRef = useRef(null);
   const microphoneCleanupRef = useRef(null);
   const screenCleanupRef = useRef(null);
   const outputPlayerRef = useRef(createPcmOutputPlayer());
+  const ocrCanvasRef = useRef(null);
   const trustedUtteranceRef = useRef(null);
+  const outputTranscriptRef = useRef('');
+  const lastCommandRef = useRef(null);
   const toolQueueRef = useRef(Promise.resolve());
 
-  const [status, setStatus] = useState('idle');
-  const [caption, setCaption] = useState('A Alice fica pronta para ouvir sua voz e observar a tela compartilhada.');
-  const [inputCaption, setInputCaption] = useState('');
-  const [error, setError] = useState('');
-  const [diagnostics, setDiagnostics] = useState(createLiveDiagnostics);
-  const [lastCommand, setLastCommand] = useState(null);
+  const [uiState, dispatchUi] = useReducer(reduceAppUiState, undefined, createInitialAppUiState);
+  const { status, caption, inputCaption, error, diagnostics, lastCommand, sessionNotice } = uiState;
 
   const noteDiagnostic = (event) => {
-    setDiagnostics((current) => updateLiveDiagnostics(current, event));
+    dispatchUi({ type: 'diagnostic-event', event });
   };
 
-  const stopLiveSession = () => {
+  const clearAliceMemorySaveTimer = () => {
+    if (memorySaveTimerRef.current) {
+      window.clearTimeout(memorySaveTimerRef.current);
+      memorySaveTimerRef.current = null;
+    }
+  };
+
+  const flushAliceMemory = async () => {
+    clearAliceMemorySaveTimer();
+
+    if (!window.__TAURI_INTERNALS__) {
+      return aliceMemoryRef.current;
+    }
+
+    aliceMemoryRef.current = await saveAliceMemory(aliceMemoryRef.current);
+    return aliceMemoryRef.current;
+  };
+
+  const scheduleAliceMemorySave = () => {
+    if (!window.__TAURI_INTERNALS__) {
+      return;
+    }
+
+    clearAliceMemorySaveTimer();
+    memorySaveTimerRef.current = window.setTimeout(() => {
+      void flushAliceMemory().catch(() => {
+        // Memory persistence should not break the live session flow.
+      });
+    }, ALICE_MEMORY_SAVE_DELAY_MS);
+  };
+
+  const rememberAliceContext = ({
+    inputTranscript = trustedUtteranceRef.current?.text || '',
+    outputTranscript = outputTranscriptRef.current,
+    lastCommand = lastCommandRef.current,
+  } = {}) => {
+    const extractedFacts = extractImportantFacts({
+      inputTranscript,
+      outputTranscript,
+      lastCommand,
+      sessionModel: ALICE_LIVE_MODEL,
+    });
+
+    aliceMemoryRef.current = mergeImportantFacts(aliceMemoryRef.current, extractedFacts);
+    scheduleAliceMemorySave();
+    return aliceMemoryRef.current;
+  };
+
+  const setCommandState = (commandState) => {
+    lastCommandRef.current = commandState;
+    dispatchUi({ type: 'command-state', commandState });
+  };
+
+  const stopStreamingPipelines = () => {
     microphoneCleanupRef.current?.();
     screenCleanupRef.current?.();
-    liveSessionRef.current?.close();
-    outputPlayerRef.current?.close();
-
-    stopStream(screenStreamRef.current);
-    stopStream(voiceStreamRef.current);
 
     microphoneCleanupRef.current = null;
     screenCleanupRef.current = null;
-    liveSessionRef.current = null;
+  };
+
+  const stopMediaStreams = () => {
+    stopStream(screenStreamRef.current);
+    stopStream(voiceStreamRef.current);
+
     screenStreamRef.current = null;
     voiceStreamRef.current = null;
-    outputPlayerRef.current = createPcmOutputPlayer();
+  };
+
+  const resetRuntimeRefs = () => {
+    liveSessionRef.current = null;
+    liveOrchestratorRef.current = null;
+    liveTransportRef.current.clear();
+    clearAliceMemorySaveTimer();
     trustedUtteranceRef.current = null;
+    outputTranscriptRef.current = '';
+    lastCommandRef.current = null;
     toolQueueRef.current = Promise.resolve();
+  };
+
+  const releaseLiveResources = () => {
+    stopStreamingPipelines();
+    stopMediaStreams();
+    outputPlayerRef.current?.close();
+    outputPlayerRef.current = createPcmOutputPlayer();
+
+    resetRuntimeRefs();
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-
-    setInputCaption('');
-    setLastCommand(null);
-    setDiagnostics(createLiveDiagnostics());
-    setStatus('idle');
   };
 
   const waitForRecentTrustedUtterance = async () => {
@@ -205,15 +285,11 @@ function App() {
     }
   };
 
-  const sendToolResponse = (functionCall, response) => {
-    liveSessionRef.current?.sendToolResponse([
-      {
-        id: functionCall.id,
-        name: functionCall.name,
-        response,
-      },
-    ]);
-  };
+  const sendToolResponse = (functionCall, response, generation) =>
+    liveTransportRef.current.sendToolResponse({
+      generation,
+      functionResponse: createFunctionResponseEnvelope(functionCall, response),
+    });
 
   const getScreenCaptureGeometry = () => {
     const settings = screenStreamRef.current?.getVideoTracks()[0]?.getSettings?.() || {};
@@ -223,23 +299,204 @@ function App() {
     };
   };
 
-  const executeToolCall = async (functionCall) => {
+  const getOcrCanvas = () => {
+    if (!ocrCanvasRef.current) {
+      ocrCanvasRef.current = document.createElement('canvas');
+    }
+
+    return ocrCanvasRef.current;
+  };
+
+  const executeClickTargetAction = async (action) => {
+    try {
+      const result = await invoke('execute_desktop_action', { action });
+      return {
+        message: result.message || 'Clique acessivel executado.',
+        resolvedAction: action,
+      };
+    } catch (accessibilityError) {
+      const ocrCanvas = getOcrCanvas();
+      const capturedFrame = captureVideoFrameToCanvas(videoRef.current, ocrCanvas);
+      if (!capturedFrame) {
+        throw accessibilityError;
+      }
+
+      const locatedText = await locateTextInCanvas(capturedFrame.canvas, action.target);
+      if (!locatedText) {
+        const accessibilityMessage = accessibilityError.message || String(accessibilityError);
+        throw new Error(
+          `${accessibilityMessage} OCR nao encontrou '${action.target}' na tela atual.`,
+        );
+      }
+
+      const ocrClickAction = buildOcrClickAction({
+        action,
+        locatedText,
+        geometry: getScreenCaptureGeometry(),
+        attachCaptureGeometry,
+      });
+      const clickResult = await invoke('execute_desktop_action', { action: ocrClickAction });
+
+      return {
+        message: formatOcrFallbackMessage({
+          baseMessage: clickResult.message || 'Clique executado.',
+          target: action.target,
+          locatedText,
+        }),
+        resolvedAction: ocrClickAction,
+      };
+    }
+  };
+
+  const restartStreamingPipelines = (generation) => {
+    stopStreamingPipelines();
+
+    if (voiceStreamRef.current) {
+      microphoneCleanupRef.current = startMicrophoneStreaming(voiceStreamRef.current, (chunk, level) => {
+        const sent = liveTransportRef.current.sendRealtime({
+          generation,
+          send: (activeSession) => activeSession.sendAudio(chunk),
+        });
+
+        if (sent) {
+          noteDiagnostic({ type: 'audio-sent', level });
+        }
+      });
+    }
+
+    if (videoRef.current && canvasRef.current) {
+      screenCleanupRef.current = startScreenFrameStreaming(videoRef.current, canvasRef.current, (frame) => {
+        const sent = liveTransportRef.current.sendRealtime({
+          generation,
+          send: (activeSession) => activeSession.sendVideo(frame),
+        });
+
+        if (sent) {
+          noteDiagnostic({ type: 'video-sent' });
+        }
+      });
+    }
+  };
+
+  const buildLiveMemoryPrefixTurns = () => [
+    ...buildMemoryPrefixTurns(aliceMemoryRef.current),
+    ...buildSessionRehydrationTurns({
+      trustedUtterance: trustedUtteranceRef.current,
+      outputTranscript: outputTranscriptRef.current,
+      lastCommand: lastCommandRef.current,
+    }),
+  ];
+
+  const createLiveOrchestrator = (url) =>
+    new LiveSessionOrchestrator({
+      buildSetup: ({ resumptionHandle = '', memoryPrefixTurns = [] }) =>
+        createAliceLiveSetup({ resumptionHandle, memoryPrefixTurns }),
+      createSession: ({
+        setup,
+        onEvent,
+        onStatus,
+        onGoAway,
+        onSessionResumptionUpdate,
+        onCloseReason,
+        onError,
+      }) =>
+        new GeminiLiveSession({
+          url,
+          setup,
+          onEvent,
+          onStatus,
+          onGoAway,
+          onSessionResumptionUpdate,
+          onCloseReason,
+          onError,
+        }),
+      getMemoryPrefixTurns: async () => buildLiveMemoryPrefixTurns(),
+      onEvent: handleLiveEvent,
+      onStatus: (nextStatus) => {
+        if (nextStatus !== 'idle') {
+          dispatchUi({ type: 'session-live-status', status: nextStatus });
+        }
+
+        if (nextStatus === 'error') {
+          stopStreamingPipelines();
+          liveSessionRef.current = null;
+        }
+      },
+      onGoAway: (goAway) => {
+        noteDiagnostic({ type: 'go-away', timeLeft: goAway?.timeLeft || '' });
+      },
+      onError: (sessionError) => {
+        noteDiagnostic({
+          type: 'error',
+          message: sessionError.message || 'Nao foi possivel manter a sessao Live.',
+        });
+        dispatchUi({
+          type: 'session-error',
+          error: sessionError.message || 'Nao foi possivel manter a sessao Live.',
+        });
+      },
+      onPrepareReconnect: async ({ mode }) => {
+        liveTransportRef.current.beginReconnect();
+        stopStreamingPipelines();
+        noteDiagnostic({ type: 'reconnecting' });
+        dispatchUi({ type: 'session-reconnecting', mode });
+      },
+      onSessionReady: async ({ session, mode, generation, resumed, rehydrated }) => {
+        liveTransportRef.current.activateSession({
+          session,
+          generation,
+          replayPendingToolResponses: resumed,
+          preserveAcceptedToolResponseGenerations: resumed,
+        });
+        liveSessionRef.current = session;
+        restartStreamingPipelines(generation);
+        noteDiagnostic({ type: 'connected' });
+        if (resumed) {
+          noteDiagnostic({ type: 'session-resumed' });
+        } else if (rehydrated) {
+          noteDiagnostic({ type: 'session-rehydrated' });
+        }
+        dispatchUi({
+          type: 'session-ready',
+          mode,
+          resumed,
+          rehydrated,
+          caption: readyCaption,
+        });
+
+        if (mode === 'fresh' && liveTransportRef.current.canSendToLive(generation)) {
+          session.sendText(readyCheckPrompt);
+        }
+      },
+      onCloseReason: (reason) => {
+        if (reason !== LIVE_CLOSE_REASONS.manualStop) {
+          noteDiagnostic({ type: 'close-reason', reason });
+        }
+      },
+      onSessionResumptionUpdate: () => {
+        noteDiagnostic({ type: 'resumption-updated' });
+      },
+    });
+
+  const executeToolCall = async (functionCall, generation) => {
     await waitForRecentTrustedUtterance();
 
     const authorization = authorizeDesktopAction(functionCall, trustedUtteranceRef.current);
     const commandName = functionCall.name || 'acao_local';
 
     if (!authorization.authorized) {
-      setLastCommand({
+      const nextCommandState = {
         name: commandName,
         status: 'negado',
         message: authorization.reason,
-      });
-      sendToolResponse(functionCall, { ok: false, message: authorization.reason });
+      };
+      setCommandState(nextCommandState);
+      rememberAliceContext({ lastCommand: nextCommandState });
+      sendToolResponse(functionCall, { ok: false, message: authorization.reason }, generation);
       return;
     }
 
-    setLastCommand({
+    setCommandState({
       name: commandName,
       status: 'executando',
       message: authorization.reason,
@@ -247,35 +504,49 @@ function App() {
 
     try {
       const action = attachCaptureGeometry(authorization.action, getScreenCaptureGeometry());
-      const result = await invoke('execute_desktop_action', { action });
-      const message = result.message || 'Acao local executada.';
+      const execution =
+        action.type === 'click_target'
+          ? await executeClickTargetAction(action)
+          : {
+              resolvedAction: action,
+              message: (await invoke('execute_desktop_action', { action })).message || 'Acao local executada.',
+            };
+      const message = execution.message || 'Acao local executada.';
 
-      setLastCommand({
+      const nextCommandState = {
         name: commandName,
         status: 'executado',
         message,
-      });
-      sendToolResponse(functionCall, { ok: true, message, action: action.type });
+      };
+      setCommandState(nextCommandState);
+      rememberAliceContext({ lastCommand: nextCommandState });
+      sendToolResponse(
+        functionCall,
+        { ok: true, message, action: execution.resolvedAction.type },
+        generation,
+      );
     } catch (actionError) {
       const message = actionError.message || String(actionError);
 
-      setLastCommand({
+      const nextCommandState = {
         name: commandName,
         status: 'erro',
         message,
-      });
-      sendToolResponse(functionCall, { ok: false, message });
+      };
+      setCommandState(nextCommandState);
+      rememberAliceContext({ lastCommand: nextCommandState });
+      sendToolResponse(functionCall, { ok: false, message }, generation);
     }
   };
 
-  const enqueueToolCalls = (toolCalls) => {
+  const enqueueToolCalls = (toolCalls, generation) => {
     toolQueueRef.current = toolCalls.reduce(
-      (queue, functionCall) => queue.then(() => executeToolCall(functionCall)),
+      (queue, functionCall) => queue.then(() => executeToolCall(functionCall, generation)),
       toolQueueRef.current,
     );
 
     toolQueueRef.current = toolQueueRef.current.catch((toolError) => {
-      setLastCommand({
+      setCommandState({
         name: 'acao_local',
         status: 'erro',
         message: toolError.message || String(toolError),
@@ -283,7 +554,7 @@ function App() {
     });
   };
 
-  const handleLiveEvent = (event) => {
+  const handleLiveEvent = (event, _message, _session, generation) => {
     noteDiagnostic({
       type: 'server-message',
       outputAudioChunksReceived: event.audioChunks.length,
@@ -299,35 +570,46 @@ function App() {
 
     if (event.inputTranscript) {
       trustedUtteranceRef.current = appendTrustedUtterance(trustedUtteranceRef.current, event.inputTranscript);
-      setInputCaption(trustedUtteranceRef.current.text);
+      dispatchUi({ type: 'session-input-caption', inputCaption: trustedUtteranceRef.current.text });
     }
 
     if (event.outputTranscript) {
-      setCaption(event.outputTranscript);
-    }
-
-    if (event.goAway) {
-      setCaption('A sessao da Gemini esta perto de encerrar. Pare e inicie novamente para renovar.');
+      outputTranscriptRef.current = event.outputTranscript;
+      dispatchUi({ type: 'session-caption', caption: event.outputTranscript });
+      rememberAliceContext({ outputTranscript: event.outputTranscript });
     }
 
     if (event.toolCallCancellation) {
-      setLastCommand({
+      liveTransportRef.current.cancelPendingToolResponses(event.toolCallCancellation.ids || []);
+      const nextCommandState = {
         name: 'acao_local',
         status: 'cancelado',
         message: 'A Gemini cancelou uma chamada de ferramenta pendente.',
-      });
+      };
+      setCommandState(nextCommandState);
+      rememberAliceContext({ lastCommand: nextCommandState });
     }
 
     if (event.toolCalls.length > 0) {
-      enqueueToolCalls(event.toolCalls);
+      enqueueToolCalls(event.toolCalls, generation);
     }
   };
 
+  const stopLiveSession = async () => {
+    await liveOrchestratorRef.current?.stopLiveSession();
+    await flushAliceMemory().catch(() => {
+      // Ignore persistence errors during shutdown to keep stop responsive.
+    });
+    releaseLiveResources();
+    dispatchUi({ type: 'session-stopped' });
+  };
+
   const startLiveSession = async () => {
-    setError('');
-    setStatus('starting');
-    setCaption('Escolha a tela ou janela que a Alice deve acompanhar.');
-    setDiagnostics(createLiveDiagnostics());
+    if (liveOrchestratorRef.current || screenStreamRef.current || voiceStreamRef.current) {
+      await stopLiveSession();
+    }
+
+    dispatchUi({ type: 'session-starting' });
     noteDiagnostic({ type: 'connecting' });
 
     try {
@@ -362,50 +644,70 @@ function App() {
       screenStream.getVideoTracks()[0]?.addEventListener('ended', stopLiveSession, { once: true });
 
       const liveAccess = await invoke('create_gemini_live_url');
-      const liveSession = new GeminiLiveSession({
-        url: liveAccess.url,
-        setup: createAliceLiveSetup(),
-        onEvent: handleLiveEvent,
-        onStatus: setStatus,
-      });
+      const liveOrchestrator = createLiveOrchestrator(liveAccess.url);
 
-      liveSessionRef.current = liveSession;
-      await liveSession.connect();
-      noteDiagnostic({ type: 'connected' });
-      liveSession.sendText(readyCheckPrompt);
-
-      microphoneCleanupRef.current = startMicrophoneStreaming(voiceStream, (chunk, level) => {
-        noteDiagnostic({ type: 'audio-sent', level });
-        liveSession.sendAudio(chunk);
-      });
-      screenCleanupRef.current = startScreenFrameStreaming(videoRef.current, canvasRef.current, (frame) => {
-        noteDiagnostic({ type: 'video-sent' });
-        liveSession.sendVideo(frame);
-      });
-
-      setCaption('Pode falar. A Alice esta ouvindo e vendo sua tela compartilhada.');
+      liveTransportRef.current.clear();
+      liveOrchestratorRef.current = liveOrchestrator;
+      await liveOrchestrator.startLiveSession();
     } catch (sessionError) {
-      stopLiveSession();
-      setStatus('error');
+      await liveOrchestratorRef.current?.stopLiveSession();
+      releaseLiveResources();
+      setCommandState(null);
       noteDiagnostic({ type: 'error' });
-      setError(sessionError.message || 'Nao foi possivel iniciar a sessao Live.');
-      setCaption('Nao consegui abrir a sessao ainda.');
+      dispatchUi({
+        type: 'session-error',
+        error: sessionError.message || 'Nao foi possivel iniciar a sessao Live.',
+        caption: 'Nao consegui abrir a sessao ainda.',
+      });
     }
   };
 
   const toggleLiveSession = () => {
-    if (status === 'connected' || status === 'configuring' || status === 'starting') {
-      stopLiveSession();
+    if (status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting') {
+      void stopLiveSession();
       return;
     }
 
-    startLiveSession();
+    void startLiveSession();
   };
 
-  useEffect(() => () => stopLiveSession(), []);
+  useEffect(() => {
+    let disposed = false;
+
+    if (window.__TAURI_INTERNALS__) {
+      void loadAliceMemory().then((memory) => {
+        if (!disposed) {
+          aliceMemoryRef.current = memory;
+        }
+      });
+    }
+
+    return () => {
+      disposed = true;
+      if (memorySaveTimerRef.current) {
+        window.clearTimeout(memorySaveTimerRef.current);
+        memorySaveTimerRef.current = null;
+      }
+      if (window.__TAURI_INTERNALS__) {
+        void saveAliceMemory(aliceMemoryRef.current)
+          .then((memory) => {
+            aliceMemoryRef.current = memory;
+          })
+          .catch(() => {
+            // Ignore persistence errors during unmount.
+          });
+      }
+      void liveOrchestratorRef.current?.stopLiveSession();
+      microphoneCleanupRef.current?.();
+      screenCleanupRef.current?.();
+      outputPlayerRef.current?.close();
+      stopStream(screenStreamRef.current);
+      stopStream(voiceStreamRef.current);
+    };
+  }, []);
 
   const isBusy = status === 'starting' || status === 'configuring';
-  const isLive = status === 'connected';
+  const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';
 
   return (
     <main className={`app-shell app-shell--${status}`}>
@@ -421,6 +723,7 @@ function App() {
           <p className="live-name">Alice</p>
           <h1>Voz e tela ao vivo</h1>
           <p>{caption}</p>
+          {sessionNotice ? <small className="session-note">{sessionNotice}</small> : null}
           {inputCaption ? <small>Voce: {inputCaption}</small> : null}
           {lastCommand ? (
             <small className={`command-text command-text--${lastCommand.status}`}>
@@ -440,6 +743,10 @@ function App() {
         <span>Frames: {diagnostics.videoFramesSent}</span>
         <span>Eventos: {diagnostics.serverMessagesReceived}</span>
         <span>Voz Alice: {diagnostics.outputAudioChunksReceived}</span>
+        <span>Renovacoes: {diagnostics.reconnectAttempts}</span>
+        <span>Retomadas: {diagnostics.successfulResumptions}</span>
+        <span>Fallbacks: {diagnostics.rehydratedReconnects}</span>
+        <span>Ult. fechamento: {diagnostics.lastCloseReason}</span>
         <span className="mic-meter" aria-label="Nivel do microfone">
           <i style={{ transform: `scaleX(${Math.min(1, diagnostics.microphoneLevel * 8)})` }} />
         </span>

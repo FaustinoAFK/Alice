@@ -3,6 +3,7 @@ import {
   appendTrustedUtterance,
   attachCaptureGeometry,
   authorizeDesktopAction,
+  doesUtteranceMatchTargetText,
   recordTrustedUtterance,
 } from './desktopCommandAuth';
 
@@ -156,6 +157,40 @@ describe('authorizeDesktopAction', () => {
     );
 
     expect(result.authorized).toBe(true);
+  });
+
+  it('authorizes click_target when the user names the target text in the utterance', () => {
+    const result = authorizeDesktopAction(
+      { id: 'call-1', name: 'click_target', args: { target: 'Salvar', button: 'left' } },
+      recordTrustedUtterance('clica no salvar', now),
+      now,
+    );
+
+    expect(result).toMatchObject({
+      authorized: true,
+      action: { type: 'click_target', target: 'Salvar', button: 'left' },
+    });
+  });
+
+  it('rejects click_target when the spoken target does not match the requested one', () => {
+    const result = authorizeDesktopAction(
+      { id: 'call-1', name: 'click_target', args: { target: 'Cancelar', button: 'left' } },
+      recordTrustedUtterance('clica no salvar', now),
+      now,
+    );
+
+    expect(result.authorized).toBe(false);
+    expect(result.reason).toContain('compativel');
+  });
+});
+
+describe('doesUtteranceMatchTargetText', () => {
+  it('matches a multi-word target when all meaningful tokens appear in the utterance', () => {
+    expect(doesUtteranceMatchTargetText('abre configuracoes da conta', 'Configuracoes da Conta')).toBe(true);
+  });
+
+  it('rejects a target when the utterance does not mention the relevant words', () => {
+    expect(doesUtteranceMatchTargetText('abre o painel principal', 'Configuracoes da Conta')).toBe(false);
   });
 });
 
