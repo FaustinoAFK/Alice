@@ -11,6 +11,14 @@ describe('createAliceLiveSetup', () => {
     expect(setup.systemInstruction.parts[0].text).toBe(ALICE_SYSTEM_INSTRUCTION);
     expect(setup.inputAudioTranscription).toEqual({});
     expect(setup.outputAudioTranscription).toEqual({});
+    expect(setup.tools[0].functionDeclarations.map((tool) => tool.name)).toEqual([
+      'open_app',
+      'open_folder',
+      'mouse_move',
+      'mouse_click',
+      'type_text',
+      'press_hotkey',
+    ]);
     expect(setup).not.toHaveProperty('proactivity');
   });
 });
@@ -21,6 +29,6 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('personalidade propria');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('presenca forte');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce tem ponto de vista.');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce nao executa comandos');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce pode pedir ferramentas locais');
   });
 });

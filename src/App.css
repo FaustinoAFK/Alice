@@ -113,6 +113,19 @@
   color: #fecaca;
 }
 
+.live-copy .command-text {
+  color: #bfdbfe;
+}
+
+.live-copy .command-text--negado,
+.live-copy .command-text--erro {
+  color: #fecaca;
+}
+
+.live-copy .command-text--executado {
+  color: #bbf7d0;
+}
+
 .signal-panel {
   position: fixed;
   top: 18px;

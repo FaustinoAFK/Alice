@@ -5,6 +5,7 @@ import {
   buildRealtimeAudioMessage,
   buildRealtimeVideoMessage,
   buildSetupMessage,
+  buildToolResponseMessage,
   extractLiveMessage,
   getLiveErrorMessage,
   parseLiveMessageData,
@@ -84,6 +85,44 @@ describe('extractLiveMessage', () => {
     expect(event.inputTranscript).toBe('minha fala');
     expect(event.outputTranscript).toBe('fala da alice');
     expect(event.audioChunks).toEqual(['audio-base64']);
+  });
+
+  it('extracts tool calls and tool call cancellations', () => {
+    const event = extractLiveMessage({
+      toolCall: {
+        functionCalls: [{ id: 'call-1', name: 'open_app', args: { app: 'notepad' } }],
+      },
+      toolCallCancellation: {
+        ids: ['call-2'],
+      },
+    });
+
+    expect(event.toolCalls).toEqual([{ id: 'call-1', name: 'open_app', args: { app: 'notepad' } }]);
+    expect(event.toolCallCancellation.ids).toEqual(['call-2']);
+  });
+});
+
+describe('buildToolResponseMessage', () => {
+  it('builds a Live API tool response message', () => {
+    expect(
+      buildToolResponseMessage([
+        {
+          id: 'call-1',
+          name: 'open_app',
+          response: { ok: true, message: 'aberto' },
+        },
+      ]),
+    ).toEqual({
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'call-1',
+            name: 'open_app',
+            response: { ok: true, message: 'aberto' },
+          },
+        ],
+      },
+    });
   });
 });
 

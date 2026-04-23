@@ -14,6 +14,12 @@ export const buildClientTextMessage = (text) => ({
   },
 });
 
+export const buildToolResponseMessage = (functionResponses) => ({
+  toolResponse: {
+    functionResponses,
+  },
+});
+
 export const buildRealtimeAudioMessage = (base64Audio, sampleRate = 16000) => ({
   realtimeInput: {
     audio: {
@@ -64,6 +70,8 @@ export const extractLiveMessage = (message) => {
     audioChunks: parts
       .filter((part) => part.inlineData?.data)
       .map((part) => part.inlineData.data),
+    toolCalls: message.toolCall?.functionCalls || [],
+    toolCallCancellation: message.toolCallCancellation || null,
     goAway: message.goAway?.timeLeft || '',
   };
 };
@@ -155,6 +163,10 @@ export class GeminiLiveSession {
 
   sendText(text) {
     this.sendJson(buildClientTextMessage(text));
+  }
+
+  sendToolResponse(functionResponses) {
+    this.sendJson(buildToolResponseMessage(functionResponses));
   }
 
   sendVideo(base64Frame) {

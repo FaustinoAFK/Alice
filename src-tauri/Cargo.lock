@@ -38,6 +38,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-log",
  "urlencoding",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

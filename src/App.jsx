@@ -1,6 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useRef, useState } from 'react';
 import { createAliceLiveSetup } from './alice';
+import {
+  appendTrustedUtterance,
+  attachCaptureGeometry,
+  authorizeDesktopAction,
+  getRecentTrustedUtterance,
+} from './desktopCommandAuth';
 import { GeminiLiveSession } from './geminiLive';
 import { createLiveDiagnostics, updateLiveDiagnostics } from './liveDiagnostics';
 import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio';
@@ -76,6 +82,14 @@ const createPcmOutputPlayer = () => {
 const readyCheckPrompt =
   'Diga em uma frase curta, em portugues do Brasil, que voce esta ouvindo e vendo a tela compartilhada.';
 
+const TOOL_TRANSCRIPT_WAIT_MS = 5000;
+const TOOL_TRANSCRIPT_POLL_MS = 100;
+
+const wait = (durationMs) =>
+  new Promise((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
+
 const startMicrophoneStreaming = (voiceStream, onChunk) => {
   const audioTracks = voiceStream.getAudioTracks();
 
@@ -141,12 +155,15 @@ function App() {
   const microphoneCleanupRef = useRef(null);
   const screenCleanupRef = useRef(null);
   const outputPlayerRef = useRef(createPcmOutputPlayer());
+  const trustedUtteranceRef = useRef(null);
+  const toolQueueRef = useRef(Promise.resolve());
 
   const [status, setStatus] = useState('idle');
   const [caption, setCaption] = useState('A Alice fica pronta para ouvir sua voz e observar a tela compartilhada.');
   const [inputCaption, setInputCaption] = useState('');
   const [error, setError] = useState('');
   const [diagnostics, setDiagnostics] = useState(createLiveDiagnostics);
+  const [lastCommand, setLastCommand] = useState(null);
 
   const noteDiagnostic = (event) => {
     setDiagnostics((current) => updateLiveDiagnostics(current, event));
@@ -167,14 +184,103 @@ function App() {
     screenStreamRef.current = null;
     voiceStreamRef.current = null;
     outputPlayerRef.current = createPcmOutputPlayer();
+    trustedUtteranceRef.current = null;
+    toolQueueRef.current = Promise.resolve();
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
 
     setInputCaption('');
+    setLastCommand(null);
     setDiagnostics(createLiveDiagnostics());
     setStatus('idle');
+  };
+
+  const waitForRecentTrustedUtterance = async () => {
+    const deadline = Date.now() + TOOL_TRANSCRIPT_WAIT_MS;
+
+    while (!getRecentTrustedUtterance(trustedUtteranceRef.current) && Date.now() < deadline) {
+      await wait(TOOL_TRANSCRIPT_POLL_MS);
+    }
+  };
+
+  const sendToolResponse = (functionCall, response) => {
+    liveSessionRef.current?.sendToolResponse([
+      {
+        id: functionCall.id,
+        name: functionCall.name,
+        response,
+      },
+    ]);
+  };
+
+  const getScreenCaptureGeometry = () => {
+    const settings = screenStreamRef.current?.getVideoTracks()[0]?.getSettings?.() || {};
+    return {
+      width: settings.width || videoRef.current?.videoWidth || 0,
+      height: settings.height || videoRef.current?.videoHeight || 0,
+    };
+  };
+
+  const executeToolCall = async (functionCall) => {
+    await waitForRecentTrustedUtterance();
+
+    const authorization = authorizeDesktopAction(functionCall, trustedUtteranceRef.current);
+    const commandName = functionCall.name || 'acao_local';
+
+    if (!authorization.authorized) {
+      setLastCommand({
+        name: commandName,
+        status: 'negado',
+        message: authorization.reason,
+      });
+      sendToolResponse(functionCall, { ok: false, message: authorization.reason });
+      return;
+    }
+
+    setLastCommand({
+      name: commandName,
+      status: 'executando',
+      message: authorization.reason,
+    });
+
+    try {
+      const action = attachCaptureGeometry(authorization.action, getScreenCaptureGeometry());
+      const result = await invoke('execute_desktop_action', { action });
+      const message = result.message || 'Acao local executada.';
+
+      setLastCommand({
+        name: commandName,
+        status: 'executado',
+        message,
+      });
+      sendToolResponse(functionCall, { ok: true, message, action: action.type });
+    } catch (actionError) {
+      const message = actionError.message || String(actionError);
+
+      setLastCommand({
+        name: commandName,
+        status: 'erro',
+        message,
+      });
+      sendToolResponse(functionCall, { ok: false, message });
+    }
+  };
+
+  const enqueueToolCalls = (toolCalls) => {
+    toolQueueRef.current = toolCalls.reduce(
+      (queue, functionCall) => queue.then(() => executeToolCall(functionCall)),
+      toolQueueRef.current,
+    );
+
+    toolQueueRef.current = toolQueueRef.current.catch((toolError) => {
+      setLastCommand({
+        name: 'acao_local',
+        status: 'erro',
+        message: toolError.message || String(toolError),
+      });
+    });
   };
 
   const handleLiveEvent = (event) => {
@@ -192,7 +298,8 @@ function App() {
     });
 
     if (event.inputTranscript) {
-      setInputCaption(event.inputTranscript);
+      trustedUtteranceRef.current = appendTrustedUtterance(trustedUtteranceRef.current, event.inputTranscript);
+      setInputCaption(trustedUtteranceRef.current.text);
     }
 
     if (event.outputTranscript) {
@@ -201,6 +308,18 @@ function App() {
 
     if (event.goAway) {
       setCaption('A sessao da Gemini esta perto de encerrar. Pare e inicie novamente para renovar.');
+    }
+
+    if (event.toolCallCancellation) {
+      setLastCommand({
+        name: 'acao_local',
+        status: 'cancelado',
+        message: 'A Gemini cancelou uma chamada de ferramenta pendente.',
+      });
+    }
+
+    if (event.toolCalls.length > 0) {
+      enqueueToolCalls(event.toolCalls);
     }
   };
 
@@ -303,6 +422,11 @@ function App() {
           <h1>Voz e tela ao vivo</h1>
           <p>{caption}</p>
           {inputCaption ? <small>Voce: {inputCaption}</small> : null}
+          {lastCommand ? (
+            <small className={`command-text command-text--${lastCommand.status}`}>
+              Comando {lastCommand.status}: {lastCommand.name} - {lastCommand.message}
+            </small>
+          ) : null}
           {error ? <small className="error-text">{error}</small> : null}
         </div>
       </section>
