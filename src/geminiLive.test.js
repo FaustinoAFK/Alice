@@ -148,14 +148,14 @@ describe('extractLiveMessage', () => {
   it('extracts tool calls and tool call cancellations', () => {
     const event = extractLiveMessage({
       toolCall: {
-        functionCalls: [{ id: 'call-1', name: 'open_app', args: { app: 'notepad' } }],
+        functionCalls: [{ id: 'call-1', name: 'local_tool', args: { target: 'demo' } }],
       },
       toolCallCancellation: {
         ids: ['call-2'],
       },
     });
 
-    expect(event.toolCalls).toEqual([{ id: 'call-1', name: 'open_app', args: { app: 'notepad' } }]);
+    expect(event.toolCalls).toEqual([{ id: 'call-1', name: 'local_tool', args: { target: 'demo' } }]);
     expect(event.toolCallCancellation.ids).toEqual(['call-2']);
   });
 
@@ -184,8 +184,8 @@ describe('buildToolResponseMessage', () => {
       buildToolResponseMessage([
         {
           id: 'call-1',
-          name: 'open_app',
-          response: { ok: true, message: 'aberto' },
+          name: 'local_tool',
+          response: { ok: true, message: 'ok' },
         },
       ]),
     ).toEqual({
@@ -193,8 +193,8 @@ describe('buildToolResponseMessage', () => {
         functionResponses: [
           {
             id: 'call-1',
-            name: 'open_app',
-            response: { ok: true, message: 'aberto' },
+            name: 'local_tool',
+            response: { ok: true, message: 'ok' },
           },
         ],
       },

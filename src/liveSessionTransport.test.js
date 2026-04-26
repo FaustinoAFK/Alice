@@ -8,13 +8,13 @@ describe('createFunctionResponseEnvelope', () => {
   it('builds a Gemini tool response envelope from a function call', () => {
     expect(
       createFunctionResponseEnvelope(
-        { id: 'call-1', name: 'open_app' },
-        { ok: true, message: 'Bloco de notas aberto.' },
+        { id: 'call-1', name: 'local_tool' },
+        { ok: true, message: 'Tudo certo.' },
       ),
     ).toEqual({
       id: 'call-1',
-      name: 'open_app',
-      response: { ok: true, message: 'Bloco de notas aberto.' },
+      name: 'local_tool',
+      response: { ok: true, message: 'Tudo certo.' },
     });
   });
 });
@@ -76,8 +76,8 @@ describe('LiveSessionTransport', () => {
     transport.beginReconnect();
 
     const functionResponse = createFunctionResponseEnvelope(
-      { id: 'call-2', name: 'press_hotkey' },
-      { ok: true, message: 'Atalho executado.' },
+      { id: 'call-2', name: 'local_tool' },
+      { ok: true, message: 'Ferramenta executada.' },
     );
 
     expect(transport.sendToolResponse({ generation: 1, functionResponse })).toEqual({
@@ -106,9 +106,9 @@ describe('LiveSessionTransport', () => {
     transport.beginReconnect();
     transport.sendToolResponse({
       generation: 1,
-      functionResponse: createFunctionResponseEnvelope(
-        { id: 'call-3', name: 'type_text' },
-        { ok: true, message: 'Texto digitado.' },
+        functionResponse: createFunctionResponseEnvelope(
+        { id: 'call-3', name: 'local_tool' },
+        { ok: true, message: 'Ferramenta executada.' },
       ),
     });
 
@@ -129,8 +129,8 @@ describe('LiveSessionTransport', () => {
     transport.beginReconnect();
     transport.sendToolResponse({
       generation: 1,
-      functionResponse: createFunctionResponseEnvelope(
-        { id: 'call-4', name: 'mouse_click' },
+        functionResponse: createFunctionResponseEnvelope(
+        { id: 'call-4', name: 'local_tool' },
         { ok: false, message: 'Cancelado.' },
       ),
     });
@@ -161,9 +161,9 @@ describe('LiveSessionTransport', () => {
 
     const result = transport.sendToolResponse({
       generation: 1,
-      functionResponse: createFunctionResponseEnvelope(
-        { id: 'call-5', name: 'open_folder' },
-        { ok: true, message: 'Pasta aberta.' },
+        functionResponse: createFunctionResponseEnvelope(
+        { id: 'call-5', name: 'local_tool' },
+        { ok: true, message: 'Ferramenta executada.' },
       ),
     });
 
@@ -171,8 +171,8 @@ describe('LiveSessionTransport', () => {
     expect(resumedSession.sendToolResponse).toHaveBeenCalledWith([
       {
         id: 'call-5',
-        name: 'open_folder',
-        response: { ok: true, message: 'Pasta aberta.' },
+        name: 'local_tool',
+        response: { ok: true, message: 'Ferramenta executada.' },
       },
     ]);
   });

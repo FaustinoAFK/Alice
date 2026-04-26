@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Alice Web Knowledge Bridge",
+  "version": "0.1.0",
+  "description": "Publica o contexto e o snapshot profundo da pagina atual para a Alice.",
+  "permissions": ["tabs", "scripting", "alarms", "activeTab"],
+  "host_permissions": ["<all_urls>", "http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Alice Web Knowledge Bridge"
+  }
+}

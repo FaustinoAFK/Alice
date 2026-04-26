@@ -15,11 +15,6 @@ const buildLiveUiState = () => ({
     videoFramesSent: 3,
     serverMessagesReceived: 5,
   },
-  lastCommand: {
-    name: 'open_app',
-    status: 'executado',
-    message: 'Bloco de notas aberto.',
-  },
 });
 
 describe('reduceAppUiState', () => {
@@ -82,7 +77,6 @@ describe('reduceAppUiState', () => {
     expect(nextState.status).toBe('stopped');
     expect(nextState.caption).toBe('Sessao encerrada. A Alice pode voltar quando voce quiser.');
     expect(nextState.inputCaption).toBe('');
-    expect(nextState.lastCommand).toBeNull();
     expect(nextState.sessionNotice).toBe('');
     expect(nextState.diagnostics).toEqual(createLiveDiagnostics());
   });

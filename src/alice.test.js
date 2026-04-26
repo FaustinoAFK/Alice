@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { ALICE_LIVE_MODEL, ALICE_SYSTEM_INSTRUCTION, createAliceLiveSetup } from './alice';
+import {
+  ALICE_LIVE_MODEL,
+  ALICE_LIVE_TOOLS,
+  ALICE_SYSTEM_INSTRUCTION,
+  createAliceLiveSetup,
+} from './alice';
 
 describe('createAliceLiveSetup', () => {
   it('builds the live session setup for Alice voice and video conversation', () => {
@@ -13,13 +18,11 @@ describe('createAliceLiveSetup', () => {
     expect(setup.inputAudioTranscription).toEqual({});
     expect(setup.outputAudioTranscription).toEqual({});
     expect(setup.tools[0].functionDeclarations.map((tool) => tool.name)).toEqual([
-      'open_app',
-      'open_folder',
-      'mouse_move',
-      'mouse_click',
-      'click_target',
-      'type_text',
-      'press_hotkey',
+      'get_navigation_context',
+      'inspect_current_page',
+      'search_same_domain',
+      'search_web',
+      'fetch_web_page',
     ]);
     expect(setup).not.toHaveProperty('proactivity');
     expect(setup).not.toHaveProperty('sessionResumption');
@@ -60,23 +63,17 @@ describe('createAliceLiveSetup', () => {
     expect(customSetup.systemInstruction.parts[0].text).toBe('Instrucao customizada');
     expect(customSetup.tools).toEqual([{ functionDeclarations: [{ name: 'noop' }] }]);
   });
-
-  it('does not enforce a maxLength for type_text tool input', () => {
-    const typeTextTool = createAliceLiveSetup().tools[0].functionDeclarations.find(
-      (tool) => tool.name === 'type_text',
-    );
-
-    expect(typeTextTool.parameters.properties.text).toEqual({ type: 'STRING' });
-  });
 });
 
 describe('ALICE_SYSTEM_INSTRUCTION', () => {
-  it('defines Alice as playful confident without changing protocol fields', () => {
+  it('defines Alice as playful confident with contextual web research tools', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('playful_confident');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('personalidade propria');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('presenca forte');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce tem ponto de vista.');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce pode pedir ferramentas locais');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('prefira click_target');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('inspect_current_page');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('search_same_domain');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('search_web');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('responseGuidance');
   });
 });

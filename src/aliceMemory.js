@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 
-export const ALICE_MEMORY_SCHEMA_VERSION = 1;
+export const ALICE_MEMORY_SCHEMA_VERSION = 3;
 export const ALICE_MEMORY_FILE_NAME = 'alice-memory.json';
 export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
@@ -74,7 +74,7 @@ const mergeToolFacts = (existingFacts = [], incomingFacts = [], limit) => {
     const normalizedEntry = {
       kind: normalizeText(factEntry.kind) || 'general',
       fact: normalizeText(factEntry.fact),
-      source: normalizeText(factEntry.source) || 'tool',
+      source: normalizeText(factEntry.source) || 'memory',
       updatedAt: normalizeText(factEntry.updatedAt),
     };
 
@@ -149,7 +149,7 @@ const extractTasks = (text, updatedAt) => {
   return tasks;
 };
 
-const buildRecentSummary = ({ inputTranscript = '', outputTranscript = '', lastCommand = null }) => {
+const buildRecentSummary = ({ inputTranscript = '', outputTranscript = '' }) => {
   const lines = [];
 
   if (normalizeText(inputTranscript)) {
@@ -158,13 +158,6 @@ const buildRecentSummary = ({ inputTranscript = '', outputTranscript = '', lastC
 
   if (normalizeText(outputTranscript)) {
     lines.push(`Alice: ${normalizeText(outputTranscript)}`);
-  }
-
-  if (lastCommand?.name && lastCommand?.status) {
-    const commandLine = normalizeText(lastCommand.message)
-      ? `Comando local: ${lastCommand.name} (${lastCommand.status}) - ${normalizeText(lastCommand.message)}`
-      : `Comando local: ${lastCommand.name} (${lastCommand.status})`;
-    lines.push(commandLine);
   }
 
   return lines.join(' | ');
@@ -216,8 +209,28 @@ export const validateAliceMemorySchema = (memory) => {
 
 export const recoverFromCorruptMemory = () => createEmptyAliceMemory();
 
+const upgradeAliceMemorySchema = (memory) => {
+  if (!memory || typeof memory !== 'object') {
+    return createEmptyAliceMemory();
+  }
+
+  if (memory.schemaVersion === ALICE_MEMORY_SCHEMA_VERSION) {
+    return memory;
+  }
+
+  if (memory.schemaVersion === 1 || memory.schemaVersion === 2) {
+    return {
+      ...memory,
+      schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+    };
+  }
+
+  return createEmptyAliceMemory();
+};
+
 export const pruneAliceMemory = (memory) => {
-  const baseMemory = validateAliceMemorySchema(memory) ? memory : recoverFromCorruptMemory();
+  const upgradedMemory = upgradeAliceMemorySchema(memory);
+  const baseMemory = validateAliceMemorySchema(upgradedMemory) ? upgradedMemory : recoverFromCorruptMemory();
 
   return {
     schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
@@ -253,7 +266,6 @@ export const extractImportantFacts = (
   {
     inputTranscript = '',
     outputTranscript = '',
-    lastCommand = null,
     sessionModel = '',
   } = {},
   { now = new Date().toISOString() } = {},
@@ -262,7 +274,7 @@ export const extractImportantFacts = (
   const outputText = normalizeText(outputTranscript);
   const combinedText = `${inputText}\n${outputText}`;
   const likes = parseListMatch(combinedText, /\beu gosto de\s+([^\n.!?]{2,120})/i);
-  const dislikes = parseListMatch(combinedText, /\beu n(?:a|ã)o gosto de\s+([^\n.!?]{2,120})/i);
+  const dislikes = parseListMatch(combinedText, /\beu n(?:a|Ã£)o gosto de\s+([^\n.!?]{2,120})/i);
   const communicationStyle = [];
 
   if (/\b(resposta curta|respostas curtas|fale curto|mais curto)\b/i.test(combinedText)) {
@@ -273,7 +285,7 @@ export const extractImportantFacts = (
     communicationStyle.push('Detalhar quando necessario');
   }
 
-  const facts = {
+  return {
     identity: {
       assistantName: DEFAULT_ASSISTANT_NAME,
       personaStyle: DEFAULT_PERSONA_STYLE,
@@ -289,7 +301,7 @@ export const extractImportantFacts = (
     activeTasks: extractTasks(inputText, now),
     toolFacts: [],
     recentContextSummary: {
-      summary: buildRecentSummary({ inputTranscript: inputText, outputTranscript: outputText, lastCommand }),
+      summary: buildRecentSummary({ inputTranscript: inputText, outputTranscript: outputText }),
       updatedAt: now,
     },
     bootstrapMeta: {
@@ -297,17 +309,6 @@ export const extractImportantFacts = (
       lastSessionModel: normalizeText(sessionModel),
     },
   };
-
-  if (lastCommand?.name && lastCommand?.status === 'executado') {
-    facts.toolFacts.push({
-      kind: normalizeText(lastCommand.name),
-      fact: normalizeText(lastCommand.message) || `Comando ${normalizeText(lastCommand.name)} executado com sucesso.`,
-      source: 'tool',
-      updatedAt: now,
-    });
-  }
-
-  return facts;
 };
 
 export const mergeImportantFacts = (
@@ -464,7 +465,7 @@ export const loadAliceMemory = async (storage = createAliceMemoryStorage()) => {
     }
 
     const parsed = JSON.parse(json);
-    return validateAliceMemorySchema(parsed) ? pruneAliceMemory(parsed) : recoverFromCorruptMemory();
+    return pruneAliceMemory(parsed);
   } catch {
     return recoverFromCorruptMemory();
   }

@@ -35,7 +35,6 @@ export const createInitialAppUiState = () => ({
   inputCaption: '',
   error: '',
   diagnostics: createLiveDiagnostics(),
-  lastCommand: null,
   sessionNotice: '',
 });
 
@@ -86,11 +85,6 @@ export const reduceAppUiState = (state, action) => {
       return {
         ...state,
         inputCaption: action.inputCaption,
-      };
-    case 'command-state':
-      return {
-        ...state,
-        lastCommand: action.commandState,
       };
     case 'session-error':
       return {

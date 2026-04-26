@@ -22,15 +22,10 @@ describe('buildSessionRehydrationTurns', () => {
     expect(buildSessionRehydrationTurns()).toEqual([]);
   });
 
-  it('builds a compact local rehydration turn from recent transcripts and command state', () => {
+  it('builds a compact local rehydration turn from recent transcripts', () => {
     const turns = buildSessionRehydrationTurns({
-      trustedUtterance: { text: 'abre o bloco de notas' },
+      trustedUtterance: { text: 'continuar daqui' },
       outputTranscript: 'Ja estou vendo a tela e ouvindo voce.',
-      lastCommand: {
-        name: 'open_app',
-        status: 'executado',
-        message: 'Bloco de notas aberto.',
-      },
     });
 
     expect(turns).toEqual([
@@ -40,9 +35,8 @@ describe('buildSessionRehydrationTurns', () => {
           {
             text: [
               'Contexto local recente antes de restaurar a sessao:',
-              'Ultima fala do usuario: abre o bloco de notas',
+              'Ultima fala do usuario: continuar daqui',
               'Ultima resposta da Alice: Ja estou vendo a tela e ouvindo voce.',
-              'Ultimo comando local: open_app (executado) - Bloco de notas aberto.',
             ].join('\n'),
           },
         ],

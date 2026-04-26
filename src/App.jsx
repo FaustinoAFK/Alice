@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { useEffect, useReducer, useRef } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { ALICE_LIVE_MODEL, createAliceLiveSetup } from './alice';
 import {
   buildMemoryPrefixTurns,
@@ -15,20 +15,18 @@ import {
   reduceAppUiState,
   statusCopy,
 } from './appUiState';
-import {
-  appendTrustedUtterance,
-  attachCaptureGeometry,
-  authorizeDesktopAction,
-  getRecentTrustedUtterance,
-} from './desktopCommandAuth';
-import { buildOcrClickAction, formatOcrFallbackMessage } from './clickTargetResolution';
 import { GeminiLiveSession, LIVE_CLOSE_REASONS } from './geminiLive';
 import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio';
 import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
 import { buildSessionRehydrationTurns } from './liveSessionRehydration';
 import { createFunctionResponseEnvelope, LiveSessionTransport } from './liveSessionTransport';
-import { locateTextInCanvas } from './ocrTextLocator';
-import { captureVideoFrameToCanvas } from './screenFrameCapture';
+import { resolveScreenCaptureGeometry, SCREEN_SHARE_VIDEO_CONSTRAINTS } from './screenGeometry';
+import { buildDebugHudSnapshot } from './debugHud';
+import {
+  createEmptyKnowledgeState,
+  mergeKnowledgeState,
+} from './webKnowledge';
+import { executeKnowledgeTool } from './knowledgePipeline';
 import './App.css';
 
 const stopStream = (stream) => {
@@ -93,14 +91,26 @@ const createPcmOutputPlayer = () => {
 const readyCheckPrompt =
   'Diga em uma frase curta, em portugues do Brasil, que voce esta ouvindo e vendo a tela compartilhada.';
 
-const TOOL_TRANSCRIPT_WAIT_MS = 5000;
-const TOOL_TRANSCRIPT_POLL_MS = 100;
 const ALICE_MEMORY_SAVE_DELAY_MS = 750;
+const TRUSTED_UTTERANCE_WINDOW_MS = 10000;
 
-const wait = (durationMs) =>
-  new Promise((resolve) => {
-    window.setTimeout(resolve, durationMs);
-  });
+const appendTrustedUtterance = (currentUtterance, text) => {
+  const normalizedText = String(text || '').trim();
+  if (!normalizedText) {
+    return currentUtterance;
+  }
+
+  const now = Date.now();
+  const previousText =
+    currentUtterance && now - Number(currentUtterance.timestamp || 0) <= TRUSTED_UTTERANCE_WINDOW_MS
+      ? String(currentUtterance.text || '').trim()
+      : '';
+
+  return {
+    text: previousText ? `${previousText} ${normalizedText}` : normalizedText,
+    timestamp: now,
+  };
+};
 
 const startMicrophoneStreaming = (voiceStream, onChunk) => {
   const audioTracks = voiceStream.getAudioTracks();
@@ -171,14 +181,19 @@ function App() {
   const microphoneCleanupRef = useRef(null);
   const screenCleanupRef = useRef(null);
   const outputPlayerRef = useRef(createPcmOutputPlayer());
-  const ocrCanvasRef = useRef(null);
   const trustedUtteranceRef = useRef(null);
   const outputTranscriptRef = useRef('');
-  const lastCommandRef = useRef(null);
   const toolQueueRef = useRef(Promise.resolve());
+  const knowledgeStateRef = useRef(createEmptyKnowledgeState());
 
   const [uiState, dispatchUi] = useReducer(reduceAppUiState, undefined, createInitialAppUiState);
-  const { status, caption, inputCaption, error, diagnostics, lastCommand, sessionNotice } = uiState;
+  const [debugHudOpen, setDebugHudOpen] = useState(false);
+  const [knowledgeState, setKnowledgeState] = useState(createEmptyKnowledgeState);
+  const { status, caption, inputCaption, error, diagnostics, sessionNotice } = uiState;
+
+  useEffect(() => {
+    knowledgeStateRef.current = knowledgeState;
+  }, [knowledgeState]);
 
   const noteDiagnostic = (event) => {
     dispatchUi({ type: 'diagnostic-event', event });
@@ -218,23 +233,16 @@ function App() {
   const rememberAliceContext = ({
     inputTranscript = trustedUtteranceRef.current?.text || '',
     outputTranscript = outputTranscriptRef.current,
-    lastCommand = lastCommandRef.current,
   } = {}) => {
     const extractedFacts = extractImportantFacts({
       inputTranscript,
       outputTranscript,
-      lastCommand,
       sessionModel: ALICE_LIVE_MODEL,
     });
 
     aliceMemoryRef.current = mergeImportantFacts(aliceMemoryRef.current, extractedFacts);
     scheduleAliceMemorySave();
     return aliceMemoryRef.current;
-  };
-
-  const setCommandState = (commandState) => {
-    lastCommandRef.current = commandState;
-    dispatchUi({ type: 'command-state', commandState });
   };
 
   const stopStreamingPipelines = () => {
@@ -260,7 +268,6 @@ function App() {
     clearAliceMemorySaveTimer();
     trustedUtteranceRef.current = null;
     outputTranscriptRef.current = '';
-    lastCommandRef.current = null;
     toolQueueRef.current = Promise.resolve();
   };
 
@@ -269,19 +276,13 @@ function App() {
     stopMediaStreams();
     outputPlayerRef.current?.close();
     outputPlayerRef.current = createPcmOutputPlayer();
+    setKnowledgeState(createEmptyKnowledgeState());
+    knowledgeStateRef.current = createEmptyKnowledgeState();
 
     resetRuntimeRefs();
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
-    }
-  };
-
-  const waitForRecentTrustedUtterance = async () => {
-    const deadline = Date.now() + TOOL_TRANSCRIPT_WAIT_MS;
-
-    while (!getRecentTrustedUtterance(trustedUtteranceRef.current) && Date.now() < deadline) {
-      await wait(TOOL_TRANSCRIPT_POLL_MS);
     }
   };
 
@@ -291,61 +292,109 @@ function App() {
       functionResponse: createFunctionResponseEnvelope(functionCall, response),
     });
 
+  const normalizeKnowledgeToolResponse = (toolName, nativeResponse) => {
+    const artifacts = nativeResponse?.artifacts || {};
+
+    switch (toolName) {
+      case 'get_navigation_context':
+        return {
+          ok: nativeResponse.ok,
+          message: nativeResponse.message,
+          context: artifacts.context || null,
+        };
+      case 'inspect_current_page':
+        return {
+          ok: nativeResponse.ok,
+          message: nativeResponse.message,
+          context: artifacts.context || null,
+          page: artifacts.page || null,
+          matchedSections: artifacts.matchedSections || [],
+          matchedLinks: artifacts.matchedLinks || [],
+          sufficiency: artifacts.sufficiency || 'insufficient',
+          initialScope: artifacts.initialScope || 'global',
+          finalScope: artifacts.finalScope || artifacts.initialScope || 'global',
+          initialSufficiency: artifacts.initialSufficiency || artifacts.sufficiency || 'insufficient',
+          finalSufficiency: artifacts.finalSufficiency || artifacts.sufficiency || 'insufficient',
+          finalOrigin: artifacts.finalOrigin || 'pagina_atual',
+          consultedSources: artifacts.consultedSources || [],
+          expansionPath: artifacts.expansionPath || [],
+          responseGuidance: artifacts.responseGuidance || null,
+          fallbackReason: artifacts.fallbackReason || '',
+        };
+      case 'search_same_domain':
+      case 'search_web':
+        return {
+          ok: nativeResponse.ok,
+          message: nativeResponse.message,
+          query: artifacts.query || '',
+          domain: artifacts.domain || '',
+          results: artifacts.results || [],
+          consultedSources: artifacts.consultedSources || [],
+          fetchedPages: artifacts.fetchedPages || [],
+          initialScope: artifacts.initialScope || (toolName === 'search_same_domain' ? 'same_domain' : 'global'),
+          finalScope: artifacts.finalScope || (toolName === 'search_same_domain' ? 'same_domain' : 'global'),
+          initialSufficiency: artifacts.initialSufficiency || 'insufficient',
+          finalSufficiency: artifacts.finalSufficiency || 'insufficient',
+          finalOrigin: artifacts.finalOrigin || (toolName === 'search_same_domain' ? 'mesmo_dominio' : 'web_geral'),
+          expansionPath: artifacts.expansionPath || [],
+          responseGuidance: artifacts.responseGuidance || null,
+          summaryHint: artifacts.summaryHint || '',
+        };
+      case 'fetch_web_page':
+        return {
+          ok: nativeResponse.ok,
+          message: nativeResponse.message,
+          page: artifacts.page || null,
+          consultedSources: artifacts.consultedSources || [],
+          responseGuidance: artifacts.responseGuidance || null,
+        };
+      case 'refresh_current_page_snapshot':
+        return {
+          ok: nativeResponse.ok,
+          message: nativeResponse.message,
+          context: artifacts.context || null,
+          page: artifacts.page || null,
+          requestId: artifacts.requestId || '',
+          refreshMode: artifacts.refreshMode || '',
+          refreshLatencyMs: Number(artifacts.refreshLatencyMs || 0),
+          extensionSeenAt: Number(artifacts.extensionSeenAt || 0),
+          fallbackReason: artifacts.fallbackReason || '',
+        };
+      default:
+        return {
+          ok: Boolean(nativeResponse?.ok),
+          message: nativeResponse?.message || 'Resposta local recebida.',
+        };
+    }
+  };
+
+  const updateKnowledgeState = (patch) => {
+    setKnowledgeState((current) => {
+      const nextState = mergeKnowledgeState(current, patch);
+      knowledgeStateRef.current = nextState;
+      return nextState;
+    });
+  };
+
+  const rejectUnexpectedToolCall = async (functionCall, generation) => {
+    noteDiagnostic({
+      type: 'error',
+      message: `Ferramenta inesperada recebida: ${functionCall?.name || 'desconhecida'}.`,
+    });
+
+    await sendToolResponse(
+      functionCall,
+      {
+        ok: false,
+        message: 'Ferramenta local desconhecida para a Alice.',
+      },
+      generation,
+    );
+  };
+
   const getScreenCaptureGeometry = () => {
     const settings = screenStreamRef.current?.getVideoTracks()[0]?.getSettings?.() || {};
-    return {
-      width: settings.width || videoRef.current?.videoWidth || 0,
-      height: settings.height || videoRef.current?.videoHeight || 0,
-    };
-  };
-
-  const getOcrCanvas = () => {
-    if (!ocrCanvasRef.current) {
-      ocrCanvasRef.current = document.createElement('canvas');
-    }
-
-    return ocrCanvasRef.current;
-  };
-
-  const executeClickTargetAction = async (action) => {
-    try {
-      const result = await invoke('execute_desktop_action', { action });
-      return {
-        message: result.message || 'Clique acessivel executado.',
-        resolvedAction: action,
-      };
-    } catch (accessibilityError) {
-      const ocrCanvas = getOcrCanvas();
-      const capturedFrame = captureVideoFrameToCanvas(videoRef.current, ocrCanvas);
-      if (!capturedFrame) {
-        throw accessibilityError;
-      }
-
-      const locatedText = await locateTextInCanvas(capturedFrame.canvas, action.target);
-      if (!locatedText) {
-        const accessibilityMessage = accessibilityError.message || String(accessibilityError);
-        throw new Error(
-          `${accessibilityMessage} OCR nao encontrou '${action.target}' na tela atual.`,
-        );
-      }
-
-      const ocrClickAction = buildOcrClickAction({
-        action,
-        locatedText,
-        geometry: getScreenCaptureGeometry(),
-        attachCaptureGeometry,
-      });
-      const clickResult = await invoke('execute_desktop_action', { action: ocrClickAction });
-
-      return {
-        message: formatOcrFallbackMessage({
-          baseMessage: clickResult.message || 'Clique executado.',
-          target: action.target,
-          locatedText,
-        }),
-        resolvedAction: ocrClickAction,
-      };
-    }
+    return resolveScreenCaptureGeometry(settings, videoRef.current);
   };
 
   const restartStreamingPipelines = (generation) => {
@@ -383,9 +432,54 @@ function App() {
     ...buildSessionRehydrationTurns({
       trustedUtterance: trustedUtteranceRef.current,
       outputTranscript: outputTranscriptRef.current,
-      lastCommand: lastCommandRef.current,
     }),
   ];
+
+  const executeKnowledgeToolCall = async (functionCall, generation) => {
+    const toolName = functionCall?.name || '';
+
+    try {
+      const args = functionCall?.args || {};
+      const responseExecutor = async (name, payload = {}) =>
+        normalizeKnowledgeToolResponse(name, await invoke(name, payload));
+
+      if (![
+        'get_navigation_context',
+        'inspect_current_page',
+        'search_same_domain',
+        'search_web',
+        'fetch_web_page',
+      ].includes(toolName)) {
+        await rejectUnexpectedToolCall(functionCall, generation);
+        return;
+      }
+
+      const { response, statePatch } = await executeKnowledgeTool({
+        toolName,
+        args,
+        trustedUtterance: trustedUtteranceRef.current?.text || '',
+        knowledgeState: knowledgeStateRef.current,
+        invokeTool: responseExecutor,
+      });
+      updateKnowledgeState(statePatch);
+
+      await sendToolResponse(functionCall, response, generation);
+    } catch (toolError) {
+      const message = toolError?.message || String(toolError);
+      noteDiagnostic({
+        type: 'error',
+        message,
+      });
+      await sendToolResponse(
+        functionCall,
+        {
+          ok: false,
+          message,
+        },
+        generation,
+      );
+    }
+  };
 
   const createLiveOrchestrator = (url) =>
     new LiveSessionOrchestrator({
@@ -478,77 +572,15 @@ function App() {
       },
     });
 
-  const executeToolCall = async (functionCall, generation) => {
-    await waitForRecentTrustedUtterance();
-
-    const authorization = authorizeDesktopAction(functionCall, trustedUtteranceRef.current);
-    const commandName = functionCall.name || 'acao_local';
-
-    if (!authorization.authorized) {
-      const nextCommandState = {
-        name: commandName,
-        status: 'negado',
-        message: authorization.reason,
-      };
-      setCommandState(nextCommandState);
-      rememberAliceContext({ lastCommand: nextCommandState });
-      sendToolResponse(functionCall, { ok: false, message: authorization.reason }, generation);
-      return;
-    }
-
-    setCommandState({
-      name: commandName,
-      status: 'executando',
-      message: authorization.reason,
-    });
-
-    try {
-      const action = attachCaptureGeometry(authorization.action, getScreenCaptureGeometry());
-      const execution =
-        action.type === 'click_target'
-          ? await executeClickTargetAction(action)
-          : {
-              resolvedAction: action,
-              message: (await invoke('execute_desktop_action', { action })).message || 'Acao local executada.',
-            };
-      const message = execution.message || 'Acao local executada.';
-
-      const nextCommandState = {
-        name: commandName,
-        status: 'executado',
-        message,
-      };
-      setCommandState(nextCommandState);
-      rememberAliceContext({ lastCommand: nextCommandState });
-      sendToolResponse(
-        functionCall,
-        { ok: true, message, action: execution.resolvedAction.type },
-        generation,
-      );
-    } catch (actionError) {
-      const message = actionError.message || String(actionError);
-
-      const nextCommandState = {
-        name: commandName,
-        status: 'erro',
-        message,
-      };
-      setCommandState(nextCommandState);
-      rememberAliceContext({ lastCommand: nextCommandState });
-      sendToolResponse(functionCall, { ok: false, message }, generation);
-    }
-  };
-
   const enqueueToolCalls = (toolCalls, generation) => {
     toolQueueRef.current = toolCalls.reduce(
-      (queue, functionCall) => queue.then(() => executeToolCall(functionCall, generation)),
+      (queue, functionCall) => queue.then(() => executeKnowledgeToolCall(functionCall, generation)),
       toolQueueRef.current,
     );
 
     toolQueueRef.current = toolQueueRef.current.catch((toolError) => {
-      setCommandState({
-        name: 'acao_local',
-        status: 'erro',
+      noteDiagnostic({
+        type: 'error',
         message: toolError.message || String(toolError),
       });
     });
@@ -581,13 +613,10 @@ function App() {
 
     if (event.toolCallCancellation) {
       liveTransportRef.current.cancelPendingToolResponses(event.toolCallCancellation.ids || []);
-      const nextCommandState = {
-        name: 'acao_local',
-        status: 'cancelado',
+      noteDiagnostic({
+        type: 'error',
         message: 'A Gemini cancelou uma chamada de ferramenta pendente.',
-      };
-      setCommandState(nextCommandState);
-      rememberAliceContext({ lastCommand: nextCommandState });
+      });
     }
 
     if (event.toolCalls.length > 0) {
@@ -618,11 +647,7 @@ function App() {
       }
 
       const screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          frameRate: { ideal: 5, max: 10 },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
+        video: SCREEN_SHARE_VIDEO_CONSTRAINTS,
         audio: false,
       });
       const voiceStream = await navigator.mediaDevices.getUserMedia({
@@ -652,7 +677,6 @@ function App() {
     } catch (sessionError) {
       await liveOrchestratorRef.current?.stopLiveSession();
       releaseLiveResources();
-      setCommandState(null);
       noteDiagnostic({ type: 'error' });
       dispatchUi({
         type: 'session-error',
@@ -708,6 +732,17 @@ function App() {
 
   const isBusy = status === 'starting' || status === 'configuring';
   const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';
+  const debugHud = buildDebugHudSnapshot({
+    status,
+    caption,
+    inputCaption,
+    diagnostics,
+    trustedUtterance: trustedUtteranceRef.current,
+    outputTranscript: outputTranscriptRef.current,
+    screenGeometry: getScreenCaptureGeometry(),
+    memorySummary: aliceMemoryRef.current.recentContextSummary?.summary || '',
+    knowledgeState,
+  });
 
   return (
     <main className={`app-shell app-shell--${status}`}>
@@ -725,11 +760,6 @@ function App() {
           <p>{caption}</p>
           {sessionNotice ? <small className="session-note">{sessionNotice}</small> : null}
           {inputCaption ? <small>Voce: {inputCaption}</small> : null}
-          {lastCommand ? (
-            <small className={`command-text command-text--${lastCommand.status}`}>
-              Comando {lastCommand.status}: {lastCommand.name} - {lastCommand.message}
-            </small>
-          ) : null}
           {error ? <small className="error-text">{error}</small> : null}
         </div>
       </section>
@@ -754,6 +784,13 @@ function App() {
 
       <div className="control-bar" aria-label="Controles da Alice Live">
         <span className="status-pill">{statusCopy[status]}</span>
+        <button
+          type="button"
+          className="control-button control-button--secondary"
+          onClick={() => setDebugHudOpen((current) => !current)}
+        >
+          Debug
+        </button>
         <button type="button" className="control-button" onClick={toggleLiveSession} disabled={isBusy}>
           <span
             className={`button-icon ${isLive ? 'button-icon--stop' : 'button-icon--play'}`}
@@ -762,6 +799,87 @@ function App() {
           {isLive ? 'Parar' : 'Iniciar'}
         </button>
       </div>
+
+      {debugHudOpen ? (
+        <aside className="debug-hud" aria-label="Debug HUD">
+          <div className="debug-hud__header">
+            <strong>Debug HUD</strong>
+            <div className="debug-hud__controls">
+              <button
+                type="button"
+                className="debug-hud__close"
+                onClick={() => setDebugHudOpen(false)}
+                aria-label="Fechar debug"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+
+          <div className="debug-hud__grid">
+            <section className="debug-hud__section">
+              <h2>Sessao</h2>
+              <dl>
+                <div><dt>Status</dt><dd>{debugHud.session.status}</dd></div>
+                <div><dt>Legenda</dt><dd>{debugHud.session.caption}</dd></div>
+                <div><dt>Entrada</dt><dd>{debugHud.session.inputCaption}</dd></div>
+                <div><dt>Fala confiavel</dt><dd>{debugHud.session.trustedUtterance}</dd></div>
+                <div><dt>Saida</dt><dd>{debugHud.session.outputTranscript}</dd></div>
+                <div><dt>Tela</dt><dd>{debugHud.session.screenWidth}x{debugHud.session.screenHeight}</dd></div>
+              </dl>
+            </section>
+
+            <section className="debug-hud__section">
+              <h2>Diagnosticos</h2>
+              <dl>
+                <div><dt>Conexao</dt><dd>{debugHud.diagnostics.connection}</dd></div>
+                <div><dt>Microfone</dt><dd>{debugHud.diagnostics.microphone}</dd></div>
+                <div><dt>Tela</dt><dd>{debugHud.diagnostics.screen}</dd></div>
+                <div><dt>Gemini</dt><dd>{debugHud.diagnostics.gemini}</dd></div>
+                <div><dt>Audio</dt><dd>{debugHud.diagnostics.audioChunksSent}</dd></div>
+                <div><dt>Frames</dt><dd>{debugHud.diagnostics.videoFramesSent}</dd></div>
+                <div><dt>Eventos</dt><dd>{debugHud.diagnostics.serverMessagesReceived}</dd></div>
+                <div><dt>Voz Alice</dt><dd>{debugHud.diagnostics.outputAudioChunksReceived}</dd></div>
+                <div><dt>Reconexoes</dt><dd>{debugHud.diagnostics.reconnectAttempts}</dd></div>
+                <div><dt>Retomadas</dt><dd>{debugHud.diagnostics.successfulResumptions}</dd></div>
+                <div><dt>Fallbacks</dt><dd>{debugHud.diagnostics.rehydratedReconnects}</dd></div>
+                <div><dt>Fechamento</dt><dd>{debugHud.diagnostics.lastCloseReason}</dd></div>
+                <div><dt>Ult. erro</dt><dd>{debugHud.diagnostics.lastError}</dd></div>
+              </dl>
+            </section>
+
+            <section className="debug-hud__section debug-hud__section--wide">
+              <h2>Conhecimento web</h2>
+              <dl>
+                <div><dt>URL</dt><dd>{debugHud.knowledge.url}</dd></div>
+                <div><dt>Dominio</dt><dd>{debugHud.knowledge.domain}</dd></div>
+                <div><dt>Titulo</dt><dd>{debugHud.knowledge.title}</dd></div>
+                <div><dt>Selecao</dt><dd>{debugHud.knowledge.selectedText}</dd></div>
+                <div><dt>Idade contexto</dt><dd>{debugHud.knowledge.navigationContextAge}</dd></div>
+                <div><dt>Idade snapshot</dt><dd>{debugHud.knowledge.pageSnapshotAge}</dd></div>
+                <div><dt>Escopo inicial</dt><dd>{debugHud.knowledge.initialScope}</dd></div>
+                <div><dt>Suficiencia inicial</dt><dd>{debugHud.knowledge.initialSufficiency}</dd></div>
+                <div><dt>Escopo final</dt><dd>{debugHud.knowledge.scope}</dd></div>
+                <div><dt>Suficiencia final</dt><dd>{debugHud.knowledge.sufficiency}</dd></div>
+                <div><dt>Origem</dt><dd>{debugHud.knowledge.origin}</dd></div>
+                <div><dt>Refresh</dt><dd>{debugHud.knowledge.refreshMode}</dd></div>
+                <div><dt>Latencia refresh</dt><dd>{debugHud.knowledge.refreshLatency}</dd></div>
+                <div><dt>Extensao vista</dt><dd>{debugHud.knowledge.extensionSeenAge}</dd></div>
+                <div><dt>Expansao</dt><dd>{debugHud.knowledge.expansionPath}</dd></div>
+                <div><dt>Fallback</dt><dd>{debugHud.knowledge.fallbackReason}</dd></div>
+                <div><dt>Fontes</dt><dd><pre>{debugHud.knowledge.sources}</pre></dd></div>
+                <div><dt>Paginas lidas</dt><dd><pre>{debugHud.knowledge.fetchedPages}</pre></dd></div>
+                <div><dt>Resumo operacional</dt><dd>{debugHud.knowledge.summaryHint}</dd></div>
+              </dl>
+            </section>
+
+            <section className="debug-hud__section debug-hud__section--wide">
+              <h2>Memoria recente</h2>
+              <pre>{debugHud.memorySummary}</pre>
+            </section>
+          </div>
+        </aside>
+      ) : null}
     </main>
   );
 }

@@ -1,17 +1,28 @@
 #![cfg_attr(test, allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 use tauri::Manager;
+use wait_timeout::ChildExt;
+
+mod python_sidecar;
+mod web_knowledge;
 
 const GEMINI_LIVE_WS_ENDPOINT: &str =
     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const MAX_TARGET_CHARS: usize = 120;
+const MAX_TYPE_TEXT_CHARS: usize = 10_000;
 const MAX_MEMORY_JSON_BYTES: usize = 262_144;
 const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
+const MAX_SHELL_OUTPUT_CHARS: usize = 12_000;
+const DEFAULT_SHELL_TIMEOUT_MS: u64 = 10_000;
+const MAX_SHELL_TIMEOUT_MS: u64 = 60_000;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,6 +73,158 @@ pub enum DesktopAction {
 pub struct DesktopActionResult {
     ok: bool,
     message: String,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeCommandResult {
+    ok: bool,
+    message: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    artifacts: Option<Value>,
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "domain", content = "action", rename_all = "snake_case")]
+pub enum LocalAction {
+    WindowUi(WindowUiAction),
+    AppsProcesses(AppsProcessAction),
+    Filesystem(FilesystemAction),
+    Shell(ShellAction),
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WindowUiAction {
+    FocusWindow {
+        app: Option<String>,
+        #[serde(rename = "windowTitle")]
+        window_title: Option<String>,
+    },
+    ResolveTarget {
+        target: String,
+    },
+    ClickTarget {
+        target: String,
+        button: Option<String>,
+    },
+    ClickCoordinates {
+        button: Option<String>,
+        x: f64,
+        y: f64,
+        #[serde(rename = "captureWidth")]
+        capture_width: Option<i32>,
+        #[serde(rename = "captureHeight")]
+        capture_height: Option<i32>,
+    },
+    Scroll {
+        #[serde(rename = "deltaX")]
+        delta_x: Option<i32>,
+        #[serde(rename = "deltaY")]
+        delta_y: Option<i32>,
+    },
+    Hotkey {
+        hotkey: String,
+    },
+    PressKey {
+        key: String,
+    },
+    TypeText {
+        text: String,
+    },
+    ReadVisualContext {},
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AppsProcessAction {
+    OpenApp {
+        app: String,
+    },
+    FocusApp {
+        app: String,
+    },
+    CloseWindow {
+        #[serde(rename = "windowTitle")]
+        window_title: Option<String>,
+        app: Option<String>,
+    },
+    CloseApp {
+        app: String,
+    },
+    KillProcess {
+        #[serde(rename = "processName")]
+        process_name: String,
+    },
+    ListWindows {},
+    ListProcesses {},
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FilesystemAction {
+    ResolvePath {
+        location: Option<String>,
+        path: Option<String>,
+        name: Option<String>,
+    },
+    OpenPath {
+        path: String,
+    },
+    CreateFile {
+        path: Option<String>,
+        location: Option<String>,
+        name: String,
+    },
+    CreateFolder {
+        path: Option<String>,
+        location: Option<String>,
+        name: String,
+    },
+    CopyPath {
+        #[serde(rename = "sourcePath")]
+        source_path: String,
+        #[serde(rename = "targetPath")]
+        target_path: String,
+    },
+    MovePath {
+        #[serde(rename = "sourcePath")]
+        source_path: String,
+        #[serde(rename = "targetPath")]
+        target_path: String,
+    },
+    RenamePath {
+        path: String,
+        #[serde(rename = "targetPath")]
+        target_path: String,
+    },
+    DeletePath {
+        path: String,
+    },
+    WriteFile {
+        path: String,
+        content: String,
+        overwrite: Option<bool>,
+    },
+    AppendFile {
+        path: String,
+        content: String,
+    },
+}
+
+#[derive(Debug, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ShellAction {
+    RunShellCommand {
+        command: String,
+        args: Vec<String>,
+        #[serde(rename = "workingDirectory")]
+        working_directory: String,
+        #[serde(rename = "timeoutMs")]
+        timeout_ms: Option<u64>,
+        env: Option<HashMap<String, String>>,
+    },
 }
 
 fn gemini_api_key_from_env() -> Result<String, String> {
@@ -211,6 +374,16 @@ fn validate_click_target_text(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_type_text(text: &str) -> Result<(), String> {
+    if text.chars().count() > MAX_TYPE_TEXT_CHARS {
+        return Err(format!(
+            "Texto para digitacao excede {MAX_TYPE_TEXT_CHARS} caracteres."
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_coordinate(value: f64, label: &str) -> Result<(), String> {
     if !value.is_finite() || !(0.0..=1000.0).contains(&value) {
         return Err(format!("Coordenada {label} fora do intervalo 0..1000"));
@@ -322,7 +495,7 @@ fn validate_desktop_action(action: &DesktopAction) -> Result<(), String> {
             validate_click_target_text(target)?;
             validate_mouse_button(button)
         }
-        DesktopAction::TypeText { .. } => Ok(()),
+        DesktopAction::TypeText { text } => validate_type_text(text),
         DesktopAction::PressHotkey { hotkey } => validate_hotkey(hotkey),
     }
 }
@@ -389,23 +562,341 @@ fn open_folder(folder: &str) -> Result<String, String> {
     Ok(format!("Pasta aberta: {}", path.display()))
 }
 
+fn allowed_filesystem_scopes() -> Result<Vec<PathBuf>, String> {
+    Ok(vec![
+        user_folder("Desktop")?,
+        user_folder("Documents")?,
+        user_folder("Downloads")?,
+        user_folder("Pictures")?,
+        user_folder("Videos")?,
+        user_folder("Music")?,
+        PathBuf::from("C:\\projetos"),
+        PathBuf::from("C:\\Atlas"),
+        alice_project_folder()?,
+    ])
+}
+
+fn blocked_filesystem_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("C:\\"),
+        PathBuf::from("C:\\Windows"),
+        PathBuf::from("C:\\Program Files"),
+        PathBuf::from("C:\\Program Files (x86)"),
+    ]
+}
+
+fn normalize_windows_path(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_lowercase()
+}
+
+fn path_within_scope(path: &Path, scopes: &[PathBuf]) -> bool {
+    let normalized_path = normalize_windows_path(path);
+    scopes.iter().any(|scope| {
+        let normalized_scope = normalize_windows_path(scope);
+        normalized_path == normalized_scope
+            || normalized_path.starts_with(&format!("{normalized_scope}\\"))
+    })
+}
+
+fn path_is_blocked(path: &Path) -> bool {
+    let normalized_path = normalize_windows_path(path);
+    blocked_filesystem_paths().iter().any(|blocked| {
+        let normalized_blocked = normalize_windows_path(blocked);
+        if normalized_blocked == "c:" {
+            normalized_path == normalized_blocked
+        } else {
+            normalized_path == normalized_blocked
+                || normalized_path.starts_with(&format!("{normalized_blocked}\\"))
+        }
+    })
+}
+
+fn validate_path_string(path: &str) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("Caminho nao pode ser vazio.".to_string());
+    }
+
+    if path.contains('*') || path.contains('?') {
+        return Err("Wildcard destrutivo nao permitido.".to_string());
+    }
+
+    let candidate = PathBuf::from(path);
+    if path_is_blocked(&candidate) {
+        return Err(format!("Caminho bloqueado pelo runtime: {}", candidate.display()));
+    }
+
+    if !path_within_scope(&candidate, &allowed_filesystem_scopes()?) {
+        return Err(format!("Caminho fora do escopo permitido: {}", candidate.display()));
+    }
+
+    Ok(())
+}
+
+fn resolve_named_location(location: &str) -> Result<PathBuf, String> {
+    match location.trim().to_lowercase().as_str() {
+        "desktop" => user_folder("Desktop"),
+        "documents" | "documentos" => user_folder("Documents"),
+        "downloads" => user_folder("Downloads"),
+        "pictures" | "imagens" => user_folder("Pictures"),
+        "videos" => user_folder("Videos"),
+        "music" | "musica" => user_folder("Music"),
+        other if !other.is_empty() => {
+            let candidate = PathBuf::from(location);
+            validate_path_string(location)?;
+            Ok(candidate)
+        }
+        _ => Err("Location nao suportada.".to_string()),
+    }
+}
+
+fn resolve_filesystem_target(
+    location: Option<&str>,
+    path: Option<&str>,
+    name: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = path {
+        let mut resolved = PathBuf::from(path);
+        if let Some(name) = name {
+            if !name.trim().is_empty() {
+                resolved = resolved.join(name);
+            }
+        }
+        validate_path_string(&resolved.to_string_lossy())?;
+        return Ok(resolved);
+    }
+
+    let base = resolve_named_location(location.ok_or_else(|| "Location obrigatoria.".to_string())?)?;
+    let resolved = if let Some(name) = name {
+        base.join(name)
+    } else {
+        base
+    };
+    validate_path_string(&resolved.to_string_lossy())?;
+    Ok(resolved)
+}
+
+fn run_powershell(script: &str, envs: &[(&str, &str)]) -> Result<std::process::Output, String> {
+    let mut command = Command::new("powershell.exe");
+    command.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+
+    command
+        .output()
+        .map_err(|error| format!("Falha ao executar PowerShell: {error}"))
+}
+
+fn ensure_successful_output(output: std::process::Output, fallback_message: &str) -> Result<String, String> {
+    if output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Ok(if stdout.is_empty() {
+            fallback_message.to_string()
+        } else {
+            stdout
+        });
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() {
+        fallback_message.to_string()
+    } else {
+        stderr
+    })
+}
+
+fn open_app_generic(app: &str) -> Result<String, String> {
+    match app.trim().to_lowercase().as_str() {
+        "notepad" | "bloco de notas" => open_app("notepad"),
+        "calculator" | "calculadora" => open_app("calculator"),
+        "browser" | "navegador" => open_app("browser"),
+        "file_explorer" | "explorador" | "explorer" => open_app("file_explorer"),
+        _ => {
+            let output = run_powershell(
+                "Start-Process -FilePath $env:ALICE_APP_NAME; Write-Output 'Aplicativo aberto.'",
+                &[("ALICE_APP_NAME", app)],
+            )?;
+            ensure_successful_output(output, "Aplicativo aberto.")
+        }
+    }
+}
+
+fn focus_app_window(app: &str) -> Result<String, String> {
+    let output = run_powershell(
+        "$wshell = New-Object -ComObject WScript.Shell; if ($wshell.AppActivate($env:ALICE_FOCUS_TARGET)) { Write-Output 'Janela focada.' } else { throw 'Nao encontrei a janela.' }",
+        &[("ALICE_FOCUS_TARGET", app)],
+    )?;
+    ensure_successful_output(output, "Janela focada.")
+}
+
+fn close_app_patterns(app: &str) -> Vec<String> {
+    match app.trim().to_lowercase().as_str() {
+        "browser" | "navegador" => vec![
+            "*chrome*".to_string(),
+            "*google chrome*".to_string(),
+            "*msedge*".to_string(),
+            "*microsoft edge*".to_string(),
+            "*firefox*".to_string(),
+            "*mozilla firefox*".to_string(),
+            "*brave*".to_string(),
+            "*opera*".to_string(),
+            "*browser*".to_string(),
+            "*navegador*".to_string(),
+        ],
+        "file_explorer" | "explorador" | "explorer" => {
+            vec!["*explorer*".to_string(), "*explorador*".to_string()]
+        }
+        "notepad" | "bloco de notas" => {
+            vec!["*notepad*".to_string(), "*bloco de notas*".to_string()]
+        }
+        "calculator" | "calculadora" => {
+            vec!["*calc*".to_string(), "*calculator*".to_string(), "*calculadora*".to_string()]
+        }
+        other => vec![format!("*{other}*")],
+    }
+}
+
+const CLOSE_APP_SCRIPT: &str = r#"
+$patterns = ($env:ALICE_CLOSE_PATTERNS -split '\|') | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+$matchesPattern = {
+  param($value)
+  foreach ($pattern in $patterns) {
+    if ($value -like $pattern) {
+      return $true
+    }
+  }
+  return $false
+}
+
+$targets = Get-Process | Where-Object {
+  (
+    (& $matchesPattern $_.ProcessName) -or
+    (& $matchesPattern $_.MainWindowTitle)
+  ) -and $_.MainWindowHandle -ne 0
+}
+if (-not $targets) { throw 'Nao encontrei a janela do app.' }
+
+$wshell = New-Object -ComObject WScript.Shell
+$attempted = 0
+
+foreach ($target in $targets) {
+  $closed = $false
+  try {
+    $closed = $target.CloseMainWindow()
+  } catch {
+    $closed = $false
+  }
+
+  if (-not $closed) {
+    try {
+      if ($wshell.AppActivate($target.Id)) {
+        Start-Sleep -Milliseconds 150
+        $wshell.SendKeys('%{F4}')
+        $closed = $true
+      }
+    } catch {
+      $closed = $false
+    }
+  }
+
+  if ($closed) {
+    $attempted += 1
+  }
+}
+
+if ($attempted -le 0) {
+  throw 'O app foi localizado, mas nao aceitou o fechamento.'
+}
+
+Write-Output ('Solicitacao de fechamento enviada para ' + $attempted + ' janela(s).')
+"#;
+
+fn close_app_window(app: &str) -> Result<String, String> {
+    let patterns = close_app_patterns(app).join("|");
+    let output = run_powershell(CLOSE_APP_SCRIPT, &[("ALICE_CLOSE_PATTERNS", &patterns)])?;
+    ensure_successful_output(output, "Solicitacao de fechamento enviada.")
+}
+
+fn kill_process_checked(process_name: &str) -> Result<String, String> {
+    let normalized_name = process_name.trim().trim_end_matches(".exe").to_lowercase();
+    let critical = [
+        "system",
+        "registry",
+        "smss",
+        "csrss",
+        "wininit",
+        "services",
+        "lsass",
+        "winlogon",
+        "dwm",
+        "explorer",
+        "svchost",
+        "powershell",
+        "cmd",
+    ];
+
+    if critical.contains(&normalized_name.as_str()) {
+        return Err(format!("Processo critico nao pode ser encerrado: {process_name}"));
+    }
+
+    let output = run_powershell(
+        "Stop-Process -Name $env:ALICE_PROCESS_NAME -Force; Write-Output 'Processo encerrado.'",
+        &[("ALICE_PROCESS_NAME", &normalized_name)],
+    )?;
+    ensure_successful_output(output, "Processo encerrado.")
+}
+
+fn list_windows_json() -> Result<Value, String> {
+    let output = run_powershell(
+        "Get-Process | Where-Object { $_.MainWindowTitle } | Select-Object ProcessName,Id,MainWindowTitle | ConvertTo-Json -Compress",
+        &[],
+    )?;
+    let text = ensure_successful_output(output, "[]")?;
+    serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar lista de janelas: {error}"))
+}
+
+fn list_processes_json() -> Result<Value, String> {
+    let output = run_powershell(
+        "Get-Process | Select-Object ProcessName,Id,MainWindowTitle | ConvertTo-Json -Compress",
+        &[],
+    )?;
+    let text = ensure_successful_output(output, "[]")?;
+    serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar lista de processos: {error}"))
+}
+
+fn truncate_shell_output(text: &str) -> String {
+    let truncated: String = text.chars().take(MAX_SHELL_OUTPUT_CHARS).collect();
+    truncated
+}
+
 #[cfg(windows)]
 mod windows_input {
     use super::{
         choose_target_screen, normalized_point_to_screen_pixel, DesktopAction, ScreenRect,
     };
     use std::mem::size_of;
-    use std::ptr::null;
     use std::process::Command;
+    use std::ptr::null;
     use windows_sys::Win32::Foundation::{LPARAM, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
         EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
     };
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
-        KEYEVENTF_UNICODE, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEINPUT, VIRTUAL_KEY, VK_A, VK_C, VK_CONTROL, VK_ESCAPE, VK_MENU,
-        VK_RETURN, VK_S, VK_TAB, VK_V, VK_Z,
+        KEYEVENTF_UNICODE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
+        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY,
+        VK_A, VK_C, VK_CONTROL, VK_ESCAPE, VK_MENU, VK_RETURN, VK_S, VK_TAB, VK_V, VK_Z,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{SetCursorPos, MONITORINFOF_PRIMARY};
 
@@ -431,7 +922,11 @@ function Get-SearchRoot {
   return $current
 }
 
-$target = ($env:ALICE_UI_TARGET ?? '').Trim()
+$rawTarget = $env:ALICE_UI_TARGET
+if ($null -eq $rawTarget) {
+  $rawTarget = ''
+}
+$target = $rawTarget.Trim()
 if ([string]::IsNullOrWhiteSpace($target)) {
   throw 'Alvo textual ausente para UI Automation.'
 }
@@ -565,6 +1060,22 @@ if ($null -eq $best -or $null -eq $bestRect) {
         }
     }
 
+    fn mouse_wheel_input(data: i32, flags: u32) -> INPUT {
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: 0,
+                    dy: 0,
+                    mouseData: data as u32,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        }
+    }
+
     fn key_input(vk: VIRTUAL_KEY, flags: u32) -> INPUT {
         INPUT {
             r#type: INPUT_KEYBOARD,
@@ -672,8 +1183,8 @@ if ($null -eq $best -or $null -eq $bestRect) {
             return Ok(None);
         }
 
-        let parsed: UiAutomationLookupResult =
-            serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar UI Automation: {error}"))?;
+        let parsed: UiAutomationLookupResult = serde_json::from_str(&text)
+            .map_err(|error| format!("Falha ao interpretar UI Automation: {error}"))?;
 
         if parsed.found {
             Ok(Some(parsed))
@@ -706,6 +1217,20 @@ if ($null -eq $best -or $null -eq $bestRect) {
         }
 
         parse_ui_automation_lookup_result(&output.stdout)
+    }
+
+    pub fn resolve_target(target: &str) -> Result<Option<serde_json::Value>, String> {
+        Ok(run_ui_automation_lookup(target)?.map(|lookup| {
+            serde_json::json!({
+                "found": true,
+                "name": lookup.name,
+                "controlType": lookup.control_type,
+                "left": lookup.left,
+                "top": lookup.top,
+                "width": lookup.width,
+                "height": lookup.height,
+            })
+        }))
     }
 
     pub fn move_mouse(
@@ -827,6 +1352,36 @@ if ($null -eq $best -or $null -eq $bestRect) {
         Ok("Atalho executado.".to_string())
     }
 
+    pub fn press_key_name(key: &str) -> Result<String, String> {
+        match key.trim().to_lowercase().as_str() {
+            "enter" => press_key(VK_RETURN)?,
+            "escape" | "esc" => press_key(VK_ESCAPE)?,
+            "tab" => press_key(VK_TAB)?,
+            _ => return Err(format!("Tecla nao suportada: {key}")),
+        }
+
+        Ok("Tecla executada.".to_string())
+    }
+
+    pub fn scroll(delta_x: i32, delta_y: i32) -> Result<String, String> {
+        let mut inputs = Vec::new();
+
+        if delta_y != 0 {
+            inputs.push(mouse_wheel_input(delta_y, MOUSEEVENTF_WHEEL));
+        }
+
+        if delta_x != 0 {
+            inputs.push(mouse_wheel_input(delta_x, MOUSEEVENTF_HWHEEL));
+        }
+
+        if inputs.is_empty() {
+            return Err("Scroll precisa de deltaX ou deltaY.".to_string());
+        }
+
+        send_inputs(&inputs)?;
+        Ok("Scroll executado.".to_string())
+    }
+
     pub fn execute_input_action(action: &DesktopAction) -> Result<String, String> {
         match action {
             DesktopAction::MouseMove {
@@ -871,6 +1426,526 @@ fn perform_desktop_action(action: &DesktopAction) -> Result<String, String> {
     }
 }
 
+fn validate_window_ui_action(action: &WindowUiAction) -> Result<(), String> {
+    match action {
+        WindowUiAction::FocusWindow { app, window_title } => {
+            if app.as_deref().unwrap_or("").trim().is_empty()
+                && window_title.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err("FocusWindow exige app ou windowTitle.".to_string());
+            }
+            Ok(())
+        }
+        WindowUiAction::ResolveTarget { target } => validate_click_target_text(target),
+        WindowUiAction::ClickTarget { target, button } => {
+            validate_click_target_text(target)?;
+            validate_mouse_button(button.as_deref().unwrap_or("left"))
+        }
+        WindowUiAction::ClickCoordinates {
+            button,
+            x,
+            y,
+            capture_width,
+            capture_height,
+        } => {
+            validate_mouse_button(button.as_deref().unwrap_or("left"))?;
+            validate_coordinate(*x, "x")?;
+            validate_coordinate(*y, "y")?;
+            validate_capture_extent(*capture_width, "width")?;
+            validate_capture_extent(*capture_height, "height")
+        }
+        WindowUiAction::Scroll { delta_x, delta_y } => {
+            if delta_x.unwrap_or(0) == 0 && delta_y.unwrap_or(0) == 0 {
+                return Err("Scroll exige deltaX ou deltaY.".to_string());
+            }
+            Ok(())
+        }
+        WindowUiAction::Hotkey { hotkey } => validate_hotkey(hotkey),
+        WindowUiAction::PressKey { key } => {
+            if key.trim().is_empty() {
+                return Err("PressKey exige key.".to_string());
+            }
+            Ok(())
+        }
+        WindowUiAction::TypeText { text } => validate_type_text(text),
+        WindowUiAction::ReadVisualContext {} => Ok(()),
+    }
+}
+
+fn validate_apps_process_action(action: &AppsProcessAction) -> Result<(), String> {
+    match action {
+        AppsProcessAction::OpenApp { app }
+        | AppsProcessAction::FocusApp { app }
+        | AppsProcessAction::CloseApp { app } => {
+            if app.trim().is_empty() {
+                return Err("App nao pode ser vazio.".to_string());
+            }
+            Ok(())
+        }
+        AppsProcessAction::CloseWindow { window_title, app } => {
+            if window_title.as_deref().unwrap_or("").trim().is_empty()
+                && app.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err("CloseWindow exige windowTitle ou app.".to_string());
+            }
+            Ok(())
+        }
+        AppsProcessAction::KillProcess { process_name } => {
+            if process_name.trim().is_empty() {
+                return Err("processName nao pode ser vazio.".to_string());
+            }
+            Ok(())
+        }
+        AppsProcessAction::ListWindows {} | AppsProcessAction::ListProcesses {} => Ok(()),
+    }
+}
+
+fn validate_filesystem_action(action: &FilesystemAction) -> Result<(), String> {
+    match action {
+        FilesystemAction::ResolvePath {
+            location,
+            path,
+            name,
+        } => {
+            if location.as_deref().unwrap_or("").trim().is_empty()
+                && path.as_deref().unwrap_or("").trim().is_empty()
+            {
+                return Err("ResolvePath exige location ou path.".to_string());
+            }
+
+            if let Some(path) = path {
+                validate_path_string(path)?;
+            }
+
+            if let Some(name) = name {
+                if name.trim().is_empty() {
+                    return Err("Name nao pode ser vazio.".to_string());
+                }
+            }
+
+            Ok(())
+        }
+        FilesystemAction::OpenPath { path }
+        | FilesystemAction::DeletePath { path }
+        | FilesystemAction::WriteFile { path, .. }
+        | FilesystemAction::AppendFile { path, .. } => validate_path_string(path),
+        FilesystemAction::CreateFile {
+            path,
+            location,
+            name,
+        }
+        | FilesystemAction::CreateFolder {
+            path,
+            location,
+            name,
+        } => {
+            if name.trim().is_empty() {
+                return Err("Name nao pode ser vazio.".to_string());
+            }
+            let _ = resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
+            Ok(())
+        }
+        FilesystemAction::CopyPath {
+            source_path,
+            target_path,
+        }
+        | FilesystemAction::MovePath {
+            source_path,
+            target_path,
+        } => {
+            validate_path_string(source_path)?;
+            validate_path_string(target_path)
+        }
+        FilesystemAction::RenamePath { path, target_path } => {
+            validate_path_string(path)?;
+            validate_path_string(target_path)
+        }
+    }
+}
+
+fn validate_shell_action(action: &ShellAction) -> Result<(), String> {
+    match action {
+        ShellAction::RunShellCommand {
+            command,
+            working_directory,
+            timeout_ms,
+            ..
+        } => {
+            if command.trim().is_empty() {
+                return Err("Command de shell nao pode ser vazio.".to_string());
+            }
+
+            validate_path_string(working_directory)?;
+
+            let timeout_ms = timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS);
+            if timeout_ms == 0 || timeout_ms > MAX_SHELL_TIMEOUT_MS {
+                return Err(format!(
+                    "Timeout de shell fora do limite: {timeout_ms}ms."
+                ));
+            }
+
+            Ok(())
+        }
+    }
+}
+
+fn validate_local_action(action: &LocalAction) -> Result<(), String> {
+    match action {
+        LocalAction::WindowUi(action) => validate_window_ui_action(action),
+        LocalAction::AppsProcesses(action) => validate_apps_process_action(action),
+        LocalAction::Filesystem(action) => validate_filesystem_action(action),
+        LocalAction::Shell(action) => validate_shell_action(action),
+    }
+}
+
+fn native_result(message: String) -> NativeCommandResult {
+    NativeCommandResult {
+        ok: true,
+        message,
+        stdout: None,
+        stderr: None,
+        artifacts: None,
+    }
+}
+
+fn normalize_python_sidecar_error(code: Option<&str>, message: &str) -> String {
+    match code.unwrap_or("") {
+        "python_sidecar_unavailable" => {
+            format!("Sidecar Python indisponivel para window/ui. {message}")
+        }
+        "python_timeout" => format!("Sidecar Python expirou. {message}"),
+        "window_not_found" => format!("Nao encontrei a janela do app. {message}"),
+        "target_not_found" => format!("Nao encontrei o alvo solicitado. {message}"),
+        "uia_failure" => format!("UI Automation falhou. {message}"),
+        _ => message.to_string(),
+    }
+}
+
+fn native_window_ui_focus_result(artifacts: Option<Value>) -> NativeCommandResult {
+    NativeCommandResult {
+        ok: true,
+        message: "Janela focada.".to_string(),
+        stdout: None,
+        stderr: None,
+        artifacts,
+    }
+}
+
+fn perform_python_window_ui_action(
+    action: &str,
+    args: Value,
+    timeout_ms: Option<u64>,
+) -> Result<NativeCommandResult, String> {
+    let response = python_sidecar::invoke_window_ui(action, args, timeout_ms)?;
+    if !response.ok {
+        return Err(normalize_python_sidecar_error(
+            response.error_code.as_deref(),
+            &response.message,
+        ));
+    }
+
+    Ok(NativeCommandResult {
+        ok: true,
+        message: response.message,
+        stdout: response.stdout,
+        stderr: response.stderr,
+        artifacts: response.artifacts,
+    })
+}
+
+fn perform_window_ui_action(action: &WindowUiAction) -> Result<NativeCommandResult, String> {
+    match action {
+        WindowUiAction::FocusWindow { app, window_title } => {
+            let args = json!({
+                "app": app,
+                "windowTitle": window_title,
+            });
+            match perform_python_window_ui_action("focus_window", args, Some(4_000)) {
+                Ok(result) => Ok(result),
+                Err(_) => {
+                    let target = app
+                        .as_deref()
+                        .or(window_title.as_deref())
+                        .ok_or_else(|| "FocusWindow exige app ou windowTitle.".to_string())?;
+                    Ok(native_window_ui_focus_result(Some(json!({
+                        "backend": "native_windows",
+                        "target": target,
+                        "message": focus_app_window(target)?,
+                    }))))
+                }
+            }
+        }
+        WindowUiAction::ResolveTarget { target } => match perform_python_window_ui_action(
+            "resolve_target",
+            json!({ "target": target }),
+            Some(5_000),
+        ) {
+            Ok(mut result) => {
+                result.artifacts = Some(match result.artifacts {
+                    Some(artifacts) => json!({
+                        "backend": "python_sidecar",
+                        "resolvedTarget": artifacts,
+                    }),
+                    None => json!({ "backend": "python_sidecar" }),
+                });
+                Ok(result)
+            }
+            Err(_) => Ok(NativeCommandResult {
+                ok: true,
+                message: format!("Alvo resolvido para '{target}'."),
+                stdout: None,
+                stderr: None,
+                artifacts: Some(json!({
+                    "backend": "native_windows",
+                    "resolvedTarget": windows_input::resolve_target(target)?,
+                })),
+            }),
+        },
+        WindowUiAction::ClickTarget { target, button } => match perform_python_window_ui_action(
+            "click_target",
+            json!({
+                "target": target,
+                "button": button.as_deref().unwrap_or("left"),
+            }),
+            Some(5_000),
+        ) {
+            Ok(mut result) => {
+                result.artifacts = Some(match result.artifacts {
+                    Some(artifacts) => json!({
+                        "backend": "python_sidecar",
+                        "click": artifacts,
+                    }),
+                    None => json!({ "backend": "python_sidecar" }),
+                });
+                Ok(result)
+            }
+            Err(_) => Ok(native_result(windows_input::click_target(
+                button.as_deref().unwrap_or("left"),
+                target,
+            )?)),
+        },
+        WindowUiAction::ClickCoordinates {
+            button,
+            x,
+            y,
+            capture_width,
+            capture_height,
+        } => Ok(native_result(windows_input::click_mouse(
+            button.as_deref().unwrap_or("left"),
+            Some(*x),
+            Some(*y),
+            *capture_width,
+            *capture_height,
+        )?)),
+        WindowUiAction::Scroll { delta_x, delta_y } => Ok(native_result(windows_input::scroll(
+            delta_x.unwrap_or(0),
+            delta_y.unwrap_or(0),
+        )?)),
+        WindowUiAction::Hotkey { hotkey } => Ok(native_result(windows_input::press_hotkey(hotkey)?)),
+        WindowUiAction::PressKey { key } => Ok(native_result(windows_input::press_key_name(key)?)),
+        WindowUiAction::TypeText { text } => Ok(native_result(windows_input::type_text(text)?)),
+        WindowUiAction::ReadVisualContext {} => Ok(NativeCommandResult {
+            ok: true,
+            message: "Contexto visual pronto para leitura no frontend.".to_string(),
+            stdout: None,
+            stderr: None,
+            artifacts: Some(json!({ "frontendOnly": true })),
+        }),
+    }
+}
+
+fn perform_apps_process_action(action: &AppsProcessAction) -> Result<NativeCommandResult, String> {
+    match action {
+        AppsProcessAction::OpenApp { app } => Ok(native_result(open_app_generic(app)?)),
+        AppsProcessAction::FocusApp { app } => Ok(native_result(focus_app_window(app)?)),
+        AppsProcessAction::CloseWindow { window_title, app } => {
+            let target = window_title.as_deref().or(app.as_deref()).ok_or_else(|| {
+                "CloseWindow exige windowTitle ou app.".to_string()
+            })?;
+            Ok(native_result(close_app_window(target)?))
+        }
+        AppsProcessAction::CloseApp { app } => Ok(native_result(close_app_window(app)?)),
+        AppsProcessAction::KillProcess { process_name } => Ok(native_result(kill_process_checked(process_name)?)),
+        AppsProcessAction::ListWindows {} => Ok(NativeCommandResult {
+            ok: true,
+            message: "Lista de janelas obtida.".to_string(),
+            stdout: None,
+            stderr: None,
+            artifacts: Some(list_windows_json()?),
+        }),
+        AppsProcessAction::ListProcesses {} => Ok(NativeCommandResult {
+            ok: true,
+            message: "Lista de processos obtida.".to_string(),
+            stdout: None,
+            stderr: None,
+            artifacts: Some(list_processes_json()?),
+        }),
+    }
+}
+
+fn perform_filesystem_action(action: &FilesystemAction) -> Result<NativeCommandResult, String> {
+    match action {
+        FilesystemAction::ResolvePath {
+            location,
+            path,
+            name,
+        } => {
+            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), name.as_deref())?;
+            Ok(NativeCommandResult {
+                ok: true,
+                message: format!("Caminho resolvido: {}", resolved.display()),
+                stdout: None,
+                stderr: None,
+                artifacts: Some(json!({ "resolvedPath": resolved })),
+            })
+        }
+        FilesystemAction::OpenPath { path } => {
+            Command::new("explorer.exe")
+                .arg(path)
+                .spawn()
+                .map_err(|error| format!("Falha ao abrir caminho: {error}"))?;
+            Ok(native_result(format!("Caminho aberto: {path}")))
+        }
+        FilesystemAction::CreateFile {
+            path,
+            location,
+            name,
+        } => {
+            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
+            if let Some(parent) = resolved.parent() {
+                fs::create_dir_all(parent).map_err(|error| format!("Falha ao preparar a pasta: {error}"))?;
+            }
+            File::create(&resolved).map_err(|error| format!("Falha ao criar arquivo: {error}"))?;
+            Ok(native_result(format!("Arquivo criado: {}", resolved.display())))
+        }
+        FilesystemAction::CreateFolder {
+            path,
+            location,
+            name,
+        } => {
+            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
+            fs::create_dir_all(&resolved).map_err(|error| format!("Falha ao criar pasta: {error}"))?;
+            Ok(native_result(format!("Pasta criada: {}", resolved.display())))
+        }
+        FilesystemAction::CopyPath {
+            source_path,
+            target_path,
+        } => {
+            fs::copy(source_path, target_path).map_err(|error| format!("Falha ao copiar caminho: {error}"))?;
+            Ok(native_result(format!("Caminho copiado para {target_path}")))
+        }
+        FilesystemAction::MovePath {
+            source_path,
+            target_path,
+        }
+        | FilesystemAction::RenamePath {
+            path: source_path,
+            target_path,
+        } => {
+            fs::rename(source_path, target_path).map_err(|error| format!("Falha ao mover/renomear caminho: {error}"))?;
+            Ok(native_result(format!("Caminho movido para {target_path}")))
+        }
+        FilesystemAction::DeletePath { path } => {
+            let candidate = PathBuf::from(path);
+            if candidate.is_dir() {
+                fs::remove_dir_all(&candidate).map_err(|error| format!("Falha ao apagar pasta: {error}"))?;
+            } else {
+                fs::remove_file(&candidate).map_err(|error| format!("Falha ao apagar arquivo: {error}"))?;
+            }
+            Ok(native_result(format!("Caminho apagado: {path}")))
+        }
+        FilesystemAction::WriteFile {
+            path,
+            content,
+            overwrite,
+        } => {
+            if !overwrite.unwrap_or(false) && Path::new(path).exists() {
+                return Err("WriteFile exige overwrite=true para sobrescrever um arquivo existente.".to_string());
+            }
+            fs::write(path, content).map_err(|error| format!("Falha ao gravar arquivo: {error}"))?;
+            Ok(native_result(format!("Arquivo gravado: {path}")))
+        }
+        FilesystemAction::AppendFile { path, content } => {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| format!("Falha ao abrir arquivo para append: {error}"))?;
+            file.write_all(content.as_bytes())
+                .map_err(|error| format!("Falha ao anexar conteudo: {error}"))?;
+            Ok(native_result(format!("Conteudo anexado em: {path}")))
+        }
+    }
+}
+
+fn perform_shell_action(action: &ShellAction) -> Result<NativeCommandResult, String> {
+    match action {
+        ShellAction::RunShellCommand {
+            command,
+            args,
+            working_directory,
+            timeout_ms,
+            env,
+        } => {
+            let timeout_ms = timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS);
+            let mut process = Command::new(command);
+            process
+                .args(args)
+                .current_dir(working_directory)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+
+            if let Some(env) = env {
+                for (key, value) in env {
+                    process.env(key, value);
+                }
+            }
+
+            let mut child = process
+                .spawn()
+                .map_err(|error| format!("Falha ao iniciar shell controlado: {error}"))?;
+
+            match child
+                .wait_timeout(Duration::from_millis(timeout_ms))
+                .map_err(|error| format!("Falha ao esperar shell controlado: {error}"))?
+            {
+                Some(_) => {
+                    let output = child
+                        .wait_with_output()
+                        .map_err(|error| format!("Falha ao coletar saida do shell: {error}"))?;
+                    Ok(NativeCommandResult {
+                        ok: output.status.success(),
+                        message: if output.status.success() {
+                            "Shell concluido.".to_string()
+                        } else {
+                            "Shell concluiu com erro.".to_string()
+                        },
+                        stdout: Some(truncate_shell_output(&String::from_utf8_lossy(&output.stdout))),
+                        stderr: Some(truncate_shell_output(&String::from_utf8_lossy(&output.stderr))),
+                        artifacts: Some(json!({
+                            "statusCode": output.status.code(),
+                        })),
+                    })
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    Err(format!("Shell expirou apos {timeout_ms}ms."))
+                }
+            }
+        }
+    }
+}
+
+fn perform_local_action(action: &LocalAction) -> Result<NativeCommandResult, String> {
+    match action {
+        LocalAction::WindowUi(action) => perform_window_ui_action(action),
+        LocalAction::AppsProcesses(action) => perform_apps_process_action(action),
+        LocalAction::Filesystem(action) => perform_filesystem_action(action),
+        LocalAction::Shell(action) => perform_shell_action(action),
+    }
+}
+
 #[tauri::command]
 fn create_gemini_live_url() -> Result<GeminiLiveAccess, String> {
     Ok(GeminiLiveAccess {
@@ -903,6 +1978,31 @@ fn execute_desktop_action(action: DesktopAction) -> Result<DesktopActionResult, 
     Ok(DesktopActionResult { ok: true, message })
 }
 
+#[tauri::command]
+fn execute_local_action(action: LocalAction) -> Result<NativeCommandResult, String> {
+    validate_local_action(&action)?;
+    perform_local_action(&action)
+}
+
+#[tauri::command]
+fn get_foreground_context() -> Result<NativeCommandResult, String> {
+    let response = python_sidecar::get_foreground_context()?;
+    if !response.ok {
+        return Err(normalize_python_sidecar_error(
+            response.error_code.as_deref(),
+            &response.message,
+        ));
+    }
+
+    Ok(NativeCommandResult {
+        ok: true,
+        message: response.message,
+        stdout: response.stdout,
+        stderr: response.stderr,
+        artifacts: response.artifacts,
+    })
+}
+
 #[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -915,13 +2015,24 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            let knowledge_state = web_knowledge::WebKnowledgeState::default();
+            web_knowledge::start_browser_knowledge_bridge(knowledge_state.clone())?;
+            app.manage(knowledge_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             create_gemini_live_url,
             load_alice_memory_json,
             save_alice_memory_json,
-            execute_desktop_action
+            execute_desktop_action,
+            execute_local_action,
+            get_foreground_context,
+            web_knowledge::refresh_current_page_snapshot,
+            web_knowledge::get_navigation_context,
+            web_knowledge::inspect_current_page,
+            web_knowledge::search_same_domain,
+            web_knowledge::search_web,
+            web_knowledge::fetch_web_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -975,12 +2086,21 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_large_type_text_payload() {
+    fn validation_accepts_type_text_payload_within_limit() {
         let action = DesktopAction::TypeText {
-            text: "a".repeat(20_000),
+            text: "a".repeat(MAX_TYPE_TEXT_CHARS),
         };
 
         assert!(validate_desktop_action(&action).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_type_text_payload_above_limit() {
+        let action = DesktopAction::TypeText {
+            text: "a".repeat(MAX_TYPE_TEXT_CHARS + 1),
+        };
+
+        assert!(validate_desktop_action(&action).is_err());
     }
 
     #[test]
@@ -1205,5 +2325,110 @@ mod tests {
             windows_input::parse_ui_automation_lookup_result(br#"{"found":false}"#).unwrap();
 
         assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn close_app_script_uses_close_main_window_and_alt_f4_fallback() {
+        assert!(CLOSE_APP_SCRIPT.contains("CloseMainWindow"));
+        assert!(CLOSE_APP_SCRIPT.contains("%{F4}"));
+    }
+
+    #[test]
+    fn close_app_patterns_expand_browser_aliases() {
+        let patterns = close_app_patterns("browser");
+
+        assert!(patterns.iter().any(|pattern| pattern.contains("chrome")));
+        assert!(patterns.iter().any(|pattern| pattern.contains("msedge")));
+        assert!(patterns.iter().any(|pattern| pattern.contains("firefox")));
+    }
+
+    #[test]
+    fn validate_local_action_rejects_shell_outside_scope() {
+        let action = LocalAction::Shell(ShellAction::RunShellCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "test".to_string()],
+            working_directory: "C:\\Windows".to_string(),
+            timeout_ms: Some(5_000),
+            env: None,
+        });
+
+        assert!(validate_local_action(&action).is_err());
+    }
+
+    #[test]
+    fn validate_local_action_accepts_scoped_shell_command() {
+        let action = LocalAction::Shell(ShellAction::RunShellCommand {
+            command: "npm".to_string(),
+            args: vec!["run".to_string(), "test".to_string()],
+            working_directory: "C:\\projetos\\alice-virtual".to_string(),
+            timeout_ms: Some(5_000),
+            env: None,
+        });
+
+        assert!(validate_local_action(&action).is_ok());
+    }
+
+    #[test]
+    fn validate_local_action_rejects_blocked_filesystem_path() {
+        let action = LocalAction::Filesystem(FilesystemAction::DeletePath {
+            path: "C:\\Windows\\System32".to_string(),
+        });
+
+        assert!(validate_local_action(&action).is_err());
+    }
+
+    #[test]
+    fn validate_local_action_accepts_filesystem_path_inside_scope() {
+        let action = LocalAction::Filesystem(FilesystemAction::DeletePath {
+            path: "C:\\projetos\\alice-virtual\\tmp.txt".to_string(),
+        });
+
+        assert!(validate_local_action(&action).is_ok());
+    }
+
+    #[test]
+    fn normalize_python_sidecar_error_maps_known_codes() {
+        assert!(normalize_python_sidecar_error(Some("python_timeout"), "late").contains("expirou"));
+        assert!(normalize_python_sidecar_error(Some("target_not_found"), "missing").contains("alvo"));
+    }
+
+    #[test]
+    fn get_foreground_context_uses_sidecar_response() {
+        let _guard = python_sidecar::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        python_sidecar::reset_for_tests();
+        let script_path = std::env::temp_dir().join(format!(
+            "alice-foreground-test-{}-{}.py",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &script_path,
+            "import json,sys\nfor line in sys.stdin:\n req=json.loads(line)\n print(json.dumps({'id': req['id'], 'ok': True, 'message': 'Janela em foco identificada.', 'artifacts': {'windowTitle': 'Spotify Premium', 'processName': 'Spotify', 'appAlias': 'Spotify'}, 'stdout': None, 'stderr': None}), flush=True)\n",
+        )
+        .unwrap();
+        std::env::set_var("ALICE_PYTHON_SIDECAR_PATH", &script_path);
+        std::env::set_var("ALICE_PYTHON_BIN", "python");
+
+        let result = get_foreground_context().unwrap();
+
+        assert_eq!(result.message, "Janela em foco identificada.");
+        assert_eq!(
+            result.artifacts,
+            Some(json!({
+                "windowTitle": "Spotify Premium",
+                "processName": "Spotify",
+                "appAlias": "Spotify",
+            }))
+        );
+
+        python_sidecar::reset_for_tests();
+        std::env::remove_var("ALICE_PYTHON_SIDECAR_PATH");
+        std::env::remove_var("ALICE_PYTHON_BIN");
+        let _ = fs::remove_file(script_path);
     }
 }

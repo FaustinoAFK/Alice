@@ -17,12 +17,10 @@ export const trimRehydrationSnippet = (text, maxChars = REHYDRATION_TEXT_LIMIT) 
 export const buildSessionRehydrationTurns = ({
   trustedUtterance = null,
   outputTranscript = '',
-  lastCommand = null,
 } = {}) => {
   const lines = [];
   const inputText = trimRehydrationSnippet(trustedUtterance?.text);
   const outputText = trimRehydrationSnippet(outputTranscript);
-  const commandMessage = trimRehydrationSnippet(lastCommand?.message, 160);
 
   if (inputText) {
     lines.push(`Ultima fala do usuario: ${inputText}`);
@@ -30,13 +28,6 @@ export const buildSessionRehydrationTurns = ({
 
   if (outputText) {
     lines.push(`Ultima resposta da Alice: ${outputText}`);
-  }
-
-  if (lastCommand?.name && lastCommand?.status) {
-    const statusLine = commandMessage
-      ? `Ultimo comando local: ${lastCommand.name} (${lastCommand.status}) - ${commandMessage}`
-      : `Ultimo comando local: ${lastCommand.name} (${lastCommand.status})`;
-    lines.push(statusLine);
   }
 
   if (lines.length === 0) {

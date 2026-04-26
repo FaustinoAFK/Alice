@@ -22,17 +22,12 @@ describe('validateAliceMemorySchema', () => {
 });
 
 describe('extractImportantFacts', () => {
-  it('extracts only durable user preferences, projects, tasks, tool facts and recent summary', () => {
+  it('extracts only durable user preferences, projects, tasks and recent summary', () => {
     const facts = extractImportantFacts(
       {
         inputTranscript:
           'eu gosto de interfaces limpas e automacao local. pode me chamar de Fausto. projeto Alice Virtual. tarefa fechar fase 5.',
         outputTranscript: 'Fechado. Vou manter isso em mente.',
-        lastCommand: {
-          name: 'open_app',
-          status: 'executado',
-          message: 'Bloco de notas aberto.',
-        },
         sessionModel: 'gemini-2.5-flash-native-audio-preview-12-2025',
       },
       { now: '2026-04-23T12:40:00.000Z' },
@@ -58,14 +53,7 @@ describe('extractImportantFacts', () => {
         updatedAt: '2026-04-23T12:40:00.000Z',
       },
     ]);
-    expect(facts.toolFacts).toEqual([
-      {
-        kind: 'open_app',
-        fact: 'Bloco de notas aberto.',
-        source: 'tool',
-        updatedAt: '2026-04-23T12:40:00.000Z',
-      },
-    ]);
+    expect(facts.toolFacts).toEqual([]);
     expect(facts.recentContextSummary.summary).toContain('Usuario: eu gosto de interfaces limpas');
     expect(facts.bootstrapMeta.lastSessionModel).toBe('gemini-2.5-flash-native-audio-preview-12-2025');
   });
@@ -75,7 +63,6 @@ describe('extractImportantFacts', () => {
       {
         inputTranscript: 'ali ce',
         outputTranscript: '',
-        lastCommand: null,
       },
       { now: '2026-04-23T12:41:00.000Z' },
     );
@@ -100,9 +87,9 @@ describe('mergeImportantFacts', () => {
       },
       toolFacts: [
         {
-          kind: 'open_app',
-          fact: 'Bloco de notas aberto.',
-          source: 'tool',
+          kind: 'memory',
+          fact: 'Usuario prefere contexto local.',
+          source: 'memory',
           updatedAt: '2026-04-23T12:00:00.000Z',
         },
       ],
@@ -119,15 +106,15 @@ describe('mergeImportantFacts', () => {
         },
         toolFacts: [
           {
-            kind: 'open_app',
-            fact: 'Bloco de notas aberto.',
-            source: 'tool',
+            kind: 'memory',
+            fact: 'Usuario prefere contexto local.',
+            source: 'memory',
             updatedAt: '2026-04-23T12:10:00.000Z',
           },
           {
-            kind: 'open_folder',
-            fact: 'Pasta Downloads aberta.',
-            source: 'tool',
+            kind: 'memory',
+            fact: 'Projeto Alice Virtual segue ativo.',
+            source: 'memory',
             updatedAt: '2026-04-23T12:11:00.000Z',
           },
         ],
@@ -170,9 +157,9 @@ describe('pruneAliceMemory', () => {
         updatedAt: `2026-04-${String(23 - Math.min(index, 9)).padStart(2, '0')}T12:00:00.000Z`,
       })),
       toolFacts: Array.from({ length: 55 }, (_, index) => ({
-        kind: 'tool',
+        kind: 'memory',
         fact: `Fato ${index}`,
-        source: 'tool',
+        source: 'memory',
         updatedAt: `2026-04-${String(23 - Math.min(index, 9)).padStart(2, '0')}T12:00:00.000Z`,
       })),
     };
@@ -233,6 +220,41 @@ describe('loadAliceMemory', () => {
     });
 
     expect(validateAliceMemorySchema(memory)).toBe(true);
+  });
+
+  it('migrates legacy memory into the current shape without preserving command-only state', async () => {
+    const legacyMemory = {
+      schemaVersion: 2,
+      identity: createEmptyAliceMemory().identity,
+      stablePreferences: createEmptyAliceMemory().stablePreferences,
+      activeProjects: [],
+      activeTasks: [],
+      toolFacts: [],
+      recentContextSummary: {
+        summary: 'Usuario: continuar fase 5',
+        updatedAt: '2026-04-23T12:00:00.000Z',
+      },
+      commandPreferences: {
+        policyMode: 'hands_free',
+      },
+      commandFriction: {
+        lastScore: 0.8,
+      },
+      bootstrapMeta: {
+        lastUpdatedAt: '2026-04-23T12:00:00.000Z',
+        lastSessionModel: 'gemini-demo',
+        memoryRevision: 3,
+      },
+    };
+
+    const memory = await loadAliceMemory({
+      loadJson: vi.fn(async () => JSON.stringify(legacyMemory)),
+    });
+
+    expect(memory.schemaVersion).toBe(ALICE_MEMORY_SCHEMA_VERSION);
+    expect(memory.recentContextSummary.summary).toContain('continuar fase 5');
+    expect(memory).not.toHaveProperty('commandPreferences');
+    expect(memory).not.toHaveProperty('commandFriction');
   });
 
   it('recovers safely from corrupt or invalid memory payloads', async () => {
