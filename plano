@@ -1,0 +1,1796 @@
+# Plano Técnico Consolidado — Autonomous Task Runner da Alice
+
+## 1. Objetivo central
+
+Criar um **Autonomous Task Runner** oficial para a Alice, capaz de executar tarefas grandes de forma contínua, segura, rastreável e recuperável dentro da **VM/workspace local**, sem depender do usuário ficar olhando a tela.
+
+O Runner deve resolver o problema estrutural atual:
+
+```text
+tarefa grande planejada
+→ fica running
+→ não existe worker contínuo para retomar
+→ tarefa nunca fecha corretamente
+```
+
+A nova arquitetura deve garantir:
+
+```text
+plano → steps executáveis → fila → execução na VM → validação → evidência → conclusão/retry/bloqueio → aprendizado
+```
+
+---
+
+# 2. Decisões fechadas
+
+Estas decisões já estão definidas e devem ser tratadas como requisitos:
+
+## 2.1 Modo de operação
+
+O Runner opera em **modo híbrido controlado pelo HUD**:
+
+```text
+Runner existe em background
+mas só executa quando:
+- autonomia estiver ligada;
+- houver task elegível;
+- VM/workspace estiver disponível;
+- política permitir;
+- task tiver steps executáveis.
+```
+
+## 2.2 Nível de autonomia
+
+A Alice pode executar tarefas sozinha dentro da VM:
+
+```text
+execução totalmente autônoma
+sem o usuário precisar observar a tela
+```
+
+Mas com auditoria, evidências, kill switch e controle pelo HUD.
+
+## 2.3 Ambiente permitido
+
+A execução autônoma deve acontecer somente em:
+
+```text
+VM/workspace local
+```
+
+Não deve agir diretamente no computador principal.
+
+## 2.4 Concorrência
+
+A fila será sequencial:
+
+```text
+1 task por vez
+```
+
+A próxima task só começa quando a task ativa:
+
+```text
+done
+failed
+blocked
+cancelled
+paused
+```
+
+ou quando a task ativa for temporariamente movida para `waiting_retry` e não estiver mais ocupando o lock.
+
+## 2.5 Fila produtiva
+
+Se uma task não puder rodar por indisponibilidade temporária da VM/workspace:
+
+```text
+task atual → waiting_retry
+Alice tenta próxima task pronta
+```
+
+Ou seja: uma task travada temporariamente não bloqueia toda a fila.
+
+---
+
+# 3. Modelo de estados
+
+## 3.1 Estados oficiais da task
+
+Cada task autônoma deve usar estes estados:
+
+```text
+planned
+ready
+running
+waiting_retry
+waiting_input
+blocked
+done
+failed
+cancelled
+paused
+```
+
+## 3.2 Motivo interno do estado
+
+Todo estado relevante pode carregar um `reason`.
+
+Exemplo:
+
+```js
+{
+  status: "blocked",
+  reason: "no_executable_step"
+}
+```
+
+Motivos esperados:
+
+```text
+vm_unavailable
+workspace_unavailable
+no_executable_step
+validation_failed
+policy_blocked
+missing_context
+dependency_failed
+dependency_unresolved
+recovery_loop_detected
+manual_pause
+manual_cancel
+stale_running_task
+max_attempts_reached
+dry_run_failed
+completion_criteria_missing
+```
+
+## 3.3 Significado prático dos estados
+
+```text
+planned
+```
+
+A task existe como intenção ou objetivo, mas ainda não tem steps validados.
+
+```text
+ready
+```
+
+A task tem steps executáveis, critérios de conclusão e pode entrar na fila.
+
+```text
+running
+```
+
+A task ou step está executando agora. Esse estado nunca deve ser usado para “planejado para depois”.
+
+```text
+waiting_retry
+```
+
+A task falhou temporariamente ou não pôde rodar agora, mas pode ser tentada depois.
+
+```text
+waiting_input
+```
+
+A task precisa de informação externa do usuário ou de contexto que a Alice não consegue inferir.
+
+```text
+blocked
+```
+
+A task não pode continuar sozinha.
+
+```text
+done
+```
+
+A task terminou com evidência e validação suficiente.
+
+```text
+failed
+```
+
+A task falhou após tentativas ou erro definitivo.
+
+```text
+cancelled
+```
+
+Foi cancelada manualmente ou por política.
+
+```text
+paused
+```
+
+Foi pausada e pode ser retomada.
+
+---
+
+# 4. Estrutura da task
+
+Toda task autônoma deve ter steps obrigatórios.
+
+Mesmo uma task simples deve virar uma task com um único step.
+
+Modelo base:
+
+```js
+{
+  id: "task-id",
+  title: "Implementar X",
+  description: "",
+  status: "planned",
+  reason: null,
+
+  priority: "low" | "medium" | "high" | "critical",
+  queueRank: number,
+
+  goalId: null,
+  mindMapNodeId: null,
+  procedureId: null,
+
+  createdAt: "ISO_DATE",
+  updatedAt: "ISO_DATE",
+
+  attempts: 0,
+  maxAttempts: 3,
+
+  nextRunAt: null,
+  lastAttemptAt: null,
+
+  leaseId: null,
+  runningStartedAt: null,
+  heartbeatAt: null,
+
+  dependencies: [],
+  recoveryOfTaskId: null,
+  recoveryAttempts: [],
+
+  plan: {
+    summary: "",
+    assumptions: [],
+    risks: [],
+    dependencies: []
+  },
+
+  steps: [],
+
+  executionHistory: [],
+
+  auditRefs: [],
+  evidenceRefs: []
+}
+```
+
+---
+
+# 5. Estrutura dos steps
+
+Todo step deve ter:
+
+```js
+{
+  id: "step-id",
+  title: "Rodar testes",
+  description: "",
+
+  status: "planned" | "ready" | "running" | "waiting_retry" | "blocked" | "done" | "failed" | "cancelled" | "paused",
+  reason: null,
+
+  type: "analysis" | "command" | "build" | "test" | "visual" | "file_operation" | "dry_run" | "validation",
+
+  action: {
+    kind: "command" | "visual" | "analysis" | "file_check" | "script",
+    command: "npm test",
+    workingDirectory: "",
+    args: []
+  },
+
+  completionCriteria: {
+    type: "exit_code" | "tests_passed" | "build_passed" | "file_exists" | "file_contains" | "visual_state" | "custom_validation",
+    expected: null,
+    command: null,
+    path: null,
+    description: null
+  },
+
+  expectedEvidence: {
+    kind: "minimal" | "complete" | "visual",
+    required: []
+  },
+
+  timeoutPolicy: {
+    type: "dynamic",
+    timeoutMs: number
+  },
+
+  retryPolicy: {
+    maxAttempts: 3,
+    backoff: "dynamic"
+  },
+
+  attempts: 0,
+  maxAttempts: 3,
+
+  startedAt: null,
+  finishedAt: null,
+
+  result: null,
+  evidenceRefs: []
+}
+```
+
+---
+
+# 6. Autoplanejamento de tasks sem steps
+
+Quando uma task estiver `planned` e não tiver steps executáveis, a Alice deve tentar autoplanejamento completo.
+
+Fluxo:
+
+```text
+task planned sem steps
+→ gerar plano operacional
+→ gerar steps
+→ definir critérios de conclusão
+→ definir evidências esperadas
+→ validar estrutura
+→ simular mentalmente
+→ verificar dependências
+→ fazer dry-run seguro na sandbox da VM quando possível
+→ se válido: ready
+→ se inválido: blocked / waiting_input
+```
+
+Formato do plano gerado:
+
+```js
+{
+  summary: "",
+  assumptions: [],
+  risks: [],
+  dependencies: [],
+  steps: [
+    {
+      title: "",
+      type: "",
+      action: {},
+      command: "",
+      completionCriteria: {},
+      expectedEvidence: {},
+      timeoutPolicy: {},
+      retryPolicy: {}
+    }
+  ],
+  validationReport: {
+    structurallyValid: true,
+    hasExecutableSteps: true,
+    hasCompletionCriteria: true,
+    hasExpectedEvidence: true,
+    dryRunResult: {},
+    blockers: []
+  }
+}
+```
+
+Se a Alice não conseguir criar steps confiáveis:
+
+```js
+{
+  status: "blocked",
+  reason: "no_executable_step"
+}
+```
+
+ou:
+
+```js
+{
+  status: "waiting_input",
+  reason: "missing_context"
+}
+```
+
+---
+
+# 7. Dry-run em sandbox da VM
+
+A validação dos steps pode usar dry-run avançado em sandbox da VM.
+
+Fluxo:
+
+```text
+criar cópia temporária do workspace
+executar verificação segura
+não alterar projeto real
+coletar evidência
+decidir se step é executável
+descartar sandbox ou arquivar evidência
+```
+
+O dry-run pode:
+
+```text
+- analisar comandos;
+- verificar arquivos;
+- testar comandos em cópia temporária;
+- simular validações;
+- detectar dependências ausentes;
+- identificar comandos perigosos;
+- confirmar se o step é executável.
+```
+
+O dry-run não deve:
+
+```text
+- alterar o projeto real;
+- marcar task como done;
+- substituir execução real;
+- inventar sucesso.
+```
+
+---
+
+# 8. Máquina de execução
+
+## 8.1 Fluxo geral
+
+```text
+planned
+→ autoplanejamento
+→ ready
+→ running
+→ done
+```
+
+ou:
+
+```text
+running
+→ waiting_retry
+→ ready
+→ running
+```
+
+ou:
+
+```text
+running
+→ blocked / failed
+```
+
+## 8.2 Fluxo de step
+
+```text
+step ready
+→ preflight
+→ lease
+→ running
+→ executar na VM
+→ coletar evidência
+→ validar critério de conclusão
+→ done/failed/waiting_retry/blocked
+```
+
+## 8.3 Regra principal
+
+A Alice nunca deve marcar uma task como `done` sem:
+
+```text
+execução real
++ evidência
++ critério de conclusão satisfeito
+```
+
+---
+
+# 9. Runner loop
+
+Criar módulo principal:
+
+```text
+src/autonomousTaskRunner.js
+```
+
+Responsabilidades:
+
+```text
+- carregar estado do runner;
+- recuperar tasks presas;
+- escolher próxima task;
+- fazer preflight;
+- adquirir lock;
+- executar step;
+- manter heartbeat;
+- validar resultado;
+- atualizar task;
+- atualizar mapa mental;
+- registrar auditoria;
+- gerar aprendizado candidato;
+- salvar estado.
+```
+
+Loop conceitual:
+
+```js
+async function runAutonomousTaskRunnerTick() {
+  recoverStaleTasksIfNeeded()
+
+  if (!runnerEnabled()) return
+  if (runnerPaused()) return
+  if (hasActiveLock()) return
+
+  const task = selectNextEligibleTask()
+
+  if (!task) {
+    scheduleNextTick()
+    return
+  }
+
+  await processTask(task)
+}
+```
+
+---
+
+# 10. Intervalo dinâmico do Runner
+
+O Runner não deve usar intervalo fixo simples.
+
+Regras:
+
+```text
+fila vazia
+→ checagem mais lenta
+
+task pronta
+→ checagem rápida
+
+VM indisponível
+→ aumenta intervalo
+
+retry agendado
+→ acorda perto do nextRunAt
+
+runner pausado
+→ checagem mínima
+
+task running
+→ heartbeat em intervalo próprio
+```
+
+Exemplo:
+
+```js
+{
+  idleIntervalMs: 30000,
+  readyIntervalMs: 2000,
+  pausedIntervalMs: 60000,
+  vmUnavailableIntervalMs: 15000,
+  heartbeatIntervalMs: 5000
+}
+```
+
+---
+
+# 11. Timeout dinâmico
+
+Cada step deve ter timeout por tipo.
+
+Sugestão:
+
+```text
+analysis simples → 30s
+comando curto → 2min
+build/testes → 5–10min
+automação visual → timeout próprio por etapa
+dry-run sandbox → timeout limitado e seguro
+```
+
+Modelo:
+
+```js
+function resolveStepTimeout(step) {
+  switch (step.type) {
+    case "analysis": return 30_000
+    case "command": return 120_000
+    case "build": return 600_000
+    case "test": return 600_000
+    case "visual": return step.timeoutPolicy?.timeoutMs ?? 300_000
+    default: return 120_000
+  }
+}
+```
+
+---
+
+# 12. Lease, lock e heartbeat
+
+## 12.1 Lock global
+
+Como só roda uma task por vez:
+
+```js
+runnerLock = {
+  activeTaskId,
+  activeStepId,
+  leaseId,
+  acquiredAt,
+  heartbeatAt
+}
+```
+
+## 12.2 Lease da task
+
+Quando a task entra em `running`:
+
+```js
+{
+  leaseId,
+  runningStartedAt,
+  heartbeatAt,
+  staleTimeoutMs
+}
+```
+
+## 12.3 Heartbeat
+
+Enquanto executa:
+
+```text
+atualizar heartbeatAt periodicamente
+```
+
+Se o heartbeat expirar:
+
+```text
+task running + heartbeat vencido
+→ stale detection
+→ waiting_retry ou failed
+```
+
+## 12.4 Recovery no startup
+
+Criar:
+
+```js
+recoverAutonomousTasksOnStartup()
+```
+
+Ao abrir a Alice:
+
+```text
+buscar tasks running
+verificar lease/heartbeat
+nunca assumir sucesso
+mover para waiting_retry ou failed
+registrar auditoria
+limpar lock inválido
+```
+
+---
+
+# 13. Seleção da próxima task
+
+A fila considera:
+
+```text
+1. status elegível
+2. prioridade
+3. queueRank
+4. nextRunAt vencido
+5. dependências resolvidas
+6. VM/workspace disponível
+7. tentativas restantes
+```
+
+Estados elegíveis:
+
+```text
+ready
+waiting_retry com nextRunAt vencido
+planned que pode ser autoplanejada
+```
+
+Estados não elegíveis:
+
+```text
+running
+blocked
+done
+failed
+cancelled
+paused
+waiting_input
+```
+
+## 13.1 Prioridade
+
+```text
+critical > high > medium > low
+```
+
+## 13.2 queueRank
+
+O HUD pode reordenar manualmente a fila usando `queueRank`.
+
+A ordem final deve combinar:
+
+```text
+priority + queueRank + readiness
+```
+
+---
+
+# 14. Preflight da VM/workspace
+
+Antes de executar qualquer step:
+
+```js
+checkVmAvailability()
+checkWorkspaceReady()
+checkTaskExecutable()
+checkRunnerPolicy()
+checkDependencies()
+```
+
+Se a VM não estiver disponível:
+
+```text
+task → waiting_retry
+reason → vm_unavailable
+Alice tenta próxima task pronta
+```
+
+Se o workspace não estiver pronto:
+
+```text
+task → waiting_retry ou blocked
+reason → workspace_unavailable
+```
+
+Se o step não for executável:
+
+```text
+task → blocked
+reason → no_executable_step
+```
+
+Se a política bloquear:
+
+```text
+task → blocked
+reason → policy_blocked
+```
+
+---
+
+# 15. Evidência obrigatória
+
+A evidência será adaptativa.
+
+## 15.1 Análise simples
+
+```js
+{
+  kind: "minimal",
+  exitCode,
+  output,
+  timestamp
+}
+```
+
+## 15.2 Comando/código
+
+```js
+{
+  kind: "complete",
+  command,
+  stdoutRef,
+  stderrRef,
+  exitCode,
+  filesChangedRef,
+  validationResultRef,
+  startedAt,
+  finishedAt
+}
+```
+
+## 15.3 Interface visual na VM
+
+```js
+{
+  kind: "visual",
+  command,
+  stdoutRef,
+  stderrRef,
+  exitCode,
+  screenshotRefs,
+  visualLogRefs,
+  validationResultRef,
+  startedAt,
+  finishedAt
+}
+```
+
+## 15.4 Regra crítica
+
+Sem evidência suficiente:
+
+```text
+não marcar done
+```
+
+---
+
+# 16. Persistência
+
+## 16.1 Estado leve em `aliceMemory`
+
+O estado principal fica no fluxo oficial de memória:
+
+```js
+aliceMemory.autonomousRunner = {
+  enabled: false,
+  runnerState: "idle" | "running" | "paused",
+
+  queue: [],
+  tasksById: {},
+
+  activeTaskId: null,
+  runnerLock: null,
+
+  evidenceRefs: [],
+  auditRefs: [],
+
+  settings: {
+    maxConcurrentTasks: 1,
+    defaultMaxAttempts: 3,
+    dynamicIntervalEnabled: true,
+    dynamicTimeoutEnabled: true
+  }
+}
+```
+
+## 16.2 Evidências pesadas em arquivos
+
+Não colocar stdout gigante, screenshots e logs pesados dentro de `aliceMemory`.
+
+Usar:
+
+```text
+data/evidence/<executionId>/
+```
+
+Arquivos possíveis:
+
+```text
+stdout.txt
+stderr.txt
+validation.json
+screenshot.png
+filesChanged.json
+metadata.json
+visual-log.json
+```
+
+`aliceMemory` guarda apenas referências:
+
+```js
+{
+  executionId,
+  taskId,
+  stepId,
+  path,
+  kind,
+  createdAt,
+  important: true
+}
+```
+
+---
+
+# 17. Retenção de evidências
+
+Política híbrida:
+
+```text
+- manter sempre evidências de falhas, blockers e tasks críticas;
+- manter evidências recentes de sucesso;
+- limitar por quantidade;
+- limitar por idade;
+- permitir limpeza manual pelo HUD;
+- nunca apagar evidência vinculada a task ativa;
+- nunca apagar evidência usada por aprendizado aprovado.
+```
+
+Exemplo:
+
+```js
+{
+  keepFailures: true,
+  keepBlocked: true,
+  keepCritical: true,
+  maxSuccessEvidence: 100,
+  maxAgeDaysForSuccess: 30
+}
+```
+
+---
+
+# 18. Auditoria completa
+
+Criar auditoria própria do Runner.
+
+Ela deve registrar:
+
+```text
+- linha do tempo global;
+- linha do tempo por task;
+- decisão de fila;
+- task escolhida;
+- tasks puladas e motivo;
+- preflight;
+- política;
+- execução;
+- validação;
+- transição de estado;
+- comparação antes/depois;
+- recovery;
+- retry;
+- cancelamento;
+- pausa;
+- links para evidências.
+```
+
+Modelo:
+
+```js
+{
+  id,
+  timestamp,
+  type: "queue_decision" | "preflight" | "execution" | "validation" | "state_transition" | "recovery" | "policy_decision",
+  taskId,
+  stepId,
+  summary,
+  reason,
+  beforeState,
+  afterState,
+  evidenceRefs,
+  metadata
+}
+```
+
+---
+
+# 19. Dependências entre tasks
+
+## 19.1 Modelo
+
+```js
+dependencies: [
+  {
+    taskId: "task-a",
+    requiredStatus: "done"
+  }
+]
+```
+
+## 19.2 Regra normal
+
+Uma task só pode rodar quando suas dependências estiverem satisfeitas.
+
+## 19.3 Dependência falhou
+
+Quando uma dependência falha:
+
+```text
+task dependente não roda
+Alice cria task de recuperação
+recovery task tenta resolver a dependência
+se recovery der certo → task original volta para ready
+se recovery falhar sem progresso → task original blocked
+```
+
+## 19.4 Auto-recuperação dinâmica
+
+A Alice pode criar novas tasks de recuperação enquanto houver progresso real.
+
+Progresso real:
+
+```text
+- arquivo corrigido;
+- dependência instalada;
+- erro mudou;
+- teste avançou;
+- validação parcial passou;
+- novo bloqueio mais específico apareceu.
+```
+
+Loop detectado:
+
+```text
+- mesmo erro 2x;
+- mesmo comando falhando 2x;
+- nenhum arquivo alterado;
+- nenhuma evidência nova;
+- mesmo step sem avanço.
+```
+
+Se detectar loop:
+
+```js
+{
+  status: "blocked",
+  reason: "recovery_loop_detected"
+}
+```
+
+---
+
+# 20. Retry
+
+Cada step tem:
+
+```js
+attempts
+maxAttempts
+nextRunAt
+```
+
+Padrão inicial:
+
+```text
+maxAttempts = 3
+```
+
+Backoff sugerido:
+
+```text
+1ª falha → retry em 5s
+2ª falha → retry em 30s
+3ª falha → failed ou blocked
+```
+
+Mas pode ser dinâmico por tipo de step.
+
+Regra:
+
+```text
+falha temporária → waiting_retry
+falha definitiva → failed/blocked
+```
+
+---
+
+# 21. Controle pelo HUD
+
+Criar uma página ou seção do HUD para o Runner.
+
+Controles obrigatórios:
+
+```text
+Autonomia ON/OFF
+Pausar Runner
+Retomar Runner
+Pausar task atual após step
+Interromper step atual se possível
+Cancelar task atual
+Cancelar fila
+Bloquear task
+Reexecutar task
+Reordenar fila
+Ver evidências
+Ver histórico
+Ver mapa vinculado
+Ver logs detalhados
+Ver motivo de cada decisão
+Ver por que task foi pulada
+Ver preflight da VM
+Ver validação usada
+Ver screenshots/evidências
+```
+
+## 21.1 Modo auditoria
+
+O HUD deve mostrar:
+
+```text
+- task atual;
+- step atual;
+- status;
+- reason;
+- attempts;
+- maxAttempts;
+- heartbeat;
+- lease;
+- próximo retry;
+- evidências;
+- logs;
+- transições;
+- decisões de fila.
+```
+
+## 21.2 Kill switch
+
+O botão de desligar autonomia deve:
+
+```text
+- impedir novas execuções;
+- não iniciar próxima task;
+- permitir terminar step atual ou interromper se solicitado.
+```
+
+---
+
+# 22. Integração com mapa mental
+
+O mapa mental deve virar uma visão operacional do Runner.
+
+## 22.1 Representação
+
+```text
+task → node principal
+step → subnode
+dependência → edge
+blocker → node blocker
+recovery task → node ligado à falha original
+evidência → referência no node
+```
+
+## 22.2 Estados refletidos
+
+```text
+task running → node in_progress
+task done → node done
+task failed → node failed
+task blocked → node blocked
+step running → subnode in_progress
+step done → subnode done
+```
+
+## 22.3 Visão de planejamento + execução
+
+O mapa deve mostrar:
+
+```text
+- plano original;
+- execução real;
+- divergências;
+- retries;
+- recoveries;
+- blockers;
+- progresso geral;
+- evidências vinculadas.
+```
+
+---
+
+# 23. Integração com aprendizado
+
+O Runner deve alimentar o aprendizado operacional da Alice.
+
+Fluxo:
+
+```text
+execução real
+→ evidência
+→ histórico
+→ detecção de padrões
+→ aprendizado candidato
+→ revisão no HUD
+→ aprovação/edição/desativação
+→ influência futura no Runner e DecisionEngine
+```
+
+## 23.1 Aprendizados candidatos
+
+Exemplos:
+
+```text
+- esse tipo de step falha frequentemente;
+- esse comando costuma resolver esse erro;
+- essa sequência de steps costuma funcionar;
+- VM fica indisponível em determinado contexto;
+- recovery X resolve falha Y;
+- determinado procedimento é arriscado.
+```
+
+## 23.2 Revisão no HUD
+
+O aprendizado candidato deve aparecer no HUD para:
+
+```text
+aprovar
+editar
+desativar
+apagar
+```
+
+Somente aprendizados aprovados devem influenciar decisões futuras.
+
+---
+
+# 24. Integração com DecisionEngine
+
+O Runner deve fornecer sinais leves para a decisão, sem criar engine paralela.
+
+Adicionar resumo ao contexto:
+
+```js
+autonomous_runner_summary: {
+  enabled,
+  runnerState,
+  activeTaskId,
+  activeTaskStatus,
+  queueSize,
+  readyCount,
+  blockedCount,
+  failedCount,
+  waitingRetryCount,
+  recentFailures,
+  recentBlockers,
+  currentRiskLevel
+}
+```
+
+A DecisionEngine pode usar isso para:
+
+```text
+- aumentar cautela;
+- manter foco na task atual;
+- evitar iniciar nova tarefa grande;
+- priorizar desbloqueio;
+- sugerir revisão quando houver falhas repetidas.
+```
+
+---
+
+# 25. Integração com fluxo oficial da Alice
+
+O Runner deve se integrar aos fluxos existentes, sem criar sistema paralelo.
+
+Locais prováveis para investigar:
+
+```text
+src/autonomousLearningToolExecutor.js
+src/aliceMemory.js
+src/alice.js
+src/App.jsx
+src/hud/*
+src/hud/pages/*
+src/hud/components/*
+src/mindMapExecutionSync.js
+src/mindMapToolExecutor.js
+src/mindMapData.js
+src/decisionEngine.js
+src/behaviorContext.js
+```
+
+Regras:
+
+```text
+- usar aliceMemory como estado oficial leve;
+- usar saveAliceMemory no fluxo existente;
+- não criar banco paralelo;
+- não criar executor paralelo da VM se já existe executor oficial;
+- não duplicar lógica de tools;
+- não substituir DecisionEngine.
+```
+
+---
+
+# 26. Módulos sugeridos
+
+## 26.1 Core
+
+```text
+src/autonomousTaskRunner.js
+```
+
+Loop, tick, seleção de task, processamento.
+
+## 26.2 State helpers
+
+```text
+src/autonomousRunnerState.js
+```
+
+CRUD de tasks, queue, status, steps, recovery.
+
+## 26.3 Scheduler
+
+```text
+src/autonomousRunnerScheduler.js
+```
+
+Intervalo dinâmico, nextRunAt, readiness.
+
+## 26.4 Lease/recovery
+
+```text
+src/autonomousRunnerLease.js
+```
+
+Lock, heartbeat, stale detection, startup recovery.
+
+## 26.5 Preflight
+
+```text
+src/autonomousRunnerPreflight.js
+```
+
+VM, workspace, política, executabilidade.
+
+## 26.6 Execution
+
+```text
+src/autonomousRunnerExecutor.js
+```
+
+Execução de steps na VM/workspace usando infraestrutura existente.
+
+## 26.7 Validation
+
+```text
+src/autonomousRunnerValidation.js
+```
+
+Completion criteria, evidence validation.
+
+## 26.8 Evidence
+
+```text
+src/autonomousRunnerEvidence.js
+```
+
+Criação, armazenamento, retenção e referências.
+
+## 26.9 Audit
+
+```text
+src/autonomousRunnerAudit.js
+```
+
+Logs explicáveis e timeline.
+
+## 26.10 Autoplanning
+
+```text
+src/autonomousRunnerPlanner.js
+```
+
+Transforma task grande em plano operacional com steps.
+
+## 26.11 Recovery planning
+
+```text
+src/autonomousRunnerRecoveryPlanner.js
+```
+
+Cria tasks de recuperação para dependências falhadas.
+
+## 26.12 HUD
+
+```text
+src/hud/pages/AutonomousRunnerHudPage.jsx
+src/hud/components/runner/*
+```
+
+Painel operacional e auditoria.
+
+---
+
+# 27. Ordem de implementação recomendada
+
+## Fase 1 — Estado oficial
+
+Implementar em `aliceMemory`:
+
+```text
+autonomousRunner
+queue
+tasksById
+activeTaskId
+runnerLock
+settings
+```
+
+Criar helpers para:
+
+```text
+createTask
+updateTask
+enqueueTask
+dequeueTask
+setTaskStatus
+setStepStatus
+getEligibleTasks
+```
+
+---
+
+## Fase 2 — Schema de task e steps
+
+Criar schema robusto com:
+
+```text
+status
+reason
+steps obrigatórios
+completionCriteria
+expectedEvidence
+attempts
+timeouts
+dependencies
+executionHistory
+```
+
+Adicionar normalização/migração.
+
+---
+
+## Fase 3 — Máquina de estados
+
+Implementar transições seguras:
+
+```text
+planned → ready
+ready → running
+running → done
+running → waiting_retry
+running → blocked
+running → failed
+paused/cancelled
+```
+
+Nenhuma transição deve acontecer sem auditoria.
+
+---
+
+## Fase 4 — Lease, heartbeat e recovery
+
+Implementar:
+
+```text
+runnerLock
+leaseId
+heartbeatAt
+stale detection
+recoverAutonomousTasksOnStartup
+```
+
+---
+
+## Fase 5 — Scheduler e fila
+
+Implementar:
+
+```text
+priority
+queueRank
+nextRunAt
+readiness
+intervalo dinâmico
+```
+
+---
+
+## Fase 6 — Preflight
+
+Implementar checagens:
+
+```text
+VM disponível
+workspace pronto
+task executável
+dependências resolvidas
+política permite
+```
+
+---
+
+## Fase 7 — Execução de step
+
+Integrar ao executor real da VM/workspace já existente.
+
+Fluxo:
+
+```text
+lock
+running
+execute
+evidence
+validate
+transition
+unlock
+```
+
+---
+
+## Fase 8 — Evidências
+
+Implementar armazenamento pesado em:
+
+```text
+data/evidence/<executionId>/
+```
+
+Guardar refs em `aliceMemory`.
+
+---
+
+## Fase 9 — Validação
+
+Implementar critérios:
+
+```text
+exit_code
+tests_passed
+build_passed
+file_exists
+file_contains
+visual_state
+custom_validation
+```
+
+---
+
+## Fase 10 — Autoplanejamento
+
+Tasks sem steps:
+
+```text
+gerar plano operacional
+validar estrutura
+dry-run em sandbox
+ready ou blocked
+```
+
+---
+
+## Fase 11 — Dependências e recuperação
+
+Implementar:
+
+```text
+dependsOn
+dependency failed
+recovery task
+loop detection
+progress detection
+```
+
+---
+
+## Fase 12 — HUD completo
+
+Criar painel com:
+
+```text
+fila
+task ativa
+steps
+logs
+evidências
+preflight
+validação
+controles
+modo auditoria
+```
+
+---
+
+## Fase 13 — Mapa mental
+
+Conectar:
+
+```text
+task/step/status/dependência/recovery/evidência
+```
+
+ao mapa mental operacional.
+
+---
+
+## Fase 14 — Aprendizado
+
+Gerar aprendizados candidatos com revisão no HUD.
+
+---
+
+## Fase 15 — DecisionEngine
+
+Adicionar resumo leve do Runner ao contexto decisório.
+
+---
+
+# 28. Testes obrigatórios
+
+## 28.1 Estado
+
+```text
+cria task
+normaliza task
+migra task antiga
+cria step obrigatório
+rejeita task sem critério
+```
+
+## 28.2 Máquina de estados
+
+```text
+planned → ready
+ready → running
+running → done
+running → waiting_retry
+running → blocked
+running → failed
+cancelled
+paused
+```
+
+## 28.3 Lease/recovery
+
+```text
+cria lease
+atualiza heartbeat
+detecta stale
+recupera no startup
+não assume sucesso após restart
+```
+
+## 28.4 Scheduler
+
+```text
+prioridade
+queueRank
+nextRunAt
+VM indisponível pula task
+task bloqueada não roda
+```
+
+## 28.5 Preflight
+
+```text
+VM indisponível → waiting_retry
+workspace indisponível
+policy blocked
+no executable step
+```
+
+## 28.6 Execução
+
+```text
+step executa
+evidência criada
+validação passa
+validação falha
+```
+
+## 28.7 Retry
+
+```text
+falha temporária agenda retry
+3 tentativas respeitadas
+max attempts vira failed/blocked
+```
+
+## 28.8 Dependência
+
+```text
+dependência done libera task
+dependência failed cria recovery
+recovery success libera original
+recovery loop bloqueia
+```
+
+## 28.9 Autoplanejamento
+
+```text
+task sem steps gera plano
+plano inválido bloqueia
+dry-run passa
+dry-run falha
+```
+
+## 28.10 HUD
+
+```text
+toggle autonomia
+pausar
+retomar
+cancelar
+reordenar fila
+exibir auditoria
+exibir evidências
+```
+
+## 28.11 Mapa mental
+
+```text
+task cria node
+step cria subnode
+status sincroniza
+dependency cria edge
+recovery aparece no mapa
+```
+
+## 28.12 Aprendizado
+
+```text
+falha recorrente gera candidato
+sucesso recorrente gera candidato
+candidato precisa aprovação
+aprovado influencia resumo
+```
+
+---
+
+# 29. Validação final
+
+Ao final da implementação, executar:
+
+```bash
+npm test
+npm run lint
+npm run build
+```
+
+Também rodar testes específicos relacionados a:
+
+```text
+aliceMemory
+autonomousLearningToolExecutor
+autonomousTaskRunner
+mindMapExecutionSync
+mindMapToolExecutor
+BehaviorContext
+DecisionEngine
+HUD
+```
+
+Critérios de aceite:
+
+```text
+- nenhuma task finalizada fica running;
+- task running sem heartbeat é recuperada;
+- task sem steps não roda;
+- step sem critério de conclusão não roda;
+- VM indisponível não trava fila;
+- evidência é salva;
+- done só acontece com validação;
+- HUD permite auditoria;
+- mapa reflete execução;
+- aprendizado candidato é criado sem virar regra automática;
+- build passa.
+```
+
+---
+
+# 30. Resultado esperado
+
+Depois desse plano, a Alice passa de:
+
+```text
+executa uma tarefa isolada
+```
+
+para:
+
+```text
+mantém uma fila autônoma de trabalho
+planeja steps
+executa na VM
+valida resultados
+coleta evidências
+recupera falhas
+aprende padrões
+mostra tudo no HUD
+e nunca deixa tarefas zumbis em running
+```
+
+Esse Runner vira a base real para a Alice trabalhar sozinha em tarefas grandes dentro da VM local, com segurança operacional, rastreabilidade e evolução contínua.

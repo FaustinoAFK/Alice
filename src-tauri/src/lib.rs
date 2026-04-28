@@ -1,4 +1,4 @@
-#![cfg_attr(test, allow(dead_code))]
+#![cfg_attr(any(test, not(feature = "desktop-commands")), allow(dead_code))]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,7 +11,13 @@ use std::time::Duration;
 use tauri::Manager;
 use wait_timeout::ChildExt;
 
+mod autonomous_playground;
+mod host_versioning;
+#[cfg(any(test, feature = "desktop-commands"))]
+mod legacy_desktop_commands;
+mod local_vm;
 mod python_sidecar;
+mod vm_visual;
 mod web_knowledge;
 
 const GEMINI_LIVE_WS_ENDPOINT: &str =
@@ -453,7 +459,7 @@ fn normalized_point_to_screen_pixel(
     ))
 }
 
-fn validate_desktop_action(action: &DesktopAction) -> Result<(), String> {
+pub(crate) fn validate_desktop_action(action: &DesktopAction) -> Result<(), String> {
     match action {
         DesktopAction::OpenApp { app } => validate_app(app),
         DesktopAction::OpenFolder { folder } => validate_folder(folder),
@@ -625,11 +631,17 @@ fn validate_path_string(path: &str) -> Result<(), String> {
 
     let candidate = PathBuf::from(path);
     if path_is_blocked(&candidate) {
-        return Err(format!("Caminho bloqueado pelo runtime: {}", candidate.display()));
+        return Err(format!(
+            "Caminho bloqueado pelo runtime: {}",
+            candidate.display()
+        ));
     }
 
     if !path_within_scope(&candidate, &allowed_filesystem_scopes()?) {
-        return Err(format!("Caminho fora do escopo permitido: {}", candidate.display()));
+        return Err(format!(
+            "Caminho fora do escopo permitido: {}",
+            candidate.display()
+        ));
     }
 
     Ok(())
@@ -668,7 +680,8 @@ fn resolve_filesystem_target(
         return Ok(resolved);
     }
 
-    let base = resolve_named_location(location.ok_or_else(|| "Location obrigatoria.".to_string())?)?;
+    let base =
+        resolve_named_location(location.ok_or_else(|| "Location obrigatoria.".to_string())?)?;
     let resolved = if let Some(name) = name {
         base.join(name)
     } else {
@@ -698,7 +711,10 @@ fn run_powershell(script: &str, envs: &[(&str, &str)]) -> Result<std::process::O
         .map_err(|error| format!("Falha ao executar PowerShell: {error}"))
 }
 
-fn ensure_successful_output(output: std::process::Output, fallback_message: &str) -> Result<String, String> {
+fn ensure_successful_output(
+    output: std::process::Output,
+    fallback_message: &str,
+) -> Result<String, String> {
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Ok(if stdout.is_empty() {
@@ -761,7 +777,11 @@ fn close_app_patterns(app: &str) -> Vec<String> {
             vec!["*notepad*".to_string(), "*bloco de notas*".to_string()]
         }
         "calculator" | "calculadora" => {
-            vec!["*calc*".to_string(), "*calculator*".to_string(), "*calculadora*".to_string()]
+            vec![
+                "*calc*".to_string(),
+                "*calculator*".to_string(),
+                "*calculadora*".to_string(),
+            ]
         }
         other => vec![format!("*{other}*")],
     }
@@ -847,7 +867,9 @@ fn kill_process_checked(process_name: &str) -> Result<String, String> {
     ];
 
     if critical.contains(&normalized_name.as_str()) {
-        return Err(format!("Processo critico nao pode ser encerrado: {process_name}"));
+        return Err(format!(
+            "Processo critico nao pode ser encerrado: {process_name}"
+        ));
     }
 
     let output = run_powershell(
@@ -863,7 +885,8 @@ fn list_windows_json() -> Result<Value, String> {
         &[],
     )?;
     let text = ensure_successful_output(output, "[]")?;
-    serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar lista de janelas: {error}"))
+    serde_json::from_str(&text)
+        .map_err(|error| format!("Falha ao interpretar lista de janelas: {error}"))
 }
 
 fn list_processes_json() -> Result<Value, String> {
@@ -872,7 +895,8 @@ fn list_processes_json() -> Result<Value, String> {
         &[],
     )?;
     let text = ensure_successful_output(output, "[]")?;
-    serde_json::from_str(&text).map_err(|error| format!("Falha ao interpretar lista de processos: {error}"))
+    serde_json::from_str(&text)
+        .map_err(|error| format!("Falha ao interpretar lista de processos: {error}"))
 }
 
 fn truncate_shell_output(text: &str) -> String {
@@ -1414,7 +1438,7 @@ mod windows_input {
     }
 }
 
-fn perform_desktop_action(action: &DesktopAction) -> Result<String, String> {
+pub(crate) fn perform_desktop_action(action: &DesktopAction) -> Result<String, String> {
     match action {
         DesktopAction::OpenApp { app } => open_app(app),
         DesktopAction::OpenFolder { folder } => open_folder(folder),
@@ -1579,9 +1603,7 @@ fn validate_shell_action(action: &ShellAction) -> Result<(), String> {
 
             let timeout_ms = timeout_ms.unwrap_or(DEFAULT_SHELL_TIMEOUT_MS);
             if timeout_ms == 0 || timeout_ms > MAX_SHELL_TIMEOUT_MS {
-                return Err(format!(
-                    "Timeout de shell fora do limite: {timeout_ms}ms."
-                ));
+                return Err(format!("Timeout de shell fora do limite: {timeout_ms}ms."));
             }
 
             Ok(())
@@ -1589,7 +1611,7 @@ fn validate_shell_action(action: &ShellAction) -> Result<(), String> {
     }
 }
 
-fn validate_local_action(action: &LocalAction) -> Result<(), String> {
+pub(crate) fn validate_local_action(action: &LocalAction) -> Result<(), String> {
     match action {
         LocalAction::WindowUi(action) => validate_window_ui_action(action),
         LocalAction::AppsProcesses(action) => validate_apps_process_action(action),
@@ -1608,7 +1630,7 @@ fn native_result(message: String) -> NativeCommandResult {
     }
 }
 
-fn normalize_python_sidecar_error(code: Option<&str>, message: &str) -> String {
+pub(crate) fn normalize_python_sidecar_error(code: Option<&str>, message: &str) -> String {
     match code.unwrap_or("") {
         "python_sidecar_unavailable" => {
             format!("Sidecar Python indisponivel para window/ui. {message}")
@@ -1741,7 +1763,9 @@ fn perform_window_ui_action(action: &WindowUiAction) -> Result<NativeCommandResu
             delta_x.unwrap_or(0),
             delta_y.unwrap_or(0),
         )?)),
-        WindowUiAction::Hotkey { hotkey } => Ok(native_result(windows_input::press_hotkey(hotkey)?)),
+        WindowUiAction::Hotkey { hotkey } => {
+            Ok(native_result(windows_input::press_hotkey(hotkey)?))
+        }
         WindowUiAction::PressKey { key } => Ok(native_result(windows_input::press_key_name(key)?)),
         WindowUiAction::TypeText { text } => Ok(native_result(windows_input::type_text(text)?)),
         WindowUiAction::ReadVisualContext {} => Ok(NativeCommandResult {
@@ -1759,13 +1783,16 @@ fn perform_apps_process_action(action: &AppsProcessAction) -> Result<NativeComma
         AppsProcessAction::OpenApp { app } => Ok(native_result(open_app_generic(app)?)),
         AppsProcessAction::FocusApp { app } => Ok(native_result(focus_app_window(app)?)),
         AppsProcessAction::CloseWindow { window_title, app } => {
-            let target = window_title.as_deref().or(app.as_deref()).ok_or_else(|| {
-                "CloseWindow exige windowTitle ou app.".to_string()
-            })?;
+            let target = window_title
+                .as_deref()
+                .or(app.as_deref())
+                .ok_or_else(|| "CloseWindow exige windowTitle ou app.".to_string())?;
             Ok(native_result(close_app_window(target)?))
         }
         AppsProcessAction::CloseApp { app } => Ok(native_result(close_app_window(app)?)),
-        AppsProcessAction::KillProcess { process_name } => Ok(native_result(kill_process_checked(process_name)?)),
+        AppsProcessAction::KillProcess { process_name } => {
+            Ok(native_result(kill_process_checked(process_name)?))
+        }
         AppsProcessAction::ListWindows {} => Ok(NativeCommandResult {
             ok: true,
             message: "Lista de janelas obtida.".to_string(),
@@ -1790,7 +1817,8 @@ fn perform_filesystem_action(action: &FilesystemAction) -> Result<NativeCommandR
             path,
             name,
         } => {
-            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), name.as_deref())?;
+            let resolved =
+                resolve_filesystem_target(location.as_deref(), path.as_deref(), name.as_deref())?;
             Ok(NativeCommandResult {
                 ok: true,
                 message: format!("Caminho resolvido: {}", resolved.display()),
@@ -1811,27 +1839,38 @@ fn perform_filesystem_action(action: &FilesystemAction) -> Result<NativeCommandR
             location,
             name,
         } => {
-            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
+            let resolved =
+                resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
             if let Some(parent) = resolved.parent() {
-                fs::create_dir_all(parent).map_err(|error| format!("Falha ao preparar a pasta: {error}"))?;
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("Falha ao preparar a pasta: {error}"))?;
             }
             File::create(&resolved).map_err(|error| format!("Falha ao criar arquivo: {error}"))?;
-            Ok(native_result(format!("Arquivo criado: {}", resolved.display())))
+            Ok(native_result(format!(
+                "Arquivo criado: {}",
+                resolved.display()
+            )))
         }
         FilesystemAction::CreateFolder {
             path,
             location,
             name,
         } => {
-            let resolved = resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
-            fs::create_dir_all(&resolved).map_err(|error| format!("Falha ao criar pasta: {error}"))?;
-            Ok(native_result(format!("Pasta criada: {}", resolved.display())))
+            let resolved =
+                resolve_filesystem_target(location.as_deref(), path.as_deref(), Some(name))?;
+            fs::create_dir_all(&resolved)
+                .map_err(|error| format!("Falha ao criar pasta: {error}"))?;
+            Ok(native_result(format!(
+                "Pasta criada: {}",
+                resolved.display()
+            )))
         }
         FilesystemAction::CopyPath {
             source_path,
             target_path,
         } => {
-            fs::copy(source_path, target_path).map_err(|error| format!("Falha ao copiar caminho: {error}"))?;
+            fs::copy(source_path, target_path)
+                .map_err(|error| format!("Falha ao copiar caminho: {error}"))?;
             Ok(native_result(format!("Caminho copiado para {target_path}")))
         }
         FilesystemAction::MovePath {
@@ -1842,15 +1881,18 @@ fn perform_filesystem_action(action: &FilesystemAction) -> Result<NativeCommandR
             path: source_path,
             target_path,
         } => {
-            fs::rename(source_path, target_path).map_err(|error| format!("Falha ao mover/renomear caminho: {error}"))?;
+            fs::rename(source_path, target_path)
+                .map_err(|error| format!("Falha ao mover/renomear caminho: {error}"))?;
             Ok(native_result(format!("Caminho movido para {target_path}")))
         }
         FilesystemAction::DeletePath { path } => {
             let candidate = PathBuf::from(path);
             if candidate.is_dir() {
-                fs::remove_dir_all(&candidate).map_err(|error| format!("Falha ao apagar pasta: {error}"))?;
+                fs::remove_dir_all(&candidate)
+                    .map_err(|error| format!("Falha ao apagar pasta: {error}"))?;
             } else {
-                fs::remove_file(&candidate).map_err(|error| format!("Falha ao apagar arquivo: {error}"))?;
+                fs::remove_file(&candidate)
+                    .map_err(|error| format!("Falha ao apagar arquivo: {error}"))?;
             }
             Ok(native_result(format!("Caminho apagado: {path}")))
         }
@@ -1860,9 +1902,13 @@ fn perform_filesystem_action(action: &FilesystemAction) -> Result<NativeCommandR
             overwrite,
         } => {
             if !overwrite.unwrap_or(false) && Path::new(path).exists() {
-                return Err("WriteFile exige overwrite=true para sobrescrever um arquivo existente.".to_string());
+                return Err(
+                    "WriteFile exige overwrite=true para sobrescrever um arquivo existente."
+                        .to_string(),
+                );
             }
-            fs::write(path, content).map_err(|error| format!("Falha ao gravar arquivo: {error}"))?;
+            fs::write(path, content)
+                .map_err(|error| format!("Falha ao gravar arquivo: {error}"))?;
             Ok(native_result(format!("Arquivo gravado: {path}")))
         }
         FilesystemAction::AppendFile { path, content } => {
@@ -1920,8 +1966,12 @@ fn perform_shell_action(action: &ShellAction) -> Result<NativeCommandResult, Str
                         } else {
                             "Shell concluiu com erro.".to_string()
                         },
-                        stdout: Some(truncate_shell_output(&String::from_utf8_lossy(&output.stdout))),
-                        stderr: Some(truncate_shell_output(&String::from_utf8_lossy(&output.stderr))),
+                        stdout: Some(truncate_shell_output(&String::from_utf8_lossy(
+                            &output.stdout,
+                        ))),
+                        stderr: Some(truncate_shell_output(&String::from_utf8_lossy(
+                            &output.stderr,
+                        ))),
                         artifacts: Some(json!({
                             "statusCode": output.status.code(),
                         })),
@@ -1937,7 +1987,7 @@ fn perform_shell_action(action: &ShellAction) -> Result<NativeCommandResult, Str
     }
 }
 
-fn perform_local_action(action: &LocalAction) -> Result<NativeCommandResult, String> {
+pub(crate) fn perform_local_action(action: &LocalAction) -> Result<NativeCommandResult, String> {
     match action {
         LocalAction::WindowUi(action) => perform_window_ui_action(action),
         LocalAction::AppsProcesses(action) => perform_apps_process_action(action),
@@ -1971,69 +2021,88 @@ fn save_alice_memory_json(app: tauri::AppHandle, json: String) -> Result<(), Str
     write_memory_json_atomic(&resolve_alice_memory_path(&app_data_dir), &json)
 }
 
-#[tauri::command]
-fn execute_desktop_action(action: DesktopAction) -> Result<DesktopActionResult, String> {
-    validate_desktop_action(&action)?;
-    let message = perform_desktop_action(&action)?;
-    Ok(DesktopActionResult { ok: true, message })
-}
-
-#[tauri::command]
-fn execute_local_action(action: LocalAction) -> Result<NativeCommandResult, String> {
-    validate_local_action(&action)?;
-    perform_local_action(&action)
-}
-
-#[tauri::command]
-fn get_foreground_context() -> Result<NativeCommandResult, String> {
-    let response = python_sidecar::get_foreground_context()?;
-    if !response.ok {
-        return Err(normalize_python_sidecar_error(
-            response.error_code.as_deref(),
-            &response.message,
-        ));
-    }
-
-    Ok(NativeCommandResult {
-        ok: true,
-        message: response.message,
-        stdout: response.stdout,
-        stderr: response.stderr,
-        artifacts: response.artifacts,
-    })
+#[cfg(test)]
+fn desktop_commands_enabled() -> bool {
+    cfg!(feature = "desktop-commands")
 }
 
 #[cfg(not(test))]
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .setup(|app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
-            let knowledge_state = web_knowledge::WebKnowledgeState::default();
-            web_knowledge::start_browser_knowledge_bridge(knowledge_state.clone())?;
-            app.manage(knowledge_state);
-            Ok(())
-        })
-        .invoke_handler(tauri::generate_handler![
-            create_gemini_live_url,
-            load_alice_memory_json,
-            save_alice_memory_json,
-            execute_desktop_action,
-            execute_local_action,
-            get_foreground_context,
-            web_knowledge::refresh_current_page_snapshot,
-            web_knowledge::get_navigation_context,
-            web_knowledge::inspect_current_page,
-            web_knowledge::search_same_domain,
-            web_knowledge::search_web,
-            web_knowledge::fetch_web_page
-        ])
+    let builder = tauri::Builder::default().setup(|app| {
+        if cfg!(debug_assertions) {
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
+        }
+        let knowledge_state = web_knowledge::WebKnowledgeState::default();
+        web_knowledge::start_browser_knowledge_bridge(knowledge_state.clone())?;
+        app.manage(knowledge_state);
+        Ok(())
+    });
+
+    #[cfg(feature = "desktop-commands")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        create_gemini_live_url,
+        load_alice_memory_json,
+        save_alice_memory_json,
+        local_vm::get_local_vm_status,
+        local_vm::diagnose_local_vm_setup,
+        local_vm::run_local_vm_guest_task,
+        local_vm::run_local_vm_smoke_test,
+        vm_visual::install_vm_guest_agent,
+        vm_visual::diagnose_vm_guest_agent,
+        vm_visual::run_vm_guest_agent_action,
+        vm_visual::capture_vm_guest_screen,
+        vm_visual::run_vm_visual_smoke_test,
+        autonomous_playground::run_local_workspace_playground_task,
+        autonomous_playground::cancel_autonomous_task,
+        host_versioning::create_host_file_snapshot,
+        host_versioning::diff_host_file_snapshot,
+        host_versioning::record_host_file_checkpoint,
+        host_versioning::restore_host_file_snapshot,
+        legacy_desktop_commands::execute_desktop_action,
+        legacy_desktop_commands::execute_local_action,
+        legacy_desktop_commands::get_foreground_context,
+        web_knowledge::refresh_current_page_snapshot,
+        web_knowledge::get_navigation_context,
+        web_knowledge::inspect_current_page,
+        web_knowledge::search_same_domain,
+        web_knowledge::search_web,
+        web_knowledge::fetch_web_page
+    ]);
+
+    #[cfg(not(feature = "desktop-commands"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        create_gemini_live_url,
+        load_alice_memory_json,
+        save_alice_memory_json,
+        local_vm::get_local_vm_status,
+        local_vm::diagnose_local_vm_setup,
+        local_vm::run_local_vm_guest_task,
+        local_vm::run_local_vm_smoke_test,
+        vm_visual::install_vm_guest_agent,
+        vm_visual::diagnose_vm_guest_agent,
+        vm_visual::run_vm_guest_agent_action,
+        vm_visual::capture_vm_guest_screen,
+        vm_visual::run_vm_visual_smoke_test,
+        autonomous_playground::run_local_workspace_playground_task,
+        autonomous_playground::cancel_autonomous_task,
+        host_versioning::create_host_file_snapshot,
+        host_versioning::diff_host_file_snapshot,
+        host_versioning::record_host_file_checkpoint,
+        host_versioning::restore_host_file_snapshot,
+        web_knowledge::refresh_current_page_snapshot,
+        web_knowledge::get_navigation_context,
+        web_knowledge::inspect_current_page,
+        web_knowledge::search_same_domain,
+        web_knowledge::search_web,
+        web_knowledge::fetch_web_page
+    ]);
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
@@ -2051,6 +2120,12 @@ mod tests {
             "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=key%20with%20spaces"
         );
         assert!(!url.contains(' '));
+    }
+
+    #[cfg(not(feature = "desktop-commands"))]
+    #[test]
+    fn desktop_commands_are_disabled_by_default() {
+        assert!(!desktop_commands_enabled());
     }
 
     #[test]
@@ -2389,7 +2464,9 @@ mod tests {
     #[test]
     fn normalize_python_sidecar_error_maps_known_codes() {
         assert!(normalize_python_sidecar_error(Some("python_timeout"), "late").contains("expirou"));
-        assert!(normalize_python_sidecar_error(Some("target_not_found"), "missing").contains("alvo"));
+        assert!(
+            normalize_python_sidecar_error(Some("target_not_found"), "missing").contains("alvo")
+        );
     }
 
     #[test]
@@ -2414,7 +2491,7 @@ mod tests {
         std::env::set_var("ALICE_PYTHON_SIDECAR_PATH", &script_path);
         std::env::set_var("ALICE_PYTHON_BIN", "python");
 
-        let result = get_foreground_context().unwrap();
+        let result = legacy_desktop_commands::get_foreground_context().unwrap();
 
         assert_eq!(result.message, "Janela em foco identificada.");
         assert_eq!(

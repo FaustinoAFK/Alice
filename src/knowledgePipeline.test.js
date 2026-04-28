@@ -68,6 +68,49 @@ describe('executeKnowledgeTool', () => {
     expect(statePatch.lastSnapshotRefreshLatencyMs).toBe(120);
   });
 
+  it('does not expand beyond the current page when inspect_current_page is already sufficient', async () => {
+    const invokeTool = vi.fn(async (toolName) => {
+      switch (toolName) {
+        case 'refresh_current_page_snapshot':
+          return {
+            ok: true,
+            context: buildContext(),
+            page: buildPage(),
+            requestId: 'capture-1',
+            refreshMode: 'reactive_sse',
+            refreshLatencyMs: 90,
+            extensionSeenAt: Date.now(),
+            fallbackReason: '',
+          };
+        case 'inspect_current_page':
+          return {
+            ok: true,
+            context: buildContext(),
+            page: buildPage(),
+            matchedSections: [{ id: 's1', kind: 'p', heading: '', content: 'Texto suficiente.' }],
+            matchedLinks: [],
+            sufficiency: KNOWLEDGE_SUFFICIENCY.SUFFICIENT,
+          };
+        default:
+          throw new Error(`unexpected tool: ${toolName}`);
+      }
+    });
+
+    const { response, statePatch } = await executeKnowledgeTool({
+      toolName: 'inspect_current_page',
+      args: { question: 'onde fica a area de inteligencia artificial nessa pagina?' },
+      invokeTool,
+    });
+
+    expect(response.initialScope).toBe(KNOWLEDGE_SCOPES.CURRENT_PAGE);
+    expect(response.expansion.expansionPath).toEqual(['page_inspection']);
+    expect(response.finalOrigin).toBe('pagina_atual');
+    expect(response.finalScope).toBe(KNOWLEDGE_SCOPES.CURRENT_PAGE);
+    expect(statePatch.lastKnowledgeOrigin).toBe('pagina_atual');
+    expect(invokeTool).not.toHaveBeenCalledWith('search_same_domain', expect.anything());
+    expect(invokeTool).not.toHaveBeenCalledWith('search_web', expect.anything());
+  });
+
   it('follows relevant internal links before same-domain search for partial page answers', async () => {
     const invokeTool = vi.fn(async (toolName, payload) => {
       switch (toolName) {
@@ -117,7 +160,7 @@ describe('executeKnowledgeTool', () => {
 
     const { response, statePatch } = await executeKnowledgeTool({
       toolName: 'inspect_current_page',
-      args: { question: 'tem integracao com autenticacao?' },
+      args: { question: 'essa pagina tem integracao com autenticacao?' },
       invokeTool,
     });
 
@@ -163,7 +206,7 @@ describe('executeKnowledgeTool', () => {
 
     const { response } = await executeKnowledgeTool({
       toolName: 'inspect_current_page',
-      args: { question: 'como funciona integracao oauth?' },
+      args: { question: 'essa pagina fala sobre integracao oauth?' },
       invokeTool,
     });
 
@@ -229,6 +272,65 @@ describe('executeKnowledgeTool', () => {
     expect(response.finalScope).toBe(KNOWLEDGE_SCOPES.GLOBAL);
     expect(response.responseGuidance.answerMode).toBe('page_plus_web');
     expect(statePatch.lastKnowledgeScope).toBe(KNOWLEDGE_SCOPES.GLOBAL);
+  });
+
+  it('does not inherit the active domain for clearly global questions', async () => {
+    const invokeTool = vi.fn(async (toolName, payload) => {
+      switch (toolName) {
+        case 'refresh_current_page_snapshot':
+          return { ok: true, context: buildContext(), page: buildPage(), requestId: 'capture-1', fallbackReason: '' };
+        case 'inspect_current_page':
+          return {
+            ok: true,
+            context: buildContext(),
+            page: buildPage({
+              sections: [{ id: 's1', kind: 'p', heading: '', content: 'Inteligencia artificial na pagina atual.' }],
+            }),
+            matchedSections: [{ id: 's1', kind: 'p', heading: '', content: 'Inteligencia artificial na pagina atual.' }],
+            matchedLinks: [{ text: 'IA local', url: 'https://example.com/ia' }],
+            sufficiency: KNOWLEDGE_SUFFICIENCY.SUFFICIENT,
+          };
+        case 'search_web':
+          return {
+            ok: true,
+            results: [{ title: 'IA geral', url: 'https://external.dev/ia', snippet: 'Conceito geral' }],
+          };
+        case 'fetch_web_page':
+          return {
+            ok: true,
+            page: {
+              url: payload.url,
+              title: 'IA geral',
+              sections: [{ id: 's2', kind: 'p', heading: '', content: 'inteligencia artificial conceito geral' }],
+              links: [],
+            },
+          };
+        default:
+          throw new Error(`unexpected tool: ${toolName}`);
+      }
+    });
+
+    const { response, statePatch } = await executeKnowledgeTool({
+      toolName: 'inspect_current_page',
+      args: { question: 'o que e inteligencia artificial?' },
+      invokeTool,
+    });
+
+    expect(response.initialScope).toBe(KNOWLEDGE_SCOPES.GLOBAL);
+    expect(response.expansion.expansionPath).toEqual(['page_inspection', 'global_search']);
+    expect(response.finalOrigin).toBe('web_geral');
+    expect(response.finalScope).toBe(KNOWLEDGE_SCOPES.GLOBAL);
+    expect(response.responseGuidance.answerMode).toBe('search_only');
+    expect(statePatch.lastKnowledgeTrace.map((event) => event.step)).toEqual([
+      'tool_call_received',
+      'refresh_current_page_snapshot',
+      'page_inspection',
+      'internal_link_follow',
+      'same_domain_search',
+      'global_search',
+    ]);
+    expect(invokeTool).not.toHaveBeenCalledWith('search_same_domain', expect.anything());
+    expect(invokeTool).not.toHaveBeenCalledWith('fetch_web_page', { url: 'https://example.com/ia' });
   });
 
   it('adds response guidance and metadata to direct searches', async () => {

@@ -5,9 +5,15 @@ import {
   buildMemoryPrefixTurns,
   createEmptyAliceMemory,
   extractImportantFacts,
+  getActiveMindMap,
   loadAliceMemory,
+  mergeActiveMindMap,
+  mergeAutonomousAudit,
   mergeImportantFacts,
+  mergeMindMapFromGoal,
+  mergeValidatedProcedures,
   saveAliceMemory,
+  updateMindMap,
 } from './aliceMemory';
 import {
   createInitialAppUiState,
@@ -20,13 +26,30 @@ import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio'
 import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
 import { buildSessionRehydrationTurns } from './liveSessionRehydration';
 import { createFunctionResponseEnvelope, LiveSessionTransport } from './liveSessionTransport';
+import { buildOperationalContextTurns } from './operationalContext';
 import { resolveScreenCaptureGeometry, SCREEN_SHARE_VIDEO_CONSTRAINTS } from './screenGeometry';
+import { startScreenFrameStreaming } from './screenFrameStreaming';
 import { buildDebugHudSnapshot } from './debugHud';
 import {
   createEmptyKnowledgeState,
   mergeKnowledgeState,
 } from './webKnowledge';
-import { executeKnowledgeTool } from './knowledgePipeline';
+import { executeKnowledgeFunctionCall } from './knowledgeToolExecutor';
+import { executeMindMapFunctionCall } from './mindMapToolExecutor';
+import {
+  TASK_STATUSES,
+  appendAutonomousLog,
+  createEmptyAutonomousLearningState,
+  hydrateAutonomousStateFromAudit,
+  mergeAutonomousLearningState,
+  normalizeVmStatus,
+} from './autonomousLearning';
+import {
+  executeAutonomousLearningFunctionCall,
+  prioritizeUserRequestInAutonomy,
+} from './autonomousLearningToolExecutor';
+import { syncMindMapWithExecution } from './mindMapExecutionSync';
+import { AliceHud } from './hud/AliceHud';
 import './App.css';
 
 const stopStream = (stream) => {
@@ -89,10 +112,81 @@ const createPcmOutputPlayer = () => {
 };
 
 const readyCheckPrompt =
-  'Diga em uma frase curta, em portugues do Brasil, que voce esta ouvindo e vendo a tela compartilhada.';
+  'Diga em uma frase curta, em portugues do Brasil, que voce esta ouvindo e recebendo a tela compartilhada. Nao descreva a tela ainda.';
 
 const ALICE_MEMORY_SAVE_DELAY_MS = 750;
 const TRUSTED_UTTERANCE_WINDOW_MS = 10000;
+const MAX_DEBUG_INTERACTIONS = 80;
+
+const createDebugInteractionId = () =>
+  `debug-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+const summarizeDebugPayload = (value, maxLength = 600) => {
+  if (value == null) {
+    return '';
+  }
+
+  try {
+    return JSON.stringify(value).slice(0, maxLength);
+  } catch {
+    return String(value).slice(0, maxLength);
+  }
+};
+
+const classifyToolDebugStatus = (response = {}) => {
+  if (response?.ok === false) {
+    return {
+      status: 'failed',
+      ok: false,
+      reason: response.reason || 'tool_failed',
+    };
+  }
+
+  if (response?.nextAction) {
+    return {
+      status: 'waiting_follow_up',
+      ok: true,
+      reason: response.nextAction,
+    };
+  }
+
+  if (response?.backgroundStatus) {
+    const backgroundState =
+      response.backgroundStatus?.artifacts?.agentResponse?.result?.status ||
+      response.backgroundStatus?.artifacts?.status ||
+      response.backgroundStatus?.status ||
+      '';
+    if (['running', 'starting', 'queued'].includes(String(backgroundState).toLowerCase())) {
+      return {
+        status: 'running',
+        ok: true,
+        reason: `background=${backgroundState}`,
+      };
+    }
+  }
+
+  if (response?.task?.status && ['queued', 'running', 'waiting'].includes(String(response.task.status).toLowerCase())) {
+    return {
+      status: response.task.status,
+      ok: true,
+      reason: response.policyDecision?.reason || 'task_not_finished_yet',
+    };
+  }
+
+  if (Array.isArray(response?.startedTaskIds) && response.startedTaskIds.length > 0 && !response?.playgroundRun) {
+    return {
+      status: 'running',
+      ok: true,
+      reason: `started=${response.startedTaskIds.join(',')}`,
+    };
+  }
+
+  return {
+    status: 'done',
+    ok: true,
+    reason: response?.reason || '',
+  };
+};
 
 const appendTrustedUtterance = (currentUtterance, text) => {
   const normalizedText = String(text || '').trim();
@@ -142,32 +236,6 @@ const startMicrophoneStreaming = (voiceStream, onChunk) => {
   };
 };
 
-const startScreenFrameStreaming = (video, canvas, onFrame) => {
-  const context = canvas.getContext('2d', { alpha: false });
-
-  const sendFrame = () => {
-    if (!video.videoWidth || !video.videoHeight) {
-      return;
-    }
-
-    const width = 640;
-    const height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * width));
-    canvas.width = width;
-    canvas.height = height;
-    context.drawImage(video, 0, 0, width, height);
-
-    const [, base64Frame] = canvas.toDataURL('image/jpeg', 0.68).split(',');
-    if (base64Frame) {
-      onFrame(base64Frame);
-    }
-  };
-
-  const intervalId = window.setInterval(sendFrame, 1000);
-  sendFrame();
-
-  return () => window.clearInterval(intervalId);
-};
-
 function App() {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
@@ -185,18 +253,134 @@ function App() {
   const outputTranscriptRef = useRef('');
   const toolQueueRef = useRef(Promise.resolve());
   const knowledgeStateRef = useRef(createEmptyKnowledgeState());
+  const autonomousLearningStateRef = useRef(createEmptyAutonomousLearningState());
+  const debugInteractionsRef = useRef([]);
+  const latestConversationInteractionIdRef = useRef('');
 
   const [uiState, dispatchUi] = useReducer(reduceAppUiState, undefined, createInitialAppUiState);
-  const [debugHudOpen, setDebugHudOpen] = useState(false);
+  const [activeHudPage, setActiveHudPage] = useState('live');
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [knowledgeState, setKnowledgeState] = useState(createEmptyKnowledgeState);
+  const [autonomousLearningState, setAutonomousLearningState] = useState(createEmptyAutonomousLearningState);
+  const [activeMindMap, setActiveMindMap] = useState(() => getActiveMindMap(createEmptyAliceMemory()));
+  const [mindMapRevision, setMindMapRevision] = useState(0);
+  const [debugInteractions, setDebugInteractions] = useState([]);
   const { status, caption, inputCaption, error, diagnostics, sessionNotice } = uiState;
 
   useEffect(() => {
     knowledgeStateRef.current = knowledgeState;
   }, [knowledgeState]);
 
+  useEffect(() => {
+    autonomousLearningStateRef.current = autonomousLearningState;
+  }, [autonomousLearningState]);
+
   const noteDiagnostic = (event) => {
     dispatchUi({ type: 'diagnostic-event', event });
+  };
+
+  const commitDebugInteractions = (updater) => {
+    const nextInteractions = updater(debugInteractionsRef.current).slice(-MAX_DEBUG_INTERACTIONS);
+    debugInteractionsRef.current = nextInteractions;
+    setDebugInteractions(nextInteractions);
+  };
+
+  const recordUserInteraction = (userText) => {
+    const normalizedText = String(userText || '').trim();
+    if (!normalizedText) {
+      return;
+    }
+
+    commitDebugInteractions((current) => {
+      const latestId = latestConversationInteractionIdRef.current;
+      const latest = current.find((interaction) => interaction.id === latestId);
+      if (latest && latest.kind === 'conversation' && !latest.aliceText) {
+        return current.map((interaction) =>
+          interaction.id === latestId
+            ? { ...interaction, userText: normalizedText, status: 'listening', timestamp: Date.now() }
+            : interaction,
+        );
+      }
+
+      const interaction = {
+        id: createDebugInteractionId(),
+        kind: 'conversation',
+        timestamp: Date.now(),
+        status: 'listening',
+        userText: normalizedText,
+        aliceText: '',
+      };
+      latestConversationInteractionIdRef.current = interaction.id;
+      return [...current, interaction];
+    });
+  };
+
+  const recordAliceInteraction = (aliceText) => {
+    const normalizedText = String(aliceText || '').trim();
+    if (!normalizedText) {
+      return;
+    }
+
+    commitDebugInteractions((current) => {
+      const latestId = latestConversationInteractionIdRef.current;
+      const latest = current.find((interaction) => interaction.id === latestId);
+      if (latest && latest.kind === 'conversation') {
+        return current.map((interaction) =>
+          interaction.id === latestId
+            ? { ...interaction, aliceText: normalizedText, status: 'answered', timestamp: Date.now() }
+            : interaction,
+        );
+      }
+
+      const interaction = {
+        id: createDebugInteractionId(),
+        kind: 'conversation',
+        timestamp: Date.now(),
+        status: 'answered',
+        userText: trustedUtteranceRef.current?.text || '',
+        aliceText: normalizedText,
+      };
+      latestConversationInteractionIdRef.current = interaction.id;
+      return [...current, interaction];
+    });
+  };
+
+  const recordToolInteraction = (functionCall, patch = {}) => {
+    const toolName = functionCall?.name || 'ferramenta_desconhecida';
+    const args = functionCall?.args || {};
+    const existingId = patch.id;
+
+    commitDebugInteractions((current) => {
+      if (existingId) {
+        return current.map((interaction) =>
+          interaction.id === existingId
+            ? {
+                ...interaction,
+                ...patch,
+                timestamp: Date.now(),
+              }
+            : interaction,
+        );
+      }
+
+      const interaction = {
+        id: createDebugInteractionId(),
+        kind: 'tool',
+        timestamp: Date.now(),
+        status: 'running',
+        toolName,
+        operation: args.operation || args.taskKind || args.action || '',
+        ok: null,
+        userText: trustedUtteranceRef.current?.text || '',
+        argsSummary: summarizeDebugPayload(args),
+        responseSummary: '',
+        message: '',
+        reason: '',
+      };
+      return [...current, interaction];
+    });
+
+    return existingId || debugInteractionsRef.current.at(-1)?.id || '';
   };
 
   const clearAliceMemorySaveTimer = () => {
@@ -292,82 +476,6 @@ function App() {
       functionResponse: createFunctionResponseEnvelope(functionCall, response),
     });
 
-  const normalizeKnowledgeToolResponse = (toolName, nativeResponse) => {
-    const artifacts = nativeResponse?.artifacts || {};
-
-    switch (toolName) {
-      case 'get_navigation_context':
-        return {
-          ok: nativeResponse.ok,
-          message: nativeResponse.message,
-          context: artifacts.context || null,
-        };
-      case 'inspect_current_page':
-        return {
-          ok: nativeResponse.ok,
-          message: nativeResponse.message,
-          context: artifacts.context || null,
-          page: artifacts.page || null,
-          matchedSections: artifacts.matchedSections || [],
-          matchedLinks: artifacts.matchedLinks || [],
-          sufficiency: artifacts.sufficiency || 'insufficient',
-          initialScope: artifacts.initialScope || 'global',
-          finalScope: artifacts.finalScope || artifacts.initialScope || 'global',
-          initialSufficiency: artifacts.initialSufficiency || artifacts.sufficiency || 'insufficient',
-          finalSufficiency: artifacts.finalSufficiency || artifacts.sufficiency || 'insufficient',
-          finalOrigin: artifacts.finalOrigin || 'pagina_atual',
-          consultedSources: artifacts.consultedSources || [],
-          expansionPath: artifacts.expansionPath || [],
-          responseGuidance: artifacts.responseGuidance || null,
-          fallbackReason: artifacts.fallbackReason || '',
-        };
-      case 'search_same_domain':
-      case 'search_web':
-        return {
-          ok: nativeResponse.ok,
-          message: nativeResponse.message,
-          query: artifacts.query || '',
-          domain: artifacts.domain || '',
-          results: artifacts.results || [],
-          consultedSources: artifacts.consultedSources || [],
-          fetchedPages: artifacts.fetchedPages || [],
-          initialScope: artifacts.initialScope || (toolName === 'search_same_domain' ? 'same_domain' : 'global'),
-          finalScope: artifacts.finalScope || (toolName === 'search_same_domain' ? 'same_domain' : 'global'),
-          initialSufficiency: artifacts.initialSufficiency || 'insufficient',
-          finalSufficiency: artifacts.finalSufficiency || 'insufficient',
-          finalOrigin: artifacts.finalOrigin || (toolName === 'search_same_domain' ? 'mesmo_dominio' : 'web_geral'),
-          expansionPath: artifacts.expansionPath || [],
-          responseGuidance: artifacts.responseGuidance || null,
-          summaryHint: artifacts.summaryHint || '',
-        };
-      case 'fetch_web_page':
-        return {
-          ok: nativeResponse.ok,
-          message: nativeResponse.message,
-          page: artifacts.page || null,
-          consultedSources: artifacts.consultedSources || [],
-          responseGuidance: artifacts.responseGuidance || null,
-        };
-      case 'refresh_current_page_snapshot':
-        return {
-          ok: nativeResponse.ok,
-          message: nativeResponse.message,
-          context: artifacts.context || null,
-          page: artifacts.page || null,
-          requestId: artifacts.requestId || '',
-          refreshMode: artifacts.refreshMode || '',
-          refreshLatencyMs: Number(artifacts.refreshLatencyMs || 0),
-          extensionSeenAt: Number(artifacts.extensionSeenAt || 0),
-          fallbackReason: artifacts.fallbackReason || '',
-        };
-      default:
-        return {
-          ok: Boolean(nativeResponse?.ok),
-          message: nativeResponse?.message || 'Resposta local recebida.',
-        };
-    }
-  };
-
   const updateKnowledgeState = (patch) => {
     setKnowledgeState((current) => {
       const nextState = mergeKnowledgeState(current, patch);
@@ -376,11 +484,119 @@ function App() {
     });
   };
 
-  const rejectUnexpectedToolCall = async (functionCall, generation) => {
+  const updateAutonomousLearningState = (patch) => {
+    if (!patch) {
+      return;
+    }
+
+    setAutonomousLearningState((current) => {
+      const nextState = mergeAutonomousLearningState(current, patch);
+      autonomousLearningStateRef.current = nextState;
+      aliceMemoryRef.current = mergeAutonomousAudit(aliceMemoryRef.current, nextState);
+      const activeGoal = nextState.tasks.find((task) =>
+        [TASK_STATUSES.RUNNING, TASK_STATUSES.QUEUED, TASK_STATUSES.WAITING].includes(task.status),
+      );
+      const hasGoalMindMap = activeGoal
+        ? Object.values(aliceMemoryRef.current.mindMaps.byId || {}).some((map) => map.goalId === activeGoal.taskId)
+        : false;
+      if (activeGoal && !hasGoalMindMap) {
+        aliceMemoryRef.current = mergeMindMapFromGoal(
+          aliceMemoryRef.current,
+          {
+            goalId: activeGoal.taskId,
+            title: activeGoal.reason || activeGoal.taskType,
+            objective: activeGoal.actionRequest?.reason,
+            subtasks: [
+              ...(activeGoal.actionRequest?.targetFiles || []).map((file) => ({ id: `file-${file}`, title: file })),
+              ...(activeGoal.actionRequest?.targetApps || []).map((app) => ({ id: `app-${app}`, title: app })),
+            ],
+          },
+          { makeActive: false },
+        );
+      }
+      scheduleAliceMemorySave();
+      return nextState;
+    });
+  };
+
+  const persistValidatedProcedures = (procedures = []) => {
+    if (!procedures.length) {
+      return;
+    }
+
+    aliceMemoryRef.current = mergeValidatedProcedures(aliceMemoryRef.current, procedures);
+    scheduleAliceMemorySave();
+  };
+
+  const handleMindMapChange = (mindMapData) => {
+    aliceMemoryRef.current = mergeActiveMindMap(aliceMemoryRef.current, mindMapData);
+    setActiveMindMap(getActiveMindMap(aliceMemoryRef.current));
+    scheduleAliceMemorySave();
+  };
+
+  const syncMindMapFromAutonomousResult = (autonomousResult) => {
+    const task = autonomousResult?.response?.task;
+    const playgroundRun = autonomousResult?.response?.playgroundRun;
+
+    if (!task || !playgroundRun) {
+      return null;
+    }
+
+    aliceMemoryRef.current = mergeMindMapFromGoal(
+      aliceMemoryRef.current,
+      {
+        goalId: task.taskId,
+        title: task.reason || task.taskType,
+        objective: task.actionRequest?.reason,
+        subtasks: [
+          ...(task.actionRequest?.targetFiles || []).map((file) => ({ id: `file-${file}`, title: file })),
+          ...(task.actionRequest?.targetApps || []).map((app) => ({ id: `app-${app}`, title: app })),
+        ],
+      },
+      { makeActive: false },
+    );
+
+    const targetMap = Object.values(aliceMemoryRef.current.mindMaps.byId || {})
+      .find((map) => map.goalId === task.taskId) || getActiveMindMap(aliceMemoryRef.current);
+    const syncResult = syncMindMapWithExecution(playgroundRun, {
+      activeMap: targetMap,
+      goal: task,
+      goalId: task.taskId,
+      executionId: task.taskId,
+    });
+
+    if (!syncResult.updated) {
+      return syncResult;
+    }
+
+    aliceMemoryRef.current = updateMindMap(
+      aliceMemoryRef.current,
+      targetMap.id,
+      syncResult.mindMap,
+      { historyReason: 'execution_sync' },
+    );
+    if (aliceMemoryRef.current.mindMaps.activeId === targetMap.id) {
+      setActiveMindMap(getActiveMindMap(aliceMemoryRef.current));
+      setMindMapRevision((current) => current + 1);
+    }
+
+    return syncResult;
+  };
+
+  const rejectUnexpectedToolCall = async (functionCall, generation, debugInteractionId = '') => {
     noteDiagnostic({
       type: 'error',
       message: `Ferramenta inesperada recebida: ${functionCall?.name || 'desconhecida'}.`,
     });
+    if (debugInteractionId) {
+      recordToolInteraction(functionCall, {
+        id: debugInteractionId,
+        status: 'failed',
+        ok: false,
+        message: 'Ferramenta local desconhecida para a Alice.',
+        reason: 'unexpected_tool_call',
+      });
+    }
 
     await sendToolResponse(
       functionCall,
@@ -417,17 +633,31 @@ function App() {
       screenCleanupRef.current = startScreenFrameStreaming(videoRef.current, canvasRef.current, (frame) => {
         const sent = liveTransportRef.current.sendRealtime({
           generation,
-          send: (activeSession) => activeSession.sendVideo(frame),
+          send: (activeSession) => activeSession.sendVideo(frame.base64),
         });
 
         if (sent) {
-          noteDiagnostic({ type: 'video-sent' });
+          noteDiagnostic({
+            type: 'video-sent',
+            width: frame.width,
+            height: frame.height,
+            sourceWidth: frame.sourceWidth,
+            sourceHeight: frame.sourceHeight,
+          });
         }
       });
     }
   };
 
   const buildLiveMemoryPrefixTurns = () => [
+    ...buildOperationalContextTurns({
+      trustedUtterance: trustedUtteranceRef.current,
+      outputTranscript: outputTranscriptRef.current,
+      memorySummary: aliceMemoryRef.current.recentContextSummary?.summary || '',
+      knowledgeState: knowledgeStateRef.current,
+      autonomousLearningState: autonomousLearningStateRef.current,
+      screenGeometry: getScreenCaptureGeometry(),
+    }),
     ...buildMemoryPrefixTurns(aliceMemoryRef.current),
     ...buildSessionRehydrationTurns({
       trustedUtterance: trustedUtteranceRef.current,
@@ -435,40 +665,100 @@ function App() {
     }),
   ];
 
-  const executeKnowledgeToolCall = async (functionCall, generation) => {
-    const toolName = functionCall?.name || '';
-
+  const executeLocalToolCall = async (functionCall, generation) => {
+    const debugInteractionId = recordToolInteraction(functionCall);
     try {
-      const args = functionCall?.args || {};
-      const responseExecutor = async (name, payload = {}) =>
-        normalizeKnowledgeToolResponse(name, await invoke(name, payload));
+      const result = await executeKnowledgeFunctionCall({
+        functionCall,
+        trustedUtterance: trustedUtteranceRef.current?.text || '',
+        knowledgeState: knowledgeStateRef.current,
+        invokeTool: invoke,
+      });
 
-      if (![
-        'get_navigation_context',
-        'inspect_current_page',
-        'search_same_domain',
-        'search_web',
-        'fetch_web_page',
-      ].includes(toolName)) {
-        await rejectUnexpectedToolCall(functionCall, generation);
+      if (result.handled) {
+        updateKnowledgeState(result.statePatch);
+        const debugStatus = classifyToolDebugStatus(result.response);
+        recordToolInteraction(functionCall, {
+          id: debugInteractionId,
+          status: debugStatus.status,
+          ok: debugStatus.ok,
+          message: result.response?.message || '',
+          reason: debugStatus.reason || result.response?.reason || '',
+          responseSummary: summarizeDebugPayload(result.response),
+        });
+
+        await sendToolResponse(functionCall, result.response, generation);
         return;
       }
 
-      const { response, statePatch } = await executeKnowledgeTool({
-        toolName,
-        args,
-        trustedUtterance: trustedUtteranceRef.current?.text || '',
-        knowledgeState: knowledgeStateRef.current,
-        invokeTool: responseExecutor,
+      const mindMapResult = await executeMindMapFunctionCall({
+        functionCall,
+        currentMemory: aliceMemoryRef.current,
+        currentMindMap: getActiveMindMap(aliceMemoryRef.current),
       });
-      updateKnowledgeState(statePatch);
 
-      await sendToolResponse(functionCall, response, generation);
+      if (mindMapResult.handled) {
+        if (mindMapResult.response?.ok && mindMapResult.response.operation !== 'export') {
+          aliceMemoryRef.current = mergeActiveMindMap(aliceMemoryRef.current, mindMapResult.mindMap, {
+            targetMapId: mindMapResult.targetMapId,
+          });
+          setActiveMindMap(getActiveMindMap(aliceMemoryRef.current));
+          setMindMapRevision((current) => current + 1);
+          scheduleAliceMemorySave();
+        }
+        const debugStatus = classifyToolDebugStatus(mindMapResult.response);
+        recordToolInteraction(functionCall, {
+          id: debugInteractionId,
+          status: debugStatus.status,
+          ok: debugStatus.ok,
+          message: mindMapResult.response?.message || '',
+          reason: debugStatus.reason || mindMapResult.response?.reason || '',
+          responseSummary: summarizeDebugPayload(mindMapResult.response),
+        });
+
+        await sendToolResponse(functionCall, mindMapResult.response, generation);
+        return;
+      }
+
+      const autonomousResult = await executeAutonomousLearningFunctionCall({
+        functionCall,
+        trustedUtterance: trustedUtteranceRef.current?.text || '',
+        autonomousState: autonomousLearningStateRef.current,
+        activeMindMap: getActiveMindMap(aliceMemoryRef.current),
+        invokeTool: invoke,
+      });
+
+      if (!autonomousResult.handled) {
+        await rejectUnexpectedToolCall(functionCall, generation, debugInteractionId);
+        return;
+      }
+
+      syncMindMapFromAutonomousResult(autonomousResult);
+      updateAutonomousLearningState(autonomousResult.statePatch);
+      persistValidatedProcedures(autonomousResult.memoryProcedures || []);
+      const debugStatus = classifyToolDebugStatus(autonomousResult.response);
+      recordToolInteraction(functionCall, {
+        id: debugInteractionId,
+        status: debugStatus.status,
+        ok: debugStatus.ok,
+        message: autonomousResult.response?.message || '',
+        reason: debugStatus.reason || autonomousResult.response?.reason || '',
+        responseSummary: summarizeDebugPayload(autonomousResult.response),
+      });
+
+      await sendToolResponse(functionCall, autonomousResult.response, generation);
     } catch (toolError) {
       const message = toolError?.message || String(toolError);
       noteDiagnostic({
         type: 'error',
         message,
+      });
+      recordToolInteraction(functionCall, {
+        id: debugInteractionId,
+        status: 'failed',
+        ok: false,
+        message,
+        reason: 'tool_exception',
       });
       await sendToolResponse(
         functionCall,
@@ -478,6 +768,28 @@ function App() {
         },
         generation,
       );
+    }
+  };
+
+  const handleImprovementProposalDecision = async (proposalId, userApproved) => {
+    const result = await executeAutonomousLearningFunctionCall({
+      functionCall: {
+        name: 'approve_self_improvement_proposal',
+        args: {
+          proposalId,
+          userApproved,
+        },
+      },
+      trustedUtterance: userApproved
+        ? 'aprovar proposta de auto-melhoria'
+        : 'rejeitar proposta de auto-melhoria',
+      autonomousState: autonomousLearningStateRef.current,
+      activeMindMap: getActiveMindMap(aliceMemoryRef.current),
+      invokeTool: invoke,
+    });
+
+    if (result.handled) {
+      updateAutonomousLearningState(result.statePatch);
     }
   };
 
@@ -574,7 +886,7 @@ function App() {
 
   const enqueueToolCalls = (toolCalls, generation) => {
     toolQueueRef.current = toolCalls.reduce(
-      (queue, functionCall) => queue.then(() => executeKnowledgeToolCall(functionCall, generation)),
+      (queue, functionCall) => queue.then(() => executeLocalToolCall(functionCall, generation)),
       toolQueueRef.current,
     );
 
@@ -602,11 +914,56 @@ function App() {
 
     if (event.inputTranscript) {
       trustedUtteranceRef.current = appendTrustedUtterance(trustedUtteranceRef.current, event.inputTranscript);
+      recordUserInteraction(trustedUtteranceRef.current.text);
+      const autonomyPriority = prioritizeUserRequestInAutonomy({
+        autonomousState: autonomousLearningStateRef.current,
+        trustedUtterance: trustedUtteranceRef.current.text,
+      });
+      updateAutonomousLearningState(autonomyPriority.state);
+      if (window.__TAURI_INTERNALS__ && autonomyPriority.pausedTaskIds?.length) {
+        void Promise.allSettled(
+          autonomyPriority.pausedTaskIds.map((taskId) =>
+            invoke('cancel_autonomous_task', {
+              taskId,
+              reason: 'user_request_preemption',
+            }),
+          ),
+        ).then((results) => {
+          const cancelledTaskIds = autonomyPriority.pausedTaskIds.filter(
+            (_taskId, index) => results[index]?.status === 'fulfilled' && results[index]?.value?.ok !== false,
+          );
+          const failedTaskIds = autonomyPriority.pausedTaskIds.filter(
+            (taskId) => !cancelledTaskIds.includes(taskId),
+          );
+          const currentAutonomy = autonomousLearningStateRef.current;
+          const patchedState = appendAutonomousLog(
+            mergeAutonomousLearningState(currentAutonomy, {
+              tasks: currentAutonomy.tasks.map((task) =>
+                cancelledTaskIds.includes(task.taskId)
+                  ? {
+                      ...task,
+                      status: TASK_STATUSES.CANCELLED,
+                      cancelledBy: 'user_request',
+                      updatedAt: Date.now(),
+                    }
+                  : task,
+              ),
+            }),
+            'native_background_cancel_completed',
+            {
+              taskIds: cancelledTaskIds,
+              failedTaskIds,
+            },
+          );
+          updateAutonomousLearningState(patchedState);
+        });
+      }
       dispatchUi({ type: 'session-input-caption', inputCaption: trustedUtteranceRef.current.text });
     }
 
     if (event.outputTranscript) {
       outputTranscriptRef.current = event.outputTranscript;
+      recordAliceInteraction(event.outputTranscript);
       dispatchUi({ type: 'session-caption', caption: event.outputTranscript });
       rememberAliceContext({ outputTranscript: event.outputTranscript });
     }
@@ -702,6 +1059,39 @@ function App() {
       void loadAliceMemory().then((memory) => {
         if (!disposed) {
           aliceMemoryRef.current = memory;
+          setActiveMindMap(getActiveMindMap(memory));
+          setMindMapRevision((current) => current + 1);
+          const hydratedAutonomy = hydrateAutonomousStateFromAudit(memory.autonomousAudit);
+          autonomousLearningStateRef.current = hydratedAutonomy;
+          setAutonomousLearningState(hydratedAutonomy);
+
+          void invoke('get_local_vm_status')
+            .then((status) => {
+              if (disposed) {
+                return;
+              }
+              const vmStatus = normalizeVmStatus(status?.artifacts || status);
+              const refreshedAutonomy = appendAutonomousLog(
+                mergeAutonomousLearningState(autonomousLearningStateRef.current, {
+                  vm: {
+                    ...autonomousLearningStateRef.current.vm,
+                    ...vmStatus,
+                    lastHealthCheck: Date.now(),
+                  },
+                }),
+                'local_vm_status_refreshed_on_boot',
+                {
+                  provider: vmStatus.provider || 'none',
+                  status: vmStatus.providerStatus || vmStatus.status || 'unknown',
+                  guestCommandReady: Boolean(vmStatus.guestCommandReady),
+                },
+              );
+              autonomousLearningStateRef.current = refreshedAutonomy;
+              setAutonomousLearningState(refreshedAutonomy);
+            })
+            .catch(() => {
+              // Runtime VM status is diagnostic-only; memory hydration remains usable without it.
+            });
         }
       });
     }
@@ -732,6 +1122,8 @@ function App() {
 
   const isBusy = status === 'starting' || status === 'configuring';
   const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';
+  // Diagnostic-only snapshot: these refs mirror runtime state that should not drive normal rendering.
+  /* eslint-disable react-hooks/refs */
   const debugHud = buildDebugHudSnapshot({
     status,
     caption,
@@ -742,144 +1134,39 @@ function App() {
     screenGeometry: getScreenCaptureGeometry(),
     memorySummary: aliceMemoryRef.current.recentContextSummary?.summary || '',
     knowledgeState,
+    autonomousLearningState,
+    interactions: debugInteractions,
   });
+  /* eslint-enable react-hooks/refs */
 
   return (
     <main className={`app-shell app-shell--${status}`}>
       <video ref={videoRef} className="screen-preview" muted playsInline />
       <canvas ref={canvasRef} className="capture-canvas" aria-hidden="true" />
 
-      <section className="alice-live" aria-label="Alice Live">
-        <div className="alice-orb" aria-hidden="true">
-          <span />
-        </div>
-
-        <div className="live-copy">
-          <p className="live-name">Alice</p>
-          <h1>Voz e tela ao vivo</h1>
-          <p>{caption}</p>
-          {sessionNotice ? <small className="session-note">{sessionNotice}</small> : null}
-          {inputCaption ? <small>Voce: {inputCaption}</small> : null}
-          {error ? <small className="error-text">{error}</small> : null}
-        </div>
-      </section>
-
-      <section className="signal-panel" aria-label="Sinais da Alice Live">
-        <span>Conexao: {diagnostics.connection}</span>
-        <span>Microfone: {diagnostics.microphone}</span>
-        <span>Tela: {diagnostics.screen}</span>
-        <span>Gemini: {diagnostics.gemini}</span>
-        <span>Audio enviado: {diagnostics.audioChunksSent}</span>
-        <span>Frames: {diagnostics.videoFramesSent}</span>
-        <span>Eventos: {diagnostics.serverMessagesReceived}</span>
-        <span>Voz Alice: {diagnostics.outputAudioChunksReceived}</span>
-        <span>Renovacoes: {diagnostics.reconnectAttempts}</span>
-        <span>Retomadas: {diagnostics.successfulResumptions}</span>
-        <span>Fallbacks: {diagnostics.rehydratedReconnects}</span>
-        <span>Ult. fechamento: {diagnostics.lastCloseReason}</span>
-        <span className="mic-meter" aria-label="Nivel do microfone">
-          <i style={{ transform: `scaleX(${Math.min(1, diagnostics.microphoneLevel * 8)})` }} />
-        </span>
-      </section>
-
-      <div className="control-bar" aria-label="Controles da Alice Live">
-        <span className="status-pill">{statusCopy[status]}</span>
-        <button
-          type="button"
-          className="control-button control-button--secondary"
-          onClick={() => setDebugHudOpen((current) => !current)}
-        >
-          Debug
-        </button>
-        <button type="button" className="control-button" onClick={toggleLiveSession} disabled={isBusy}>
-          <span
-            className={`button-icon ${isLive ? 'button-icon--stop' : 'button-icon--play'}`}
-            aria-hidden="true"
-          />
-          {isLive ? 'Parar' : 'Iniciar'}
-        </button>
-      </div>
-
-      {debugHudOpen ? (
-        <aside className="debug-hud" aria-label="Debug HUD">
-          <div className="debug-hud__header">
-            <strong>Debug HUD</strong>
-            <div className="debug-hud__controls">
-              <button
-                type="button"
-                className="debug-hud__close"
-                onClick={() => setDebugHudOpen(false)}
-                aria-label="Fechar debug"
-              >
-                Fechar
-              </button>
-            </div>
-          </div>
-
-          <div className="debug-hud__grid">
-            <section className="debug-hud__section">
-              <h2>Sessao</h2>
-              <dl>
-                <div><dt>Status</dt><dd>{debugHud.session.status}</dd></div>
-                <div><dt>Legenda</dt><dd>{debugHud.session.caption}</dd></div>
-                <div><dt>Entrada</dt><dd>{debugHud.session.inputCaption}</dd></div>
-                <div><dt>Fala confiavel</dt><dd>{debugHud.session.trustedUtterance}</dd></div>
-                <div><dt>Saida</dt><dd>{debugHud.session.outputTranscript}</dd></div>
-                <div><dt>Tela</dt><dd>{debugHud.session.screenWidth}x{debugHud.session.screenHeight}</dd></div>
-              </dl>
-            </section>
-
-            <section className="debug-hud__section">
-              <h2>Diagnosticos</h2>
-              <dl>
-                <div><dt>Conexao</dt><dd>{debugHud.diagnostics.connection}</dd></div>
-                <div><dt>Microfone</dt><dd>{debugHud.diagnostics.microphone}</dd></div>
-                <div><dt>Tela</dt><dd>{debugHud.diagnostics.screen}</dd></div>
-                <div><dt>Gemini</dt><dd>{debugHud.diagnostics.gemini}</dd></div>
-                <div><dt>Audio</dt><dd>{debugHud.diagnostics.audioChunksSent}</dd></div>
-                <div><dt>Frames</dt><dd>{debugHud.diagnostics.videoFramesSent}</dd></div>
-                <div><dt>Eventos</dt><dd>{debugHud.diagnostics.serverMessagesReceived}</dd></div>
-                <div><dt>Voz Alice</dt><dd>{debugHud.diagnostics.outputAudioChunksReceived}</dd></div>
-                <div><dt>Reconexoes</dt><dd>{debugHud.diagnostics.reconnectAttempts}</dd></div>
-                <div><dt>Retomadas</dt><dd>{debugHud.diagnostics.successfulResumptions}</dd></div>
-                <div><dt>Fallbacks</dt><dd>{debugHud.diagnostics.rehydratedReconnects}</dd></div>
-                <div><dt>Fechamento</dt><dd>{debugHud.diagnostics.lastCloseReason}</dd></div>
-                <div><dt>Ult. erro</dt><dd>{debugHud.diagnostics.lastError}</dd></div>
-              </dl>
-            </section>
-
-            <section className="debug-hud__section debug-hud__section--wide">
-              <h2>Conhecimento web</h2>
-              <dl>
-                <div><dt>URL</dt><dd>{debugHud.knowledge.url}</dd></div>
-                <div><dt>Dominio</dt><dd>{debugHud.knowledge.domain}</dd></div>
-                <div><dt>Titulo</dt><dd>{debugHud.knowledge.title}</dd></div>
-                <div><dt>Selecao</dt><dd>{debugHud.knowledge.selectedText}</dd></div>
-                <div><dt>Idade contexto</dt><dd>{debugHud.knowledge.navigationContextAge}</dd></div>
-                <div><dt>Idade snapshot</dt><dd>{debugHud.knowledge.pageSnapshotAge}</dd></div>
-                <div><dt>Escopo inicial</dt><dd>{debugHud.knowledge.initialScope}</dd></div>
-                <div><dt>Suficiencia inicial</dt><dd>{debugHud.knowledge.initialSufficiency}</dd></div>
-                <div><dt>Escopo final</dt><dd>{debugHud.knowledge.scope}</dd></div>
-                <div><dt>Suficiencia final</dt><dd>{debugHud.knowledge.sufficiency}</dd></div>
-                <div><dt>Origem</dt><dd>{debugHud.knowledge.origin}</dd></div>
-                <div><dt>Refresh</dt><dd>{debugHud.knowledge.refreshMode}</dd></div>
-                <div><dt>Latencia refresh</dt><dd>{debugHud.knowledge.refreshLatency}</dd></div>
-                <div><dt>Extensao vista</dt><dd>{debugHud.knowledge.extensionSeenAge}</dd></div>
-                <div><dt>Expansao</dt><dd>{debugHud.knowledge.expansionPath}</dd></div>
-                <div><dt>Fallback</dt><dd>{debugHud.knowledge.fallbackReason}</dd></div>
-                <div><dt>Fontes</dt><dd><pre>{debugHud.knowledge.sources}</pre></dd></div>
-                <div><dt>Paginas lidas</dt><dd><pre>{debugHud.knowledge.fetchedPages}</pre></dd></div>
-                <div><dt>Resumo operacional</dt><dd>{debugHud.knowledge.summaryHint}</dd></div>
-              </dl>
-            </section>
-
-            <section className="debug-hud__section debug-hud__section--wide">
-              <h2>Memoria recente</h2>
-              <pre>{debugHud.memorySummary}</pre>
-            </section>
-          </div>
-        </aside>
-      ) : null}
+      <AliceHud
+        activeHudPage={activeHudPage}
+        activeMindMap={activeMindMap}
+        caption={caption}
+        debugHud={debugHud}
+        diagnostics={diagnostics}
+        error={error}
+        inputCaption={inputCaption}
+        isBusy={isBusy}
+        isLive={isLive}
+        mindMapRevision={mindMapRevision}
+        onNavigate={setActiveHudPage}
+        onMindMapChange={handleMindMapChange}
+        onApproveProposal={(proposalId) => void handleImprovementProposalDecision(proposalId, true)}
+        onRejectProposal={(proposalId) => void handleImprovementProposalDecision(proposalId, false)}
+        onToggleLiveSession={toggleLiveSession}
+        onToggleSidebar={() => setSidebarCollapsed((current) => !current)}
+        sessionNotice={sessionNotice}
+        sidebarCollapsed={sidebarCollapsed}
+        status={status}
+        statusLabel={statusCopy[status]}
+        autonomousLearningState={autonomousLearningState}
+      />
     </main>
   );
 }

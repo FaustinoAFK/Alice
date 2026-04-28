@@ -89,6 +89,15 @@ describe('classifyKnowledgeScope', () => {
       }),
     ).toBe(KNOWLEDGE_SCOPES.CURRENT_PAGE);
   });
+
+  it('treats contextual location questions on an active page as current_page', () => {
+    expect(
+      classifyKnowledgeScope({
+        question: 'onde fica a area de inteligencia artificial nessa pagina?',
+        navigationContext,
+      }),
+    ).toBe(KNOWLEDGE_SCOPES.CURRENT_PAGE);
+  });
 });
 
 describe('nextKnowledgeScopeForExpansion', () => {
@@ -120,6 +129,7 @@ describe('knowledge state helpers', () => {
 
     expect(state.lastKnowledgeScope).toBe(KNOWLEDGE_SCOPES.SAME_DOMAIN);
     expect(state.lastKnowledgeSources).toEqual(['https://example.com/docs']);
+    expect(state.lastKnowledgeTrace).toEqual([]);
     expect(state.pageSnapshot).toBeNull();
   });
 });

@@ -13,6 +13,10 @@ describe('createLiveDiagnostics', () => {
       serverMessagesReceived: 0,
       outputAudioChunksReceived: 0,
       microphoneLevel: 0,
+      lastVideoFrameWidth: 0,
+      lastVideoFrameHeight: 0,
+      lastVideoSourceWidth: 0,
+      lastVideoSourceHeight: 0,
       goAwayEvents: 0,
       reconnectAttempts: 0,
       successfulResumptions: 0,
@@ -37,6 +41,23 @@ describe('updateLiveDiagnostics', () => {
     expect(diagnostics.audioChunksSent).toBe(1);
     expect(diagnostics.microphoneLevel).toBe(0.42);
     expect(diagnostics.videoFramesSent).toBe(0);
+  });
+
+  it('stores visual frame diagnostics when a screen frame is sent', () => {
+    const diagnostics = updateLiveDiagnostics(createLiveDiagnostics(), {
+      type: 'video-sent',
+      width: 1280,
+      height: 720,
+      sourceWidth: 1920,
+      sourceHeight: 1080,
+    });
+
+    expect(diagnostics.screen).toBe('enviando');
+    expect(diagnostics.videoFramesSent).toBe(1);
+    expect(diagnostics.lastVideoFrameWidth).toBe(1280);
+    expect(diagnostics.lastVideoFrameHeight).toBe(720);
+    expect(diagnostics.lastVideoSourceWidth).toBe(1920);
+    expect(diagnostics.lastVideoSourceHeight).toBe(1080);
   });
 
   it('marks the connection as renewing without resetting counters', () => {

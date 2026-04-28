@@ -2,14 +2,23 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   ALICE_MEMORY_SCHEMA_VERSION,
   buildMemoryPrefixTurns,
+  createMindMap,
   createEmptyAliceMemory,
+  deleteMindMap,
   extractImportantFacts,
+  getActiveMindMap,
   loadAliceMemory,
+  mergeActiveMindMap,
   mergeImportantFacts,
+  mergeMindMapFromGoal,
+  mergeValidatedProcedures,
   pruneAliceMemory,
+  rollbackMindMap,
   saveAliceMemory,
+  setActiveMindMap,
   validateAliceMemorySchema,
 } from './aliceMemory';
+import { createStarterMindMap } from './hud/mindMap/utils/mindMapData';
 
 describe('validateAliceMemorySchema', () => {
   it('accepts the canonical empty memory shape', () => {
@@ -173,6 +182,151 @@ describe('pruneAliceMemory', () => {
   });
 });
 
+describe('active mind map memory', () => {
+  it('stores a valid active mind map in the official Alice memory shape', () => {
+    const memory = mergeActiveMindMap(
+      createEmptyAliceMemory(),
+      {
+        version: 1,
+        nodes: [
+          { id: 'root', data: { label: 'Alice Virtual', onChange: () => {} }, position: { x: 0, y: 0 } },
+          { id: 'hud', data: { label: 'HUD' }, position: { x: 200, y: 0 } },
+        ],
+        edges: [{ id: 'edge-1', source: 'root', target: 'hud' }],
+      },
+      { now: '2026-04-28T11:00:00.000Z' },
+    );
+
+    expect(validateAliceMemorySchema(memory)).toBe(true);
+    const activeMindMap = getActiveMindMap(memory);
+    expect(activeMindMap.nodes).toHaveLength(2);
+    expect(activeMindMap.nodes[0].data).not.toHaveProperty('onChange');
+    expect(activeMindMap.edges).toEqual([
+      expect.objectContaining({ id: 'edge-1', source: 'root', target: 'hud' }),
+    ]);
+    expect(memory.bootstrapMeta.memoryRevision).toBe(1);
+  });
+
+  it('normalizes invalid active mind map data instead of persisting unsafe state', () => {
+    const memory = pruneAliceMemory({
+      ...createEmptyAliceMemory(),
+      activeMindMap: {
+        version: 1,
+        nodes: [
+          { id: 'dup', data: { label: '', dimmed: true }, position: { x: 'bad', y: 10 } },
+          { id: 'dup', data: { label: 'Segundo' }, position: { x: 20, y: 30 } },
+        ],
+        edges: [
+          { id: 'valid', source: 'dup', target: 'dup-2' },
+          { id: 'invalid', source: 'dup', target: 'missing' },
+        ],
+      },
+    });
+
+    const activeMindMap = getActiveMindMap(memory);
+    expect(activeMindMap.nodes.map((node) => node.id)).toEqual(['dup', 'dup-2']);
+    expect(activeMindMap.nodes[0].data.label).toBe('Ideia sem titulo 1');
+    expect(activeMindMap.nodes[0].data).not.toHaveProperty('dimmed');
+    expect(activeMindMap.nodes[0].position).toEqual({ x: 0, y: 10 });
+    expect(activeMindMap.edges).toEqual([
+      expect.objectContaining({ id: 'valid', source: 'dup', target: 'dup-2' }),
+    ]);
+  });
+
+  it('creates a starter map when active mind map state is empty or invalid', () => {
+    const memory = pruneAliceMemory({
+      ...createEmptyAliceMemory(),
+      activeMindMap: { nodes: [], edges: [] },
+    });
+
+    expect(getActiveMindMap(memory).nodes).toEqual(createStarterMindMap().nodes);
+    expect(getActiveMindMap(memory).edges).toEqual([]);
+  });
+
+  it('supports multiple maps and keeps activeId consistent', () => {
+    const firstMemory = createMindMap(
+      createEmptyAliceMemory(),
+      {
+        id: 'map-one',
+        title: 'Mapa Um',
+        nodes: [{ id: 'root', data: { label: 'Mapa Um' }, position: { x: 0, y: 0 } }],
+        edges: [],
+      },
+      { now: '2026-04-28T12:00:00.000Z' },
+    );
+    const secondMemory = createMindMap(
+      firstMemory,
+      {
+        id: 'map-two',
+        title: 'Mapa Dois',
+        nodes: [{ id: 'root', data: { label: 'Mapa Dois' }, position: { x: 0, y: 0 } }],
+        edges: [],
+      },
+      { now: '2026-04-28T12:01:00.000Z' },
+    );
+    const activated = setActiveMindMap(secondMemory, 'map-one');
+    const deleted = deleteMindMap(activated, 'map-one');
+
+    expect(Object.keys(secondMemory.mindMaps.byId)).toEqual(expect.arrayContaining(['map-one', 'map-two']));
+    expect(activated.mindMaps.activeId).toBe('map-one');
+    expect(deleted.mindMaps.activeId).toBe('map-two');
+    expect(getActiveMindMap(deleted).title).toBe('Mapa Dois');
+  });
+
+  it('keeps lightweight history when the active map is updated', () => {
+    const memory = mergeActiveMindMap(
+      createEmptyAliceMemory(),
+      {
+        nodes: [
+          { id: 'root', data: { label: 'Alice Virtual' }, position: { x: 0, y: 0 } },
+        ],
+        edges: [],
+      },
+      { now: '2026-04-28T12:02:00.000Z' },
+    );
+
+    expect(getActiveMindMap(memory).history).toHaveLength(1);
+    expect(getActiveMindMap(memory).history[0].nodes[0].data.label).toBe('Minha Ideia Central');
+  });
+
+  it('rolls back the active map to the last stored snapshot', () => {
+    const updated = mergeActiveMindMap(
+      createEmptyAliceMemory(),
+      {
+        nodes: [
+          { id: 'root', data: { label: 'Depois' }, position: { x: 0, y: 0 } },
+        ],
+        edges: [],
+      },
+      { now: '2026-04-28T12:02:00.000Z' },
+    );
+    const rolledBack = rollbackMindMap(updated, updated.mindMaps.activeId, {
+      now: '2026-04-28T12:04:00.000Z',
+    });
+
+    expect(getActiveMindMap(rolledBack).nodes[0].data.label).toBe('Minha Ideia Central');
+    expect(getActiveMindMap(rolledBack).history).toEqual([]);
+  });
+
+  it('creates a goal-backed map without replacing the current active map', () => {
+    const baseMemory = createEmptyAliceMemory();
+    const activeBefore = baseMemory.mindMaps.activeId;
+    const memory = mergeMindMapFromGoal(
+      baseMemory,
+      {
+        goalId: 'goal-1',
+        title: 'Entregar HUD',
+        subtasks: [{ id: 'tests', title: 'Rodar testes' }],
+      },
+      { now: '2026-04-28T12:03:00.000Z' },
+    );
+
+    const goalMap = Object.values(memory.mindMaps.byId).find((map) => map.goalId === 'goal-1');
+    expect(memory.mindMaps.activeId).toBe(activeBefore);
+    expect(goalMap.nodes.map((node) => node.data.label)).toEqual(['Entregar HUD', 'Rodar testes']);
+  });
+});
+
 describe('buildMemoryPrefixTurns', () => {
   it('builds a concise persisted memory prefix turn', () => {
     const turns = buildMemoryPrefixTurns({
@@ -253,6 +407,7 @@ describe('loadAliceMemory', () => {
 
     expect(memory.schemaVersion).toBe(ALICE_MEMORY_SCHEMA_VERSION);
     expect(memory.recentContextSummary.summary).toContain('continuar fase 5');
+    expect(memory.proceduralMemory.procedures).toEqual([]);
     expect(memory).not.toHaveProperty('commandPreferences');
     expect(memory).not.toHaveProperty('commandFriction');
   });
@@ -262,7 +417,8 @@ describe('loadAliceMemory', () => {
       loadJson: vi.fn(async () => '{invalid'),
     });
 
-    expect(memory).toEqual(createEmptyAliceMemory());
+    expect(validateAliceMemorySchema(memory)).toBe(true);
+    expect(getActiveMindMap(memory).nodes).toEqual(createStarterMindMap().nodes);
   });
 
   it('recovers safely when the storage layer itself fails during crash recovery', async () => {
@@ -272,7 +428,34 @@ describe('loadAliceMemory', () => {
       }),
     });
 
-    expect(memory).toEqual(createEmptyAliceMemory());
+    expect(validateAliceMemorySchema(memory)).toBe(true);
+    expect(getActiveMindMap(memory).nodes).toEqual(createStarterMindMap().nodes);
+  });
+});
+
+describe('mergeValidatedProcedures', () => {
+  it('stores validated operational procedures in the official Alice memory shape', () => {
+    const memory = mergeValidatedProcedures(
+      createEmptyAliceMemory(),
+      [
+        {
+          procedureId: 'procedure:vm-validation',
+          title: 'Validar na VM local',
+          summary: 'Copia arquivos, testa e so depois aplica.',
+          steps: ['copiar arquivos', 'rodar testes', 'gerar rollback'],
+          status: 'active',
+          confidence: 0.9,
+          source: 'validated_operational_learning',
+        },
+      ],
+      { now: '2026-04-28T10:00:00.000Z' },
+    );
+
+    expect(validateAliceMemorySchema(memory)).toBe(true);
+    expect(memory.proceduralMemory.procedures).toHaveLength(1);
+    expect(memory.proceduralMemory.procedures[0].title).toBe('Validar na VM local');
+    expect(memory.bootstrapMeta.memoryRevision).toBe(1);
+    expect(buildMemoryPrefixTurns(memory)[0].parts[0].text).toContain('Procedimentos validados');
   });
 });
 

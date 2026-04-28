@@ -13,6 +13,7 @@ describe('createAliceLiveSetup', () => {
     expect(ALICE_LIVE_MODEL).toBe('gemini-2.5-flash-native-audio-preview-12-2025');
     expect(setup.model).toBe(`models/${ALICE_LIVE_MODEL}`);
     expect(setup.generationConfig.responseModalities).toEqual(['AUDIO']);
+    expect(setup.generationConfig.mediaResolution).toBe('MEDIA_RESOLUTION_MEDIUM');
     expect(setup.systemInstruction.parts[0].text).toBe(ALICE_SYSTEM_INSTRUCTION);
     expect(setup.contextWindowCompression).toEqual({ slidingWindow: {} });
     expect(setup.inputAudioTranscription).toEqual({});
@@ -23,6 +24,25 @@ describe('createAliceLiveSetup', () => {
       'search_same_domain',
       'search_web',
       'fetch_web_page',
+      'update_mind_map',
+      'get_autonomous_learning_status',
+      'diagnose_local_vm_setup',
+      'run_local_vm_smoke_test',
+      'install_vm_guest_agent',
+      'diagnose_vm_guest_agent',
+      'capture_vm_guest_screen',
+      'run_vm_guest_agent_action',
+      'run_vm_visual_smoke_test',
+      'run_vm_operational_task',
+      'plan_autonomous_task',
+      'create_host_change_snapshot',
+      'record_host_file_checkpoint',
+      'create_self_improvement_proposal',
+      'approve_self_improvement_proposal',
+      'record_validated_learning',
+      'record_research_finding',
+      'inspect_project_context',
+      'report_unexpected_risk',
     ]);
     expect(setup).not.toHaveProperty('proactivity');
     expect(setup).not.toHaveProperty('sessionResumption');
@@ -75,5 +95,20 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('search_same_domain');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('search_web');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('responseGuidance');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('finalOrigin');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('finalSufficiency');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('ja pode atualizar a pagina');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('frame visual da tela compartilhada');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Se o conteudo visual estiver pequeno');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('DOM real da extensao');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('leitura textual precisa');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('update_mind_map');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Nao faca resumo por iniciativa propria');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('responda diretamente a pergunta');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('VM playground real depende de provedor local configurado');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Workspace local fallback usa copias e nao e VM real');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('run_vm_operational_task antes de pesquisar');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('snapshot, diff, validacao e rollback');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Auto-melhoria da Alice deve virar proposta');
   });
 });

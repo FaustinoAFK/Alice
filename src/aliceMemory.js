@@ -1,10 +1,22 @@
 import { invoke } from '@tauri-apps/api/core';
+import {
+  createEmptyAutonomousAudit,
+  serializeAutonomousStateForAudit,
+} from './autonomousLearning/auditPersistence';
+import {
+  appendMindMapHistory,
+  createMindMap as createMindMapData,
+  createStarterMindMap,
+  generateMindMapFromGoal,
+  normalizeMindMap,
+} from './hud/mindMap/utils/mindMapData';
 
-export const ALICE_MEMORY_SCHEMA_VERSION = 3;
+export const ALICE_MEMORY_SCHEMA_VERSION = 7;
 export const ALICE_MEMORY_FILE_NAME = 'alice-memory.json';
 export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
 export const MAX_TOOL_FACTS = 50;
+export const MAX_PROCEDURES = 30;
 
 const DEFAULT_ASSISTANT_NAME = 'Alice';
 const DEFAULT_PERSONA_STYLE = 'playful_confident';
@@ -36,6 +48,46 @@ const uniqueNormalizedStrings = (values = []) => {
 
 const sortByUpdatedAtDesc = (items = []) =>
   [...items].sort((left, right) => String(right.updatedAt || '').localeCompare(String(left.updatedAt || '')));
+
+const normalizeMindMapsState = (memory = {}) => {
+  const source = memory?.mindMaps;
+  const byId = {};
+  const maps = [];
+  const legacyActiveMindMap = memory?.activeMindMap ? normalizeMindMap(memory.activeMindMap) : null;
+
+  if (source && typeof source === 'object' && !Array.isArray(source) && source.byId && typeof source.byId === 'object') {
+    maps.push(...Object.values(source.byId));
+  } else if (Array.isArray(source)) {
+    maps.push(...source);
+  }
+
+  if (legacyActiveMindMap) {
+    maps.push(legacyActiveMindMap);
+  }
+
+  maps.forEach((map) => {
+    const normalizedMap = normalizeMindMap(map);
+    if (!normalizedMap.id) {
+      return;
+    }
+
+    byId[normalizedMap.id] = normalizedMap;
+  });
+
+  if (Object.keys(byId).length === 0) {
+    const starterMap = createMindMapData(createStarterMindMap());
+    byId[starterMap.id] = starterMap;
+  }
+
+  const legacyActiveMindMapId = legacyActiveMindMap?.id || '';
+  const preferredActiveId = normalizeText(legacyActiveMindMapId || source?.activeId || memory?.activeMindMapId);
+  const activeId = byId[preferredActiveId] ? preferredActiveId : Object.keys(byId)[0];
+
+  return {
+    byId,
+    activeId,
+  };
+};
 
 const mergeNamedRecords = (existingItems = [], incomingItems = [], limit) => {
   const merged = new Map();
@@ -83,6 +135,36 @@ const mergeToolFacts = (existingFacts = [], incomingFacts = [], limit) => {
     }
 
     merged.set(`${normalizedEntry.kind}:${normalizeFactKey(normalizedEntry.fact)}`, normalizedEntry);
+  });
+
+  return sortByUpdatedAtDesc([...merged.values()]).slice(0, limit);
+};
+
+const mergeProcedures = (existingProcedures = [], incomingProcedures = [], limit = MAX_PROCEDURES) => {
+  const merged = new Map();
+
+  [...existingProcedures, ...incomingProcedures].forEach((procedure) => {
+    if (!procedure?.procedureId || !procedure?.title) {
+      return;
+    }
+
+    const normalizedProcedure = {
+      procedureId: normalizeText(procedure.procedureId),
+      title: normalizeText(procedure.title),
+      summary: normalizeText(procedure.summary),
+      steps: uniqueNormalizedStrings(procedure.steps || []).slice(0, 20),
+      status: normalizeText(procedure.status) || 'active',
+      confidence: Math.min(1, Math.max(0, Number(procedure.confidence || 0))),
+      source: normalizeText(procedure.source) || 'validated_operational_learning',
+      updatedAt: normalizeText(procedure.updatedAt),
+      createdAt: normalizeText(procedure.createdAt),
+    };
+
+    if (!normalizedProcedure.procedureId || !normalizedProcedure.title) {
+      return;
+    }
+
+    merged.set(normalizedProcedure.procedureId, normalizedProcedure);
   });
 
   return sortByUpdatedAtDesc([...merged.values()]).slice(0, limit);
@@ -179,6 +261,11 @@ export const createEmptyAliceMemory = () => ({
   activeProjects: [],
   activeTasks: [],
   toolFacts: [],
+  proceduralMemory: {
+    procedures: [],
+  },
+  autonomousAudit: createEmptyAutonomousAudit(),
+  mindMaps: normalizeMindMapsState(),
   recentContextSummary: {
     summary: '',
     updatedAt: '',
@@ -202,6 +289,12 @@ export const validateAliceMemorySchema = (memory) => {
     Array.isArray(memory.activeProjects) &&
     Array.isArray(memory.activeTasks) &&
     Array.isArray(memory.toolFacts) &&
+    typeof memory.proceduralMemory === 'object' &&
+    Array.isArray(memory.proceduralMemory.procedures) &&
+    typeof memory.autonomousAudit === 'object' &&
+    typeof memory.mindMaps === 'object' &&
+    typeof memory.mindMaps.byId === 'object' &&
+    typeof memory.mindMaps.activeId === 'string' &&
     typeof memory.recentContextSummary === 'object' &&
     typeof memory.bootstrapMeta === 'object'
   );
@@ -218,10 +311,40 @@ const upgradeAliceMemorySchema = (memory) => {
     return memory;
   }
 
-  if (memory.schemaVersion === 1 || memory.schemaVersion === 2) {
+  if (memory.schemaVersion === 1 || memory.schemaVersion === 2 || memory.schemaVersion === 3) {
     return {
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      proceduralMemory: {
+        procedures: [],
+      },
+      autonomousAudit: createEmptyAutonomousAudit(),
+      mindMaps: normalizeMindMapsState(memory),
+    };
+  }
+
+  if (memory.schemaVersion === 4) {
+    return {
+      ...memory,
+      schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      autonomousAudit: createEmptyAutonomousAudit(),
+      mindMaps: normalizeMindMapsState(memory),
+    };
+  }
+
+  if (memory.schemaVersion === 5) {
+    return {
+      ...memory,
+      schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      mindMaps: normalizeMindMapsState(memory),
+    };
+  }
+
+  if (memory.schemaVersion === 6) {
+    return {
+      ...memory,
+      schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      mindMaps: normalizeMindMapsState(memory),
     };
   }
 
@@ -248,6 +371,14 @@ export const pruneAliceMemory = (memory) => {
     activeProjects: mergeNamedRecords(baseMemory.activeProjects, [], MAX_ACTIVE_PROJECTS),
     activeTasks: mergeNamedRecords(baseMemory.activeTasks, [], MAX_ACTIVE_TASKS),
     toolFacts: mergeToolFacts(baseMemory.toolFacts, [], MAX_TOOL_FACTS),
+    proceduralMemory: {
+      procedures: mergeProcedures(baseMemory.proceduralMemory.procedures, [], MAX_PROCEDURES),
+    },
+    autonomousAudit: {
+      ...createEmptyAutonomousAudit(),
+      ...(baseMemory.autonomousAudit || {}),
+    },
+    mindMaps: normalizeMindMapsState(baseMemory),
     recentContextSummary: {
       summary: normalizeText(baseMemory.recentContextSummary.summary),
       updatedAt: normalizeText(baseMemory.recentContextSummary.updatedAt),
@@ -358,6 +489,14 @@ export const mergeImportantFacts = (
       MAX_ACTIVE_TASKS,
     ),
     toolFacts: mergeToolFacts(baseMemory.toolFacts, facts?.toolFacts || [], MAX_TOOL_FACTS),
+    proceduralMemory: {
+      procedures: mergeProcedures(
+        baseMemory.proceduralMemory.procedures,
+        facts?.proceduralMemory?.procedures || [],
+        MAX_PROCEDURES,
+      ),
+    },
+    autonomousAudit: baseMemory.autonomousAudit,
     recentContextSummary: normalizeText(facts?.recentContextSummary?.summary)
       ? {
           summary: normalizeText(facts.recentContextSummary.summary),
@@ -373,6 +512,271 @@ export const mergeImportantFacts = (
     },
   });
 };
+
+export const mergeValidatedProcedures = (
+  existingMemory,
+  procedures = [],
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    proceduralMemory: {
+      procedures: mergeProcedures(
+        baseMemory.proceduralMemory.procedures,
+        procedures.map((procedure) => ({
+          ...procedure,
+          updatedAt: normalizeText(procedure.updatedAt) || now,
+          createdAt: normalizeText(procedure.createdAt) || now,
+        })),
+        MAX_PROCEDURES,
+      ),
+    },
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const getActiveMindMap = (memory) => {
+  const normalizedMindMaps = normalizeMindMapsState(memory);
+  return normalizedMindMaps.byId[normalizedMindMaps.activeId] || Object.values(normalizedMindMaps.byId)[0];
+};
+
+export const createMindMap = (
+  existingMemory,
+  mindMapData = {},
+  { now = new Date().toISOString(), makeActive = true } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const requestedMap = createMindMapData(mindMapData);
+  const mapIdAlreadyExists = Boolean(baseMemory.mindMaps.byId[requestedMap.id]);
+  const nextMap = normalizeMindMap({
+    ...requestedMap,
+    id: mapIdAlreadyExists ? createMindMapData({ ...mindMapData, id: '' }).id : requestedMap.id,
+    createdAt: now,
+    updatedAt: now,
+  });
+  const nextMindMaps = normalizeMindMapsState({
+    mindMaps: {
+      byId: {
+        ...baseMemory.mindMaps.byId,
+        [nextMap.id]: nextMap,
+      },
+      activeId: makeActive ? nextMap.id : baseMemory.mindMaps.activeId,
+    },
+  });
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    mindMaps: nextMindMaps,
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const setActiveMindMap = (existingMemory, id, { now = new Date().toISOString() } = {}) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const activeId = normalizeText(id);
+
+  if (!baseMemory.mindMaps.byId[activeId]) {
+    return baseMemory;
+  }
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    mindMaps: {
+      ...baseMemory.mindMaps,
+      activeId,
+    },
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const updateMindMap = (
+  existingMemory,
+  id,
+  patch = {},
+  { now = new Date().toISOString(), historyReason = 'update' } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const targetId = normalizeText(id) || baseMemory.mindMaps.activeId;
+  const currentMap = baseMemory.mindMaps.byId[targetId] || getActiveMindMap(baseMemory);
+
+  if (!currentMap) {
+    return baseMemory;
+  }
+
+  const patchedMap = typeof patch === 'function' ? patch(currentMap) : { ...currentMap, ...patch };
+  const normalizedPatchedMap = normalizeMindMap({
+    ...patchedMap,
+    id: currentMap.id,
+    createdAt: currentMap.createdAt,
+    updatedAt: now,
+  });
+  const alreadyRecordedHistory =
+    (normalizedPatchedMap.history?.length || 0) > (currentMap.history?.length || 0) ||
+    historyReason === 'rollback';
+  const nextMap = alreadyRecordedHistory
+    ? normalizedPatchedMap
+    : appendMindMapHistory(
+        normalizedPatchedMap,
+        currentMap,
+        { reason: historyReason, now },
+      );
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    mindMaps: {
+      byId: {
+        ...baseMemory.mindMaps.byId,
+        [currentMap.id]: nextMap,
+      },
+      activeId: baseMemory.mindMaps.byId[targetId] ? baseMemory.mindMaps.activeId : currentMap.id,
+    },
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const deleteMindMap = (
+  existingMemory,
+  id,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const targetId = normalizeText(id);
+
+  if (!targetId || !baseMemory.mindMaps.byId[targetId]) {
+    return baseMemory;
+  }
+
+  const byId = { ...baseMemory.mindMaps.byId };
+  delete byId[targetId];
+
+  if (Object.keys(byId).length === 0) {
+    const starterMap = normalizeMindMap({ ...createStarterMindMap(), createdAt: now, updatedAt: now });
+    byId[starterMap.id] = starterMap;
+  }
+
+  const activeId = byId[baseMemory.mindMaps.activeId]
+    ? baseMemory.mindMaps.activeId
+    : sortByUpdatedAtDesc(Object.values(byId))[0]?.id || Object.keys(byId)[0];
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    mindMaps: {
+      byId,
+      activeId,
+    },
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const rollbackMindMap = (
+  existingMemory,
+  id,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const targetId = normalizeText(id) || baseMemory.mindMaps.activeId;
+  const currentMap = baseMemory.mindMaps.byId[targetId] || getActiveMindMap(baseMemory);
+  const snapshot = currentMap?.history?.at(-1);
+
+  if (!currentMap || !snapshot) {
+    return baseMemory;
+  }
+
+  const restoredMap = normalizeMindMap({
+    ...currentMap,
+    nodes: snapshot.nodes,
+    edges: snapshot.edges,
+    history: currentMap.history.slice(0, -1),
+    updatedAt: now,
+  });
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    mindMaps: {
+      byId: {
+        ...baseMemory.mindMaps.byId,
+        [currentMap.id]: restoredMap,
+      },
+      activeId: baseMemory.mindMaps.activeId,
+    },
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const mergeMindMapFromGoal = (
+  existingMemory,
+  goal,
+  { now = new Date().toISOString(), makeActive = false } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const generatedMap = normalizeMindMap({
+    ...generateMindMapFromGoal(goal),
+    createdAt: now,
+    updatedAt: now,
+  });
+  const existingMap = Object.values(baseMemory.mindMaps.byId).find(
+    (map) => map.goalId && generatedMap.goalId && map.goalId === generatedMap.goalId,
+  );
+
+  if (existingMap) {
+    return updateMindMap(
+      baseMemory,
+      existingMap.id,
+      {
+        ...generatedMap,
+        id: existingMap.id,
+        history: existingMap.history,
+        createdAt: existingMap.createdAt,
+      },
+      { now, historyReason: 'goal_sync' },
+    );
+  }
+
+  return createMindMap(
+    baseMemory,
+    {
+      ...generatedMap,
+      id: '',
+    },
+    { now, makeActive },
+  );
+};
+
+export const mergeActiveMindMap = (
+  existingMemory,
+  mindMapData,
+  { now = new Date().toISOString(), targetMapId = '' } = {},
+) =>
+  updateMindMap(existingMemory, targetMapId, mindMapData, {
+    now,
+    historyReason: 'active_map_update',
+  });
 
 export const buildMemoryPrefixTurns = (memory) => {
   const normalizedMemory = pruneAliceMemory(memory);
@@ -428,6 +832,27 @@ export const buildMemoryPrefixTurns = (memory) => {
     );
   }
 
+  if (normalizedMemory.proceduralMemory.procedures.length > 0) {
+    lines.push(
+      `Procedimentos validados: ${normalizedMemory.proceduralMemory.procedures
+        .slice(0, 6)
+        .map((procedure) => `${procedure.title} (${procedure.status || 'active'})`)
+        .join('; ')}.`,
+    );
+  }
+
+  const activeMindMap = getActiveMindMap(normalizedMemory);
+  const hasMeaningfulMindMap =
+    activeMindMap.nodes.length > 1 ||
+    activeMindMap.edges.length > 0 ||
+    activeMindMap.nodes[0]?.data?.label !== 'Minha Ideia Central';
+
+  if (hasMeaningfulMindMap) {
+    lines.push(
+      `Mapa mental ativo: ${activeMindMap.nodes.length} topicos e ${activeMindMap.edges.length} conexoes.`,
+    );
+  }
+
   if (normalizedMemory.recentContextSummary.summary) {
     lines.push(`Resumo recente: ${normalizedMemory.recentContextSummary.summary}.`);
   }
@@ -456,6 +881,24 @@ export const createAliceMemoryStorage = ({ invokeFn = invoke } = {}) => ({
     return invokeFn('save_alice_memory_json', { json });
   },
 });
+
+export const mergeAutonomousAudit = (
+  existingMemory,
+  autonomousState,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    autonomousAudit: serializeAutonomousStateForAudit(autonomousState, { now }),
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
 
 export const loadAliceMemory = async (storage = createAliceMemoryStorage()) => {
   try {

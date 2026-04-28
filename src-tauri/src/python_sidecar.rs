@@ -129,7 +129,10 @@ impl PythonSidecarManager {
         Err(if errors.is_empty() {
             "Nao encontrei launch spec para o sidecar Python.".to_string()
         } else {
-            format!("Nao consegui iniciar o sidecar Python. {}", errors.join(" | "))
+            format!(
+                "Nao consegui iniciar o sidecar Python. {}",
+                errors.join(" | ")
+            )
         })
     }
 
@@ -174,17 +177,17 @@ impl PythonSidecarManager {
         match receiver.recv_timeout(Duration::from_millis(timeout_ms.max(1))) {
             Ok((reader, read_result, line)) => {
                 process.stdout = Some(reader);
-                let bytes = read_result.map_err(|error| {
-                    format!("Falha ao ler resposta do sidecar Python: {error}")
-                })?;
+                let bytes = read_result
+                    .map_err(|error| format!("Falha ao ler resposta do sidecar Python: {error}"))?;
 
                 if bytes == 0 {
                     return Err("Sidecar Python encerrou sem responder.".to_string());
                 }
 
-                let response: PythonSidecarResponse = serde_json::from_str(line.trim()).map_err(
-                    |error| format!("Falha ao interpretar resposta do sidecar Python: {error}"),
-                )?;
+                let response: PythonSidecarResponse =
+                    serde_json::from_str(line.trim()).map_err(|error| {
+                        format!("Falha ao interpretar resposta do sidecar Python: {error}")
+                    })?;
 
                 if response.id != request.id {
                     return Err(format!(
@@ -313,7 +316,11 @@ pub(crate) fn invoke_window_ui(
 }
 
 pub(crate) fn get_foreground_context() -> Result<PythonSidecarResponse, String> {
-    invoke_window_ui("get_foreground_context", json!({}), Some(DEFAULT_REQUEST_TIMEOUT_MS))
+    invoke_window_ui(
+        "get_foreground_context",
+        json!({}),
+        Some(DEFAULT_REQUEST_TIMEOUT_MS),
+    )
 }
 
 #[cfg(test)]
@@ -352,16 +359,17 @@ mod tests {
 
     #[test]
     fn launch_specs_include_custom_sidecar_path() {
-        let _guard = test_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let script = write_fake_sidecar("print('ok')");
         env::set_var("ALICE_PYTHON_SIDECAR_PATH", &script);
         env::set_var("ALICE_PYTHON_BIN", "python");
 
         let specs = resolve_launch_specs();
 
-        assert!(specs
-            .iter()
-            .any(|spec| spec.program.contains("python") && spec.args.iter().any(|arg| arg == &script.to_string_lossy())));
+        assert!(specs.iter().any(|spec| spec.program.contains("python")
+            && spec.args.iter().any(|arg| arg == &script.to_string_lossy())));
 
         env::remove_var("ALICE_PYTHON_SIDECAR_PATH");
         env::remove_var("ALICE_PYTHON_BIN");
@@ -370,7 +378,9 @@ mod tests {
 
     #[test]
     fn launch_specs_ignore_non_python_sidecar_paths() {
-        let _guard = test_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let path = env::temp_dir().join(format!(
             "alice-python-sidecar-test-{}-{}.exe",
             std::process::id(),
@@ -396,7 +406,9 @@ mod tests {
 
     #[test]
     fn manager_starts_and_correlates_responses() {
-        let _guard = test_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let script = write_fake_sidecar(
             "import json,sys\nfor line in sys.stdin:\n req=json.loads(line)\n print(json.dumps({'id': req['id'], 'ok': True, 'message': 'pong', 'artifacts': {'echo': req['action']}, 'stdout': None, 'stderr': None}), flush=True)\n",
         );
@@ -404,7 +416,8 @@ mod tests {
         env::set_var("ALICE_PYTHON_BIN", "python");
         reset_for_tests();
 
-        let response = invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
+        let response =
+            invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
 
         assert!(response.id.starts_with("py-sidecar-"));
         assert_eq!(response.message, "pong");
@@ -418,7 +431,9 @@ mod tests {
 
     #[test]
     fn manager_restarts_when_previous_process_exits() {
-        let _guard = test_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let script = write_fake_sidecar(
             "import json,sys\nline=sys.stdin.readline()\nreq=json.loads(line)\nprint(json.dumps({'id': req['id'], 'ok': True, 'message': 'once', 'artifacts': {'pid': 'first'}, 'stdout': None, 'stderr': None}), flush=True)\n",
         );
@@ -426,8 +441,10 @@ mod tests {
         env::set_var("ALICE_PYTHON_BIN", "python");
         reset_for_tests();
 
-        let first = invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
-        let second = invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
+        let first =
+            invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
+        let second =
+            invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(1_000)).unwrap();
 
         assert_eq!(first.message, "once");
         assert_eq!(second.message, "once");
@@ -440,7 +457,9 @@ mod tests {
 
     #[test]
     fn manager_times_out_and_normalizes_failure() {
-        let _guard = test_env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let script = write_fake_sidecar(
             "import json,sys,time\nfor line in sys.stdin:\n req=json.loads(line)\n time.sleep(0.2)\n print(json.dumps({'id': req['id'], 'ok': True, 'message': 'late', 'artifacts': None, 'stdout': None, 'stderr': None}), flush=True)\n",
         );
@@ -448,7 +467,8 @@ mod tests {
         env::set_var("ALICE_PYTHON_BIN", "python");
         reset_for_tests();
 
-        let error = invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(50)).unwrap_err();
+        let error =
+            invoke_window_ui("resolve_target", json!({"target": "Salvar"}), Some(50)).unwrap_err();
 
         assert!(error.contains("expirou"));
 

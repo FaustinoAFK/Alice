@@ -70,6 +70,26 @@ const uniqueStrings = (values) => [
   ),
 ];
 
+const createTraceEvent = (step, fields = {}) => ({
+  step,
+  status: fields.status || 'done',
+  ...fields,
+});
+
+const createToolCallTrace = ({ toolName, question }) =>
+  createTraceEvent('tool_call_received', {
+    toolName,
+    question,
+  });
+
+const createRefreshTrace = (refreshResponse = null) =>
+  createTraceEvent('refresh_current_page_snapshot', {
+    status: refreshResponse?.ok ? 'done' : 'failed',
+    refreshMode: refreshResponse?.refreshMode || (refreshResponse?.ok ? '' : 'refresh_failed'),
+    latencyMs: Number(refreshResponse?.refreshLatencyMs || 0),
+    fallbackReason: refreshResponse?.fallbackReason || '',
+  });
+
 const buildAnswerMode = ({ initialScope, finalOrigin, usedInternalLinks }) => {
   if (initialScope === KNOWLEDGE_SCOPES.GLOBAL && finalOrigin === 'web_geral') {
     return 'search_only';
@@ -271,9 +291,22 @@ const buildExpandedInspection = async ({
     sameDomainPages: [],
     globalResults: [],
     globalPages: [],
+    trace: [
+      createTraceEvent('page_inspection', {
+        status: inspectResponse.ok ? 'done' : 'failed',
+        sufficiency: inspectResponse.sufficiency || KNOWLEDGE_SUFFICIENCY.INSUFFICIENT,
+      }),
+    ],
   };
 
   if (!inspectResponse.ok) {
+    return expansion;
+  }
+
+  if (
+    inspectResponse.sufficiency === KNOWLEDGE_SUFFICIENCY.SUFFICIENT &&
+    initialScope !== KNOWLEDGE_SCOPES.GLOBAL
+  ) {
     return expansion;
   }
 
@@ -285,6 +318,7 @@ const buildExpandedInspection = async ({
   });
 
   if (
+    initialScope !== KNOWLEDGE_SCOPES.GLOBAL &&
     inspectResponse.sufficiency !== KNOWLEDGE_SUFFICIENCY.SUFFICIENT &&
     internalLinks.length > 0
   ) {
@@ -305,6 +339,12 @@ const buildExpandedInspection = async ({
       pages: expansion.internalLinkPages,
       question,
     });
+    expansion.trace.push(
+      createTraceEvent('internal_link_follow', {
+        fetchedPages: expansion.internalLinkPages.length,
+        sufficiency: internalSufficiency,
+      }),
+    );
     if (internalSufficiency === KNOWLEDGE_SUFFICIENCY.SUFFICIENT) {
       expansion.finalScope = KNOWLEDGE_SCOPES.SAME_DOMAIN;
       expansion.finalOrigin = 'links_internos';
@@ -317,13 +357,29 @@ const buildExpandedInspection = async ({
       expansion.finalOrigin = 'links_internos';
       expansion.finalSufficiency = KNOWLEDGE_SUFFICIENCY.PARTIAL;
     }
+  } else if (
+    initialScope !== KNOWLEDGE_SCOPES.GLOBAL &&
+    inspectResponse.sufficiency !== KNOWLEDGE_SUFFICIENCY.SUFFICIENT
+  ) {
+    expansion.trace.push(
+      createTraceEvent('internal_link_follow', {
+        status: 'skipped',
+        reason: 'no_relevant_internal_links',
+      }),
+    );
+  } else if (initialScope === KNOWLEDGE_SCOPES.GLOBAL) {
+    expansion.trace.push(
+      createTraceEvent('internal_link_follow', {
+        status: 'skipped',
+        reason: 'global_scope',
+      }),
+    );
   }
 
   const shouldRunSameDomain =
     initialScope === KNOWLEDGE_SCOPES.SAME_DOMAIN ||
     (initialScope === KNOWLEDGE_SCOPES.CURRENT_PAGE &&
-      expansion.finalSufficiency !== KNOWLEDGE_SUFFICIENCY.SUFFICIENT) ||
-    (initialScope === KNOWLEDGE_SCOPES.GLOBAL && Boolean(domain));
+      expansion.finalSufficiency !== KNOWLEDGE_SUFFICIENCY.SUFFICIENT);
 
   if (shouldRunSameDomain && domain) {
     expansionPath.push('same_domain_search');
@@ -348,6 +404,13 @@ const buildExpandedInspection = async ({
       pages: expansion.sameDomainPages,
       question,
     });
+    expansion.trace.push(
+      createTraceEvent('same_domain_search', {
+        results: expansion.sameDomainResults.length,
+        fetchedPages: expansion.sameDomainPages.length,
+        sufficiency: sameDomainSufficiency,
+      }),
+    );
     if (sameDomainSufficiency === KNOWLEDGE_SUFFICIENCY.SUFFICIENT) {
       expansion.finalScope = KNOWLEDGE_SCOPES.SAME_DOMAIN;
       expansion.finalOrigin = 'mesmo_dominio';
@@ -360,6 +423,20 @@ const buildExpandedInspection = async ({
       expansion.finalOrigin = 'mesmo_dominio';
       expansion.finalSufficiency = KNOWLEDGE_SUFFICIENCY.PARTIAL;
     }
+  } else if (initialScope === KNOWLEDGE_SCOPES.GLOBAL) {
+    expansion.trace.push(
+      createTraceEvent('same_domain_search', {
+        status: 'skipped',
+        reason: 'global_scope',
+      }),
+    );
+  } else if (shouldRunSameDomain && !domain) {
+    expansion.trace.push(
+      createTraceEvent('same_domain_search', {
+        status: 'skipped',
+        reason: 'missing_domain',
+      }),
+    );
   }
 
   const shouldRunGlobal =
@@ -388,11 +465,24 @@ const buildExpandedInspection = async ({
       pages: expansion.globalPages,
       question,
     });
+    expansion.trace.push(
+      createTraceEvent('global_search', {
+        results: expansion.globalResults.length,
+        fetchedPages: expansion.globalPages.length,
+        sufficiency: globalSufficiency,
+      }),
+    );
     if (globalSufficiency !== KNOWLEDGE_SUFFICIENCY.INSUFFICIENT) {
       expansion.finalScope = KNOWLEDGE_SCOPES.GLOBAL;
       expansion.finalOrigin = 'web_geral';
       expansion.finalSufficiency = globalSufficiency;
       return expansion;
+    }
+
+    if (initialScope === KNOWLEDGE_SCOPES.GLOBAL) {
+      expansion.finalScope = KNOWLEDGE_SCOPES.GLOBAL;
+      expansion.finalOrigin = 'web_geral';
+      expansion.finalSufficiency = KNOWLEDGE_SUFFICIENCY.INSUFFICIENT;
     }
   }
 
@@ -441,6 +531,14 @@ const buildSearchResponse = async ({ toolName, baseResponse, invokeTool, query }
       finalSufficiency,
       fallbackReason: '',
     }),
+    operationalTrace: [
+      createToolCallTrace({ toolName, question: query }),
+      createTraceEvent(toolName === 'search_same_domain' ? 'same_domain_search' : 'global_search', {
+        results: baseResponse.results?.length || 0,
+        fetchedPages: fetchedPages.length,
+        sufficiency: finalSufficiency,
+      }),
+    ],
   };
 };
 
@@ -514,6 +612,11 @@ export const executeKnowledgeTool = async ({
         fallbackReason: expansion.fallbackReason,
         usedInternalLinks: expansion.expansionPath.includes('internal_link_follow'),
       });
+      const operationalTrace = [
+        createToolCallTrace({ toolName, question }),
+        createRefreshTrace(refreshResponse),
+        ...expansion.trace,
+      ];
 
       const response = {
         ...inspectResponse,
@@ -527,6 +630,7 @@ export const executeKnowledgeTool = async ({
         expansionPath: expansion.expansionPath,
         fallbackReason: expansion.fallbackReason,
         responseGuidance,
+        operationalTrace,
         summaryHint: buildSummaryHint({
           finalOrigin: expansion.finalOrigin,
           finalSufficiency: expansion.finalSufficiency,
@@ -561,6 +665,7 @@ export const executeKnowledgeTool = async ({
                 ...expansion.globalPages,
               ],
               lastExpansionPath: expansion.expansionPath,
+              lastKnowledgeTrace: operationalTrace,
               lastSnapshotRefreshMode:
                 refreshResponse?.refreshMode || (refreshResponse?.ok ? '' : 'refresh_failed'),
               lastSnapshotRefreshLatencyMs: Number(refreshResponse?.refreshLatencyMs || 0),
@@ -578,6 +683,7 @@ export const executeKnowledgeTool = async ({
               lastKnowledgeSources: [],
               lastFetchedPages: [],
               lastExpansionPath: [],
+              lastKnowledgeTrace: operationalTrace,
               lastSnapshotRefreshMode: refreshResponse?.refreshMode || (refreshResponse?.ok ? '' : 'refresh_failed'),
               lastSnapshotRefreshLatencyMs: Number(refreshResponse?.refreshLatencyMs || 0),
               lastExtensionSeenAt: Number(refreshResponse?.extensionSeenAt || 0),
@@ -615,6 +721,7 @@ export const executeKnowledgeTool = async ({
           lastKnowledgeSources: response.consultedSources,
           lastFetchedPages: response.fetchedPages,
           lastExpansionPath: response.expansionPath,
+          lastKnowledgeTrace: response.operationalTrace,
           lastFallbackReason: '',
           lastKnowledgeQuestion: query,
           lastKnowledgeSummaryHint: response.summaryHint,
@@ -647,6 +754,7 @@ export const executeKnowledgeTool = async ({
           lastKnowledgeSources: response.consultedSources,
           lastFetchedPages: response.fetchedPages,
           lastExpansionPath: response.expansionPath,
+          lastKnowledgeTrace: response.operationalTrace,
           lastFallbackReason: '',
           lastKnowledgeQuestion: query,
           lastKnowledgeSummaryHint: response.summaryHint,
@@ -675,6 +783,13 @@ export const executeKnowledgeTool = async ({
           lastKnowledgeSources: uniqueStrings([response.page?.url]),
           lastFetchedPages: response.page ? [response.page] : [],
           lastExpansionPath: ['fetch_web_page'],
+          lastKnowledgeTrace: [
+            createToolCallTrace({ toolName, question: targetUrl }),
+            createTraceEvent('fetch_web_page', {
+              status: response.ok ? 'done' : 'failed',
+              url: response.page?.url || targetUrl,
+            }),
+          ],
           lastFallbackReason: '',
           lastKnowledgeQuestion: targetUrl,
           lastKnowledgeSummaryHint: response.page?.url

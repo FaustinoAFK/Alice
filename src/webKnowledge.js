@@ -23,6 +23,12 @@ const EXPLICIT_PAGE_PATTERNS = [
   /\bessa pagina fala sobre\b/i,
 ];
 
+const CONTEXTUAL_PAGE_PATTERNS = [
+  /\bonde\b.*\b(fica|est[aá]|fala|tem|encontra)\b/i,
+  /\bem que parte\b/i,
+  /\bonde (fica|fala|tem)\b/i,
+];
+
 const SAME_DOMAIN_PATTERNS = [
   /\besse site\b/i,
   /\beste site\b/i,
@@ -156,6 +162,10 @@ export const classifyKnowledgeScope = ({ question = '', navigationContext = null
     return KNOWLEDGE_SCOPES.CURRENT_PAGE;
   }
 
+  if (normalizedContext && CONTEXTUAL_PAGE_PATTERNS.some((pattern) => pattern.test(normalizedQuestion))) {
+    return KNOWLEDGE_SCOPES.CURRENT_PAGE;
+  }
+
   if (normalizedContext && /\bsite\b|\bdocumentacao\b/i.test(normalizedQuestion)) {
     return KNOWLEDGE_SCOPES.SAME_DOMAIN;
   }
@@ -191,6 +201,7 @@ export const createEmptyKnowledgeState = () => ({
   lastKnowledgeSources: [],
   lastFetchedPages: [],
   lastExpansionPath: [],
+  lastKnowledgeTrace: [],
   lastFallbackReason: '',
   lastSnapshotRefreshMode: '',
   lastSnapshotRefreshLatencyMs: 0,

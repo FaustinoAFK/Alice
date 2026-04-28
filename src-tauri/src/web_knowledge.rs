@@ -250,7 +250,9 @@ impl WebKnowledgeState {
         let navigation_is_fresh = guard
             .navigation_context
             .as_ref()
-            .map(|context| is_timestamp_fresh(context.timestamp, now, MAX_NAVIGATION_CONTEXT_AGE_MS))
+            .map(|context| {
+                is_timestamp_fresh(context.timestamp, now, MAX_NAVIGATION_CONTEXT_AGE_MS)
+            })
             .unwrap_or(false);
 
         if !navigation_is_fresh {
@@ -395,7 +397,11 @@ impl WebKnowledgeState {
 }
 
 fn content_type_header() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"application/json; charset=utf-8"[..]).unwrap()
+    Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"application/json; charset=utf-8"[..],
+    )
+    .unwrap()
 }
 
 fn cors_header() -> Header {
@@ -403,7 +409,11 @@ fn cors_header() -> Header {
 }
 
 fn sse_content_type_header() -> Header {
-    Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream; charset=utf-8"[..]).unwrap()
+    Header::from_bytes(
+        &b"Content-Type"[..],
+        &b"text/event-stream; charset=utf-8"[..],
+    )
+    .unwrap()
 }
 
 fn no_cache_header() -> Header {
@@ -463,97 +473,112 @@ pub fn start_browser_knowledge_bridge(state: WebKnowledgeState) -> Result<(), St
         .map_err(|error| format!("Falha ao iniciar a ponte local de conhecimento web: {error}"))?;
 
     thread::spawn(move || {
-        for mut request in server.incoming_requests() {
-            let response = match (request.method(), request.url()) {
-                (&Method::Get, "/health") => json_response(
-                    200,
-                    json!({
-                        "ok": true,
-                        "message": "bridge_alive",
-                    }),
-                ),
-                (&Method::Get, "/v1/capture-request") => {
-                    let pending_request = state.pending_capture_request();
-                    json_response(
-                        200,
-                        json!({
-                            "ok": true,
-                            "pendingRequest": pending_request,
-                        }),
-                    )
-                }
-                (&Method::Get, "/v1/capture-events") => {
-                    let stream = CaptureEventStream::new(state.subscribe_capture_events());
-                    sse_response(stream)
-                }
-                (&Method::Post, "/v1/page-state") => {
-                    let mut body = String::new();
-                    let parse_result = request.as_reader().read_to_string(&mut body);
-                    match parse_result {
-                        Ok(_) => match serde_json::from_str::<BrowserPageStatePayload>(&body) {
-                            Ok(payload) => match normalize_browser_page_state(payload) {
-                                Ok((request_id, transport, context, snapshot)) => {
-                                    state.apply_page_state(
-                                        context,
-                                        snapshot,
-                                        request_id.as_deref(),
-                                        transport.as_deref(),
-                                    );
-                                    json_response(
-                                        200,
-                                        json!({
-                                            "ok": true,
-                                            "message": "page_state_updated",
-                                        }),
-                                    )
-                                }
-                                Err(error) => json_response(
-                                    400,
-                                    json!({
-                                        "ok": false,
-                                        "message": error,
-                                    }),
-                                ),
-                            },
-                            Err(error) => json_response(
-                                400,
-                                json!({
-                                    "ok": false,
-                                    "message": format!("Payload invalido da extensao: {error}"),
-                                }),
-                            ),
-                        },
-                        Err(error) => json_response(
-                            500,
-                            json!({
-                                "ok": false,
-                                "message": format!("Falha ao ler payload da extensao: {error}"),
-                            }),
-                        ),
-                    }
-                }
-                (&Method::Options, _) => json_response(
-                    204,
-                    json!({
-                        "ok": true,
-                    }),
-                )
-                .with_header(Header::from_bytes(&b"Access-Control-Allow-Methods"[..], &b"GET, POST, OPTIONS"[..]).unwrap())
-                .with_header(Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap()),
-                _ => json_response(
-                    404,
-                    json!({
-                        "ok": false,
-                        "message": "route_not_found",
-                    }),
-                ),
-            };
-
-            let _ = request.respond(response);
+        for request in server.incoming_requests() {
+            let state = state.clone();
+            thread::spawn(move || {
+                handle_bridge_request(request, state);
+            });
         }
     });
 
     Ok(())
+}
+
+fn handle_bridge_request(mut request: tiny_http::Request, state: WebKnowledgeState) {
+    let response = match (request.method(), request.url()) {
+        (&Method::Get, "/health") => json_response(
+            200,
+            json!({
+                "ok": true,
+                "message": "bridge_alive",
+            }),
+        ),
+        (&Method::Get, "/v1/capture-request") => {
+            let pending_request = state.pending_capture_request();
+            json_response(
+                200,
+                json!({
+                    "ok": true,
+                    "pendingRequest": pending_request,
+                }),
+            )
+        }
+        (&Method::Get, "/v1/capture-events") => {
+            let stream = CaptureEventStream::new(state.subscribe_capture_events());
+            sse_response(stream)
+        }
+        (&Method::Post, "/v1/page-state") => {
+            let mut body = String::new();
+            let parse_result = request.as_reader().read_to_string(&mut body);
+            match parse_result {
+                Ok(_) => match serde_json::from_str::<BrowserPageStatePayload>(&body) {
+                    Ok(payload) => match normalize_browser_page_state(payload) {
+                        Ok((request_id, transport, context, snapshot)) => {
+                            state.apply_page_state(
+                                context,
+                                snapshot,
+                                request_id.as_deref(),
+                                transport.as_deref(),
+                            );
+                            json_response(
+                                200,
+                                json!({
+                                    "ok": true,
+                                    "message": "page_state_updated",
+                                }),
+                            )
+                        }
+                        Err(error) => json_response(
+                            400,
+                            json!({
+                                "ok": false,
+                                "message": error,
+                            }),
+                        ),
+                    },
+                    Err(error) => json_response(
+                        400,
+                        json!({
+                            "ok": false,
+                            "message": format!("Payload invalido da extensao: {error}"),
+                        }),
+                    ),
+                },
+                Err(error) => json_response(
+                    500,
+                    json!({
+                        "ok": false,
+                        "message": format!("Falha ao ler payload da extensao: {error}"),
+                    }),
+                ),
+            }
+        }
+        (&Method::Options, _) => json_response(
+            204,
+            json!({
+                "ok": true,
+            }),
+        )
+        .with_header(
+            Header::from_bytes(
+                &b"Access-Control-Allow-Methods"[..],
+                &b"GET, POST, OPTIONS"[..],
+            )
+            .unwrap(),
+        )
+        .with_header(
+            Header::from_bytes(&b"Access-Control-Allow-Headers"[..], &b"Content-Type"[..]).unwrap(),
+        ),
+        _ => json_response(
+            404,
+            json!({
+                "ok": false,
+                "message": "route_not_found",
+            }),
+        ),
+    };
+
+    let _ = request.respond(response);
 }
 
 fn normalize_browser_page_state(
@@ -621,7 +646,12 @@ fn normalize_page_snapshot(
     let title = normalize_text(payload.title.as_deref().unwrap_or(&context.title));
     let meta_description = normalize_text(payload.meta_description.as_deref().unwrap_or(""));
     let document_language = normalize_text(payload.document_language.as_deref().unwrap_or(""));
-    let selected_text = normalize_text(payload.selected_text.as_deref().unwrap_or(&context.selection_text));
+    let selected_text = normalize_text(
+        payload
+            .selected_text
+            .as_deref()
+            .unwrap_or(&context.selection_text),
+    );
     let interactive_labels = payload
         .interactive_labels
         .unwrap_or_default()
@@ -686,7 +716,12 @@ fn normalize_page_link(link: PageLinkPayload) -> Option<PageLink> {
 }
 
 fn normalize_text(value: &str) -> String {
-    value.split_whitespace().collect::<Vec<_>>().join(" ").trim().to_string()
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string()
 }
 
 fn current_timestamp_ms() -> u64 {
@@ -706,12 +741,10 @@ fn normalize_url(value: &str) -> Option<String> {
         return None;
     }
 
-    Url::parse(trimmed)
-        .ok()
-        .map(|mut parsed| {
-            parsed.set_fragment(None);
-            parsed.to_string()
-        })
+    Url::parse(trimmed).ok().map(|mut parsed| {
+        parsed.set_fragment(None);
+        parsed.to_string()
+    })
 }
 
 fn resolve_domain(explicit_domain: Option<&str>, url: &str) -> Option<String> {
@@ -776,7 +809,11 @@ fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResult>
             .map(|item| normalize_text(&item.text().collect::<Vec<_>>().join(" ")))
             .unwrap_or_default();
 
-        results.push(SearchResult { title, url, snippet });
+        results.push(SearchResult {
+            title,
+            url,
+            snippet,
+        });
         if results.len() >= max_results {
             break;
         }
@@ -788,7 +825,11 @@ fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResult>
 fn resolve_search_result_url(value: &str) -> Option<String> {
     let normalized = normalize_url(value)?;
     let parsed = Url::parse(&normalized).ok()?;
-    if parsed.domain().unwrap_or_default().contains("duckduckgo.com") {
+    if parsed
+        .domain()
+        .unwrap_or_default()
+        .contains("duckduckgo.com")
+    {
         for (key, value) in parsed.query_pairs() {
             if key == "uddg" {
                 return normalize_url(&value);
@@ -835,7 +876,8 @@ fn extract_page_snapshot_from_html(url: &str, html: &str) -> Result<PageSnapshot
     let html_selector = Selector::parse("html").unwrap();
     let link_selector = Selector::parse("a[href]").unwrap();
     let heading_selector = Selector::parse("h1, h2, h3, h4, h5, h6").unwrap();
-    let text_block_selector = Selector::parse("main p, article p, section p, p, blockquote, pre").unwrap();
+    let text_block_selector =
+        Selector::parse("main p, article p, section p, p, blockquote, pre").unwrap();
     let list_selector = Selector::parse("ul, ol").unwrap();
     let list_item_selector = Selector::parse("li").unwrap();
     let table_selector = Selector::parse("table").unwrap();
@@ -979,7 +1021,10 @@ fn extract_page_snapshot_from_html(url: &str, html: &str) -> Result<PageSnapshot
             if text.is_empty() {
                 return None;
             }
-            Some(PageLink { text, url: resolved })
+            Some(PageLink {
+                text,
+                url: resolved,
+            })
         })
         .take(MAX_PAGE_LINKS)
         .collect::<Vec<_>>();
@@ -1014,7 +1059,13 @@ fn tokenize(value: &str) -> Vec<String> {
     value
         .to_lowercase()
         .chars()
-        .map(|character| if character.is_alphanumeric() { character } else { ' ' })
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .filter(|token| token.len() > 2)
@@ -1024,8 +1075,8 @@ fn tokenize(value: &str) -> Vec<String> {
 
 fn stop_words() -> &'static [&'static str] {
     &[
-        "que", "isso", "essa", "esse", "esta", "este", "pagina", "página", "site", "fala",
-        "sobre", "para", "com", "tem", "nos", "nas", "dos", "das", "uma", "uns", "umas",
+        "que", "isso", "essa", "esse", "esta", "este", "pagina", "página", "site", "fala", "sobre",
+        "para", "com", "tem", "nos", "nas", "dos", "das", "uma", "uns", "umas",
     ]
 }
 
@@ -1058,7 +1109,11 @@ fn has_contextual_reference(question: &str) -> bool {
 fn score_section(section: &PageSection, terms: &[String]) -> usize {
     let haystack = format!("{} {}", section.heading, section.content).to_lowercase();
     terms.iter().fold(0, |score, term| {
-        let heading_score = if section.heading.to_lowercase().contains(term) { 3 } else { 0 };
+        let heading_score = if section.heading.to_lowercase().contains(term) {
+            3
+        } else {
+            0
+        };
         let content_score = if haystack.contains(term) { 1 } else { 0 };
         score + heading_score + content_score
     })
@@ -1079,7 +1134,9 @@ fn select_matched_sections(
     let effective_max_sections = max_sections.clamp(1, MAX_INSPECT_SECTIONS);
     let terms = question_terms(question);
 
-    if !snapshot.selected_text.is_empty() && (terms.len() <= 2 || has_contextual_reference(question)) {
+    if !snapshot.selected_text.is_empty()
+        && (terms.len() <= 2 || has_contextual_reference(question))
+    {
         return vec![PageSection {
             id: "selected-text".to_string(),
             kind: "selection".to_string(),
@@ -1112,7 +1169,11 @@ fn select_matched_sections(
         .collect()
 }
 
-fn select_matched_links(snapshot: &PageSnapshot, question: &str, max_links: usize) -> Vec<PageLink> {
+fn select_matched_links(
+    snapshot: &PageSnapshot,
+    question: &str,
+    max_links: usize,
+) -> Vec<PageLink> {
     let terms = question_terms(question);
     let mut scored = snapshot
         .links
@@ -1154,9 +1215,11 @@ fn determine_sufficiency(
     let top_score = terms
         .iter()
         .filter(|term| {
-            matched_sections
-                .iter()
-                .any(|section| format!("{} {}", section.heading, section.content).to_lowercase().contains(term.as_str()))
+            matched_sections.iter().any(|section| {
+                format!("{} {}", section.heading, section.content)
+                    .to_lowercase()
+                    .contains(term.as_str())
+            })
         })
         .count();
 
@@ -1199,7 +1262,8 @@ fn refresh_current_page_snapshot_impl(
     while current_timestamp_ms() < deadline {
         if state.has_completed_capture_request(&request.request_id) {
             let runtime = state.fresh_snapshot();
-            if let (Some(context), Some(page)) = (runtime.navigation_context, runtime.page_snapshot) {
+            if let (Some(context), Some(page)) = (runtime.navigation_context, runtime.page_snapshot)
+            {
                 return native_ok(
                     "Snapshot da pagina atual atualizado sob demanda.",
                     json!({
@@ -1245,7 +1309,10 @@ pub fn refresh_current_page_snapshot(
     timeout_ms: Option<u64>,
     state: State<'_, WebKnowledgeState>,
 ) -> Result<NativeCommandResult, String> {
-    Ok(refresh_current_page_snapshot_impl(timeout_ms, state.inner()))
+    Ok(refresh_current_page_snapshot_impl(
+        timeout_ms,
+        state.inner(),
+    ))
 }
 
 #[tauri::command]
@@ -1284,11 +1351,7 @@ pub fn inspect_current_page(
         ));
     };
 
-    let matched_sections = select_matched_sections(
-        &snapshot,
-        &question,
-        max_sections.unwrap_or(4),
-    );
+    let matched_sections = select_matched_sections(&snapshot, &question, max_sections.unwrap_or(4));
     let matched_links = select_matched_links(&snapshot, &question, 5);
     let sufficiency = determine_sufficiency(&snapshot, &question, &matched_sections);
 
@@ -1316,7 +1379,10 @@ pub fn search_same_domain(
     }
 
     let search_query = format!("site:{normalized_domain} {}", normalize_text(&query));
-    let results = duckduckgo_search(&search_query, max_results.unwrap_or(5).clamp(1, MAX_SEARCH_RESULTS))?;
+    let results = duckduckgo_search(
+        &search_query,
+        max_results.unwrap_or(5).clamp(1, MAX_SEARCH_RESULTS),
+    )?;
     Ok(native_ok(
         "Busca no mesmo dominio concluida.",
         json!({
@@ -1328,8 +1394,14 @@ pub fn search_same_domain(
 }
 
 #[tauri::command]
-pub fn search_web(query: String, max_results: Option<usize>) -> Result<NativeCommandResult, String> {
-    let results = duckduckgo_search(&normalize_text(&query), max_results.unwrap_or(5).clamp(1, MAX_SEARCH_RESULTS))?;
+pub fn search_web(
+    query: String,
+    max_results: Option<usize>,
+) -> Result<NativeCommandResult, String> {
+    let results = duckduckgo_search(
+        &normalize_text(&query),
+        max_results.unwrap_or(5).clamp(1, MAX_SEARCH_RESULTS),
+    )?;
     Ok(native_ok(
         "Busca web concluida.",
         json!({
@@ -1430,7 +1502,8 @@ mod tests {
             }),
         };
 
-        let (request_id, transport, context, snapshot) = normalize_browser_page_state(payload).unwrap();
+        let (request_id, transport, context, snapshot) =
+            normalize_browser_page_state(payload).unwrap();
 
         assert_eq!(request_id.as_deref(), Some("capture-1"));
         assert_eq!(transport.as_deref(), Some("reactive_sse"));
@@ -1464,8 +1537,14 @@ mod tests {
 
         assert_eq!(snapshot.title, "Pagina de teste");
         assert_eq!(snapshot.document_language, "pt-BR");
-        assert!(snapshot.sections.iter().any(|section| section.content.contains("inteligencia artificial")));
-        assert!(snapshot.links.iter().any(|link| link.url == "https://example.com/docs"));
+        assert!(snapshot
+            .sections
+            .iter()
+            .any(|section| section.content.contains("inteligencia artificial")));
+        assert!(snapshot
+            .links
+            .iter()
+            .any(|link| link.url == "https://example.com/docs"));
     }
 
     #[test]
@@ -1529,7 +1608,8 @@ mod tests {
     #[test]
     fn fresh_snapshot_drops_stale_navigation_context_and_snapshot() {
         let state = WebKnowledgeState::default();
-        let stale_timestamp = current_timestamp_ms().saturating_sub(MAX_NAVIGATION_CONTEXT_AGE_MS + 1_000);
+        let stale_timestamp =
+            current_timestamp_ms().saturating_sub(MAX_NAVIGATION_CONTEXT_AGE_MS + 1_000);
 
         state.apply_page_state(
             NavigationContext {
@@ -1642,7 +1722,10 @@ mod tests {
         assert!(state.has_completed_capture_request(&request.request_id));
         assert!(state.pending_capture_request().is_none());
         let runtime = state.fresh_snapshot();
-        assert_eq!(runtime.last_capture_transport.as_deref(), Some("reactive_sse"));
+        assert_eq!(
+            runtime.last_capture_transport.as_deref(),
+            Some("reactive_sse")
+        );
         assert!(runtime.last_extension_seen_at.is_some());
     }
 
@@ -1765,7 +1848,9 @@ mod tests {
         let result = refresh_current_page_snapshot_impl(Some(1), &state);
 
         assert!(!result.ok);
-        assert!(result.message.contains("Nao consegui atualizar a pagina atual a tempo"));
+        assert!(result
+            .message
+            .contains("Nao consegui atualizar a pagina atual a tempo"));
     }
 
     #[test]
@@ -1781,22 +1866,38 @@ mod tests {
         let tables =
             extract_page_snapshot_from_html("https://example.com/plans", TABLES_AND_LISTS_HTML)
                 .unwrap();
-        let selected = extract_page_snapshot_from_html(
-            "https://example.com/terms",
-            SELECTED_TEXT_PAGE_HTML,
-        )
-        .unwrap();
+        let selected =
+            extract_page_snapshot_from_html("https://example.com/terms", SELECTED_TEXT_PAGE_HTML)
+                .unwrap();
         let noisy = extract_page_snapshot_from_html(
             "https://example.com/portal",
             NOISY_NAVIGATION_LINKS_HTML,
         )
         .unwrap();
 
-        assert!(docs.links.iter().any(|link| link.url == "https://example.com/docs/oauth"));
-        assert!(article.sections.iter().any(|section| section.content.contains("RAG")));
-        assert!(thin.links.iter().any(|link| link.url == "https://example.com/login"));
-        assert!(tables.sections.iter().any(|section| section.kind == "table"));
-        assert!(selected.sections.iter().any(|section| section.content.contains("callbacks assinados")));
-        assert!(noisy.links.iter().any(|link| link.url == "https://example.com/docs/authentication"));
+        assert!(docs
+            .links
+            .iter()
+            .any(|link| link.url == "https://example.com/docs/oauth"));
+        assert!(article
+            .sections
+            .iter()
+            .any(|section| section.content.contains("RAG")));
+        assert!(thin
+            .links
+            .iter()
+            .any(|link| link.url == "https://example.com/login"));
+        assert!(tables
+            .sections
+            .iter()
+            .any(|section| section.kind == "table"));
+        assert!(selected
+            .sections
+            .iter()
+            .any(|section| section.content.contains("callbacks assinados")));
+        assert!(noisy
+            .links
+            .iter()
+            .any(|link| link.url == "https://example.com/docs/authentication"));
     }
 }

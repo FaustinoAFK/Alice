@@ -8,6 +8,10 @@ export const createLiveDiagnostics = () => ({
   serverMessagesReceived: 0,
   outputAudioChunksReceived: 0,
   microphoneLevel: 0,
+  lastVideoFrameWidth: 0,
+  lastVideoFrameHeight: 0,
+  lastVideoSourceWidth: 0,
+  lastVideoSourceHeight: 0,
   goAwayEvents: 0,
   reconnectAttempts: 0,
   successfulResumptions: 0,
@@ -87,6 +91,10 @@ export const updateLiveDiagnostics = (diagnostics, event) => {
         ...diagnostics,
         screen: 'enviando',
         videoFramesSent: diagnostics.videoFramesSent + 1,
+        lastVideoFrameWidth: Number(event.width || diagnostics.lastVideoFrameWidth || 0),
+        lastVideoFrameHeight: Number(event.height || diagnostics.lastVideoFrameHeight || 0),
+        lastVideoSourceWidth: Number(event.sourceWidth || diagnostics.lastVideoSourceWidth || 0),
+        lastVideoSourceHeight: Number(event.sourceHeight || diagnostics.lastVideoSourceHeight || 0),
       };
     case 'server-message':
       return {
