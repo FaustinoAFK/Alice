@@ -73,6 +73,29 @@ describe('buildDebugHudSnapshot', () => {
         rollbacks: [{ rollbackId: 'rollback-1', status: 'done', reason: 'resultado divergiu' }],
         logs: [{ type: 'user_request_prioritized', reason: 'pausou background' }],
       },
+      autonomousRunnerState: {
+        enabled: true,
+        runnerState: 'running',
+        activeTaskId: 'runner-task-1',
+        runnerLock: {
+          activeTaskId: 'runner-task-1',
+          activeStepId: 'step-1',
+          leaseId: 'lease-1',
+          heartbeatAt: '2026-04-28T10:00:00.000Z',
+        },
+        queue: ['runner-task-1'],
+        tasksById: {
+          'runner-task-1': {
+            id: 'runner-task-1',
+            title: 'Rodar testes',
+            status: 'running',
+            priority: 'high',
+            queueRank: 0,
+          },
+        },
+        audits: [{ timestamp: '2026-04-28T10:00:00.000Z', type: 'lease_acquired', taskId: 'runner-task-1', summary: 'ok' }],
+        evidenceRefs: [{ kind: 'metadata', taskId: 'runner-task-1', path: 'data/evidence/x/metadata.json' }],
+      },
       knowledgeState: {
         navigationContext: {
           url: 'https://example.com/docs',
@@ -158,6 +181,9 @@ describe('buildDebugHudSnapshot', () => {
     expect(snapshot.autonomous.pendingProposals).toBe(1);
     expect(snapshot.autonomous.validatedProcedures).toBe(1);
     expect(snapshot.autonomous.display.rollbacks).toContain('rollback-1');
+    expect(snapshot.runner.enabled).toBe(true);
+    expect(snapshot.runner.runningCount).toBe(1);
+    expect(snapshot.runner.audits).toContain('lease_acquired');
     expect(snapshot.interactions).toHaveLength(2);
     expect(snapshot.interactions[0]).toMatchObject({
       id: 'tool-1',

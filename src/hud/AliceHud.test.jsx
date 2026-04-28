@@ -7,6 +7,14 @@ const buildProps = (overrides = {}) => ({
   activeHudPage: 'mind-map',
   activeMindMap: createStarterMindMap(),
   autonomousLearningState: {},
+  autonomousRunnerState: {
+    enabled: false,
+    runnerState: 'idle',
+    queue: [],
+    tasksById: {},
+    audits: [],
+    evidenceRefs: [],
+  },
   caption: '',
   debugHud: {},
   diagnostics: {},
@@ -19,6 +27,7 @@ const buildProps = (overrides = {}) => ({
   onMindMapChange: vi.fn(),
   onNavigate: vi.fn(),
   onRejectProposal: vi.fn(),
+  onRunnerAction: vi.fn(),
   onToggleLiveSession: vi.fn(),
   onToggleSidebar: vi.fn(),
   sessionNotice: '',
@@ -33,5 +42,12 @@ describe('AliceHud mind map lazy loading', () => {
     const html = renderToString(<AliceHud {...buildProps()} />);
 
     expect(html).toContain('Carregando mapa mental');
+  });
+
+  it('renders the runner audit tab controls', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'runner', debugHud: { runner: {} } })} />);
+
+    expect(html).toContain('Autonomous Task Runner');
+    expect(html).toContain('Ligar autonomia');
   });
 });

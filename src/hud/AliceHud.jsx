@@ -1,6 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
+import { AutonomousRunnerHudPage } from './pages/AutonomousRunnerHudPage';
 import { AutonomyHudPage } from './pages/AutonomyHudPage';
 import { DebugHudPage } from './pages/DebugHudPage';
 import { KnowledgeHudPage } from './pages/KnowledgeHudPage';
@@ -13,6 +14,7 @@ export function AliceHud({
   activeHudPage,
   activeMindMap,
   autonomousLearningState,
+  autonomousRunnerState,
   caption,
   debugHud,
   diagnostics,
@@ -25,6 +27,7 @@ export function AliceHud({
   onApproveProposal,
   onNavigate,
   onRejectProposal,
+  onRunnerAction,
   onToggleLiveSession,
   onToggleSidebar,
   sessionNotice,
@@ -84,6 +87,14 @@ export function AliceHud({
             debugHud={debugHud}
             onApproveProposal={onApproveProposal}
             onRejectProposal={onRejectProposal}
+          />
+        ) : null}
+
+        {activeHudPage === 'runner' ? (
+          <AutonomousRunnerHudPage
+            debugHud={debugHud}
+            onRunnerAction={onRunnerAction}
+            runnerState={autonomousRunnerState}
           />
         ) : null}
 

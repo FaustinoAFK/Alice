@@ -46,4 +46,33 @@ describe('createBehaviorContext mind_map_summary', () => {
     expect(context.mind_map_summary.totalNodes).toBe(0);
     expect(context.mind_map_summary.currentBlockers).toEqual([]);
   });
+
+  it('includes a small autonomous runner summary without embedding tasks', () => {
+    const context = createBehaviorContext({
+      autonomousState: createEmptyAutonomousLearningState(),
+      autonomousRunnerSummary: {
+        enabled: true,
+        runnerState: 'running',
+        activeTaskId: 'task-1',
+        activeTaskStatus: 'running',
+        queueSize: 3,
+        readyCount: 1,
+        blockedCount: 1,
+        failedCount: 0,
+        waitingRetryCount: 1,
+        recentFailures: [],
+        recentBlockers: [{ taskId: 'task-2', reason: 'vm_unavailable' }],
+        currentRiskLevel: 'medium',
+      },
+      now: 1,
+    });
+
+    expect(context.autonomous_runner_summary).toMatchObject({
+      enabled: true,
+      activeTaskId: 'task-1',
+      queueSize: 3,
+      waitingRetryCount: 1,
+    });
+    expect(context.autonomous_runner_summary).not.toHaveProperty('tasksById');
+  });
 });

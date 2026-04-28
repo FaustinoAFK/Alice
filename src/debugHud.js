@@ -223,6 +223,7 @@ export const buildDebugHudSnapshot = ({
   memorySummary = '',
   knowledgeState = null,
   autonomousLearningState = null,
+  autonomousRunnerState = null,
   interactions = [],
   now = Date.now(),
 } = {}) => {
@@ -349,6 +350,36 @@ export const buildDebugHudSnapshot = ({
       `${event.type || '-'} | ${event.taskId || event.proposalId || event.riskId || ''} ${event.reason || ''}`.trim(),
     ),
   };
+  const runnerTasks = Object.values(autonomousRunnerState?.tasksById || {});
+  const runner = {
+    enabled: Boolean(autonomousRunnerState?.enabled),
+    runnerState: autonomousRunnerState?.runnerState || '-',
+    activeTaskId: autonomousRunnerState?.activeTaskId || '-',
+    activeStepId: autonomousRunnerState?.runnerLock?.activeStepId || '-',
+    queueSize: autonomousRunnerState?.queue?.length || 0,
+    lock: formatDebugValue(autonomousRunnerState?.runnerLock),
+    heartbeat: autonomousRunnerState?.runnerLock?.heartbeatAt || '-',
+    readyCount: runnerTasks.filter((task) => task.status === 'ready').length,
+    runningCount: runnerTasks.filter((task) => task.status === 'running').length,
+    waitingRetryCount: runnerTasks.filter((task) => task.status === 'waiting_retry').length,
+    blockedCount: runnerTasks.filter((task) => task.status === 'blocked').length,
+    failedCount: runnerTasks.filter((task) => task.status === 'failed').length,
+    tasks: formatAutonomousList(runnerTasks, (task) =>
+      `${task.id || '-'} | ${task.status || '-'} | ${task.priority || '-'} | rank=${task.queueRank ?? '-'} | ${task.reason || task.title || '-'}`,
+    ),
+    queue: formatAutonomousList(
+      (autonomousRunnerState?.queue || [])
+        .map((taskId) => autonomousRunnerState?.tasksById?.[taskId])
+        .filter(Boolean),
+      (task) => `${task.id || '-'} | ${task.status || '-'} | next=${task.nextRunAt || '-'} | ${task.title || '-'}`,
+    ),
+    audits: formatAutonomousList((autonomousRunnerState?.audits || []).slice(-16), (event) =>
+      `${event.timestamp || '-'} | ${event.type || '-'} | ${event.taskId || ''} ${event.reason || ''} | ${event.summary || ''}`.trim(),
+    ),
+    evidenceRefs: formatAutonomousList((autonomousRunnerState?.evidenceRefs || []).slice(-16), (ref) =>
+      `${ref.kind || '-'} | ${ref.taskId || '-'} | ${ref.path || '-'} | important=${Boolean(ref.important)}`,
+    ),
+  };
 
   return {
     session: {
@@ -392,6 +423,7 @@ export const buildDebugHudSnapshot = ({
       ...autonomous,
       display: buildAutonomousDisplay(autonomous),
     },
+    runner,
     interactions: Array.isArray(interactions)
       ? interactions.slice(-80).map(normalizeInteraction).reverse()
       : [],

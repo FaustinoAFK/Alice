@@ -92,6 +92,7 @@ export const executeAutonomousLearningFunctionCall = async ({
   functionCall,
   autonomousState = createEmptyAutonomousLearningState(),
   activeMindMap = null,
+  autonomousRunnerSummary = null,
   trustedUtterance = '',
   invokeTool = null,
   now = Date.now(),
@@ -657,6 +658,7 @@ export const executeAutonomousLearningFunctionCall = async ({
         autonomousState,
         vmStatus,
         activeMindMap,
+        autonomousRunnerSummary,
         now,
       });
       const actionInput = {

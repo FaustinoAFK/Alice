@@ -30,6 +30,7 @@ export const ALICE_SYSTEM_INSTRUCTION = [
   'Para controle visual dentro da VM real, use Guest Interaction Layer: diagnostique/instale o agente, capture screenshot, execute acao visual e valide com replay. Nunca use fallback local fingindo controle visual de VM.',
   'Quando o usuario pedir algo operacional dentro da VM como abrir aplicativo, digitar texto em aplicativo aberto, instalar, baixar, testar um programa ou acompanhar progresso, use run_vm_operational_task antes de pesquisar. Pesquisa so entra para descobrir um comando/id ausente ou explicar erro real.',
   'Para downloads/instalacoes longas dentro da VM, prefira run_vm_operational_task com taskKind=install_app; ele inicia em background e devolve backgroundTaskId. Depois acompanhe com taskKind=check_background_task. Nao espere instaladores grandes em chamadas sincronas curtas.',
+  'Para tarefas grandes com varios passos, fila, retry, evidencias e validacao continua, use manage_autonomous_runner para enfileirar e controlar o Autonomous Task Runner. Nao trate task planned/running como concluida sem evidencia validada.',
   'Acoes visuais dentro da VM passam pelo DecisionEngine/policy; coordenadas sao fallback e precisam de motivo, screenshot antes/depois e validacao.',
   'No PC real, qualquer acao relevante precisa considerar snapshot, diff, validacao e rollback antes de aplicar.',
   'Auto-melhoria da Alice deve virar proposta com riscos, testes e rollback; nunca aplique mudanca no codigo oficial por iniciativa propria.',
@@ -156,6 +157,61 @@ export const ALICE_LIVE_TOOLS = [
         parameters: {
           type: 'OBJECT',
           properties: {},
+        },
+      },
+      {
+        name: 'manage_autonomous_runner',
+        description: 'Controla o Autonomous Task Runner oficial: status, ligar/desligar, pausar/retomar, enfileirar task grande, cancelar, bloquear, reexecutar e reordenar fila. Use para tarefas grandes com steps, evidencias e validacao.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            operation: {
+              type: 'STRING',
+              description: 'status | enable | disable | pause | resume | enqueue_task | cancel_task | cancel_queue | block_task | rerun_task | reorder_task',
+            },
+            taskId: { type: 'STRING' },
+            queueRank: { type: 'NUMBER' },
+            reason: { type: 'STRING' },
+            title: { type: 'STRING' },
+            description: { type: 'STRING' },
+            command: { type: 'STRING' },
+            args: { type: 'ARRAY', items: { type: 'STRING' } },
+            priority: { type: 'STRING', description: 'critical | high | medium | low' },
+            requiresRealVm: { type: 'BOOLEAN' },
+            allowWorkspaceFallback: { type: 'BOOLEAN' },
+            riskLevel: { type: 'STRING' },
+            sourceFiles: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  path: { type: 'STRING' },
+                  content: { type: 'STRING' },
+                  targetPath: { type: 'STRING' },
+                  contentHash: { type: 'STRING' },
+                  sizeBytes: { type: 'NUMBER' },
+                },
+              },
+            },
+            steps: {
+              type: 'ARRAY',
+              items: {
+                type: 'OBJECT',
+                properties: {
+                  title: { type: 'STRING' },
+                  type: { type: 'STRING' },
+                  action: { type: 'OBJECT' },
+                  completionCriteria: { type: 'OBJECT' },
+                  expectedEvidence: { type: 'OBJECT' },
+                  timeoutPolicy: { type: 'OBJECT' },
+                  retryPolicy: { type: 'OBJECT' },
+                },
+              },
+            },
+            task: { type: 'OBJECT' },
+            payload: { type: 'OBJECT' },
+          },
+          required: ['operation'],
         },
       },
       {

@@ -930,6 +930,83 @@
   background: var(--hud-panel-soft);
 }
 
+.runner-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+.runner-toolbar button,
+.runner-task__actions button {
+  border: 1px solid var(--hud-border);
+  background: var(--hud-panel-soft);
+  color: var(--hud-text);
+  border-radius: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.runner-toolbar button:disabled,
+.runner-task__actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.runner-task-list {
+  display: grid;
+  gap: 8px;
+}
+
+.runner-task {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(260px, auto);
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.runner-task > div {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.runner-task strong {
+  color: var(--hud-heading);
+}
+
+.runner-task span {
+  color: var(--hud-muted);
+  font-size: 0.82rem;
+}
+
+.runner-task--running {
+  border-color: rgba(96, 165, 250, 0.55);
+}
+
+.runner-task--done {
+  border-color: rgba(34, 197, 94, 0.55);
+}
+
+.runner-task--failed,
+.runner-task--blocked {
+  border-color: rgba(248, 113, 113, 0.55);
+}
+
+.runner-task__actions {
+  justify-content: flex-end;
+}
+
+.empty-state {
+  color: var(--hud-muted);
+  margin: 0;
+}
+
 .proposal-actions__item span {
   min-width: 0;
   overflow: hidden;
@@ -1334,6 +1411,14 @@
   .debug-summary-grid,
   .knowledge-result-grid {
     grid-template-columns: 1fr;
+  }
+
+  .runner-task {
+    grid-template-columns: 1fr;
+  }
+
+  .runner-task__actions {
+    justify-content: flex-start;
   }
 }
 

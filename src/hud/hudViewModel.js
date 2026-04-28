@@ -3,6 +3,7 @@ export const HUD_PAGES = [
   { id: 'knowledge', label: 'Conhecimento', subtitle: 'pagina e busca', icon: 'knowledge' },
   { id: 'mind-map', label: 'Mapa', subtitle: 'ideias e relacoes', icon: 'mind-map' },
   { id: 'autonomy', label: 'Autonomia', subtitle: 'tarefas e VM/workspace', icon: 'autonomy' },
+  { id: 'runner', label: 'Runner', subtitle: 'fila e auditoria', icon: 'autonomy' },
   { id: 'debug', label: 'Debug', subtitle: 'diagnostico', icon: 'debug' },
 ];
 

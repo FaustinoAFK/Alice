@@ -3,6 +3,8 @@ import { useEffect, useReducer, useRef, useState } from 'react';
 import { ALICE_LIVE_MODEL, createAliceLiveSetup } from './alice';
 import {
   buildMemoryPrefixTurns,
+  getAutonomousRunnerState,
+  getAutonomousRunnerSummary,
   createEmptyAliceMemory,
   extractImportantFacts,
   getActiveMindMap,
@@ -13,6 +15,7 @@ import {
   mergeMindMapFromGoal,
   mergeValidatedProcedures,
   saveAliceMemory,
+  updateAutonomousRunnerState,
   updateMindMap,
 } from './aliceMemory';
 import {
@@ -48,6 +51,10 @@ import {
   executeAutonomousLearningFunctionCall,
   prioritizeUserRequestInAutonomy,
 } from './autonomousLearningToolExecutor';
+import { executeAutonomousRunnerFunctionCall } from './autonomousRunnerToolExecutor';
+import { runAutonomousTaskRunnerTick } from './autonomousTaskRunner';
+import { recoverAutonomousTasksOnStartup } from './autonomousRunnerLease';
+import { syncMindMapWithRunnerTask } from './autonomousRunnerMindMap';
 import { syncMindMapWithExecution } from './mindMapExecutionSync';
 import { AliceHud } from './hud/AliceHud';
 import './App.css';
@@ -254,6 +261,8 @@ function App() {
   const toolQueueRef = useRef(Promise.resolve());
   const knowledgeStateRef = useRef(createEmptyKnowledgeState());
   const autonomousLearningStateRef = useRef(createEmptyAutonomousLearningState());
+  const runnerTimerRef = useRef(null);
+  const runnerTickRunningRef = useRef(false);
   const debugInteractionsRef = useRef([]);
   const latestConversationInteractionIdRef = useRef('');
 
@@ -262,6 +271,9 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [knowledgeState, setKnowledgeState] = useState(createEmptyKnowledgeState);
   const [autonomousLearningState, setAutonomousLearningState] = useState(createEmptyAutonomousLearningState);
+  const [autonomousRunnerState, setAutonomousRunnerState] = useState(() =>
+    getAutonomousRunnerState(createEmptyAliceMemory()),
+  );
   const [activeMindMap, setActiveMindMap] = useState(() => getActiveMindMap(createEmptyAliceMemory()));
   const [mindMapRevision, setMindMapRevision] = useState(0);
   const [debugInteractions, setDebugInteractions] = useState([]);
@@ -412,6 +424,15 @@ function App() {
         // Memory persistence should not break the live session flow.
       });
     }, ALICE_MEMORY_SAVE_DELAY_MS);
+  };
+
+  const commitAliceMemory = (nextMemory) => {
+    aliceMemoryRef.current = nextMemory;
+    setActiveMindMap(getActiveMindMap(nextMemory));
+    setAutonomousRunnerState(getAutonomousRunnerState(nextMemory));
+    setMindMapRevision((current) => current + 1);
+    scheduleAliceMemorySave();
+    return nextMemory;
   };
 
   const rememberAliceContext = ({
@@ -583,6 +604,55 @@ function App() {
     return syncResult;
   };
 
+  const syncMindMapFromRunnerTask = (runnerTask) => {
+    if (!runnerTask?.id) {
+      return null;
+    }
+
+    const targetMap = getActiveMindMap(aliceMemoryRef.current);
+    const syncedMap = syncMindMapWithRunnerTask(targetMap, runnerTask);
+    aliceMemoryRef.current = updateMindMap(
+      aliceMemoryRef.current,
+      targetMap.id,
+      syncedMap,
+      { historyReason: 'runner_sync' },
+    );
+    setActiveMindMap(getActiveMindMap(aliceMemoryRef.current));
+    setMindMapRevision((current) => current + 1);
+    return syncedMap;
+  };
+
+  const persistRunnerLearningCandidates = (candidates = []) => {
+    if (!candidates.length) {
+      return;
+    }
+
+    const currentAutonomy = autonomousLearningStateRef.current;
+    const nextState = appendAutonomousLog(
+      mergeAutonomousLearningState(currentAutonomy, {
+        procedureCandidates: [
+          ...(currentAutonomy.procedureCandidates || []),
+          ...candidates,
+        ],
+        learningMemoryEvents: [
+          ...(currentAutonomy.learningMemoryEvents || []),
+          ...candidates.map((candidate) => ({
+            candidateId: candidate.candidateId,
+            promoted: false,
+            reason: 'runner_candidate_requires_review',
+            createdAt: Date.now(),
+          })),
+        ],
+      }),
+      'runner_learning_candidates_created',
+      {
+        candidateIds: candidates.map((candidate) => candidate.candidateId),
+        reason: 'requires_hud_review',
+      },
+    );
+    updateAutonomousLearningState(nextState);
+  };
+
   const rejectUnexpectedToolCall = async (functionCall, generation, debugInteractionId = '') => {
     noteDiagnostic({
       type: 'error',
@@ -720,11 +790,34 @@ function App() {
         return;
       }
 
+      const runnerResult = executeAutonomousRunnerFunctionCall({
+        functionCall,
+        currentMemory: aliceMemoryRef.current,
+        trustedUtterance: trustedUtteranceRef.current?.text || '',
+      });
+
+      if (runnerResult.handled) {
+        commitAliceMemory(runnerResult.memory);
+        const debugStatus = classifyToolDebugStatus(runnerResult.response);
+        recordToolInteraction(functionCall, {
+          id: debugInteractionId,
+          status: debugStatus.status,
+          ok: debugStatus.ok,
+          message: runnerResult.response?.message || '',
+          reason: debugStatus.reason || runnerResult.response?.reason || '',
+          responseSummary: summarizeDebugPayload(runnerResult.response),
+        });
+
+        await sendToolResponse(functionCall, runnerResult.response, generation);
+        return;
+      }
+
       const autonomousResult = await executeAutonomousLearningFunctionCall({
         functionCall,
         trustedUtterance: trustedUtteranceRef.current?.text || '',
         autonomousState: autonomousLearningStateRef.current,
         activeMindMap: getActiveMindMap(aliceMemoryRef.current),
+        autonomousRunnerSummary: getAutonomousRunnerSummary(aliceMemoryRef.current),
         invokeTool: invoke,
       });
 
@@ -785,11 +878,30 @@ function App() {
         : 'rejeitar proposta de auto-melhoria',
       autonomousState: autonomousLearningStateRef.current,
       activeMindMap: getActiveMindMap(aliceMemoryRef.current),
+      autonomousRunnerSummary: getAutonomousRunnerSummary(aliceMemoryRef.current),
       invokeTool: invoke,
     });
 
     if (result.handled) {
       updateAutonomousLearningState(result.statePatch);
+    }
+  };
+
+  const handleRunnerAction = (operation, payload = {}) => {
+    const result = executeAutonomousRunnerFunctionCall({
+      functionCall: {
+        name: 'manage_autonomous_runner',
+        args: {
+          operation,
+          ...payload,
+        },
+      },
+      currentMemory: aliceMemoryRef.current,
+      trustedUtterance: trustedUtteranceRef.current?.text || '',
+    });
+
+    if (result.handled) {
+      commitAliceMemory(result.memory);
     }
   };
 
@@ -1058,10 +1170,16 @@ function App() {
     if (window.__TAURI_INTERNALS__) {
       void loadAliceMemory().then((memory) => {
         if (!disposed) {
-          aliceMemoryRef.current = memory;
-          setActiveMindMap(getActiveMindMap(memory));
+          const recoveredRunner = recoverAutonomousTasksOnStartup(
+            getAutonomousRunnerState(memory),
+            { now: new Date().toISOString(), nowMs: Date.now() },
+          );
+          const recoveredMemory = updateAutonomousRunnerState(memory, recoveredRunner);
+          aliceMemoryRef.current = recoveredMemory;
+          setActiveMindMap(getActiveMindMap(recoveredMemory));
+          setAutonomousRunnerState(getAutonomousRunnerState(recoveredMemory));
           setMindMapRevision((current) => current + 1);
-          const hydratedAutonomy = hydrateAutonomousStateFromAudit(memory.autonomousAudit);
+          const hydratedAutonomy = hydrateAutonomousStateFromAudit(recoveredMemory.autonomousAudit);
           autonomousLearningStateRef.current = hydratedAutonomy;
           setAutonomousLearningState(hydratedAutonomy);
 
@@ -1120,6 +1238,82 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+
+    const clearRunnerTimer = () => {
+      if (runnerTimerRef.current) {
+        window.clearTimeout(runnerTimerRef.current);
+        runnerTimerRef.current = null;
+      }
+    };
+
+    const scheduleRunnerTick = (delayMs = 5000) => {
+      clearRunnerTimer();
+      runnerTimerRef.current = window.setTimeout(() => {
+        void runRunnerTick();
+      }, Math.max(1000, Number(delayMs || 5000)));
+    };
+
+    const commitRunnerState = (runner) => {
+      if (disposed) {
+        return;
+      }
+      aliceMemoryRef.current = updateAutonomousRunnerState(aliceMemoryRef.current, runner);
+      setAutonomousRunnerState(getAutonomousRunnerState(aliceMemoryRef.current));
+      scheduleAliceMemorySave();
+    };
+
+    const runRunnerTick = async () => {
+      if (disposed || !window.__TAURI_INTERNALS__) {
+        return;
+      }
+      if (runnerTickRunningRef.current) {
+        scheduleRunnerTick(1000);
+        return;
+      }
+
+      runnerTickRunningRef.current = true;
+      let nextDelayMs = 5000;
+      try {
+        const runtimeVmStatus = await invoke('get_local_vm_status')
+          .then((result) => result?.artifacts || result)
+          .catch(() => autonomousLearningStateRef.current.vm);
+        const result = await runAutonomousTaskRunnerTick({
+          runner: getAutonomousRunnerState(aliceMemoryRef.current),
+          vmStatus: runtimeVmStatus,
+          invokeTool: invoke,
+          onRunnerStateChange: commitRunnerState,
+          nowMs: Date.now(),
+        });
+
+        if (!disposed) {
+          aliceMemoryRef.current = updateAutonomousRunnerState(aliceMemoryRef.current, result.runner);
+          setAutonomousRunnerState(getAutonomousRunnerState(aliceMemoryRef.current));
+          if (result.task) {
+            syncMindMapFromRunnerTask(result.task);
+          }
+          persistRunnerLearningCandidates(result.learningCandidates || []);
+          scheduleAliceMemorySave();
+          nextDelayMs = result.nextIntervalMs || nextDelayMs;
+        }
+      } finally {
+        runnerTickRunningRef.current = false;
+        if (!disposed) {
+          scheduleRunnerTick(nextDelayMs);
+        }
+      }
+    };
+
+    scheduleRunnerTick(2000);
+
+    return () => {
+      disposed = true;
+      clearRunnerTimer();
+    };
+    // Runner loop reads refs so it can survive long executions without resubscribing timers.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const isBusy = status === 'starting' || status === 'configuring';
   const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';
   // Diagnostic-only snapshot: these refs mirror runtime state that should not drive normal rendering.
@@ -1135,6 +1329,7 @@ function App() {
     memorySummary: aliceMemoryRef.current.recentContextSummary?.summary || '',
     knowledgeState,
     autonomousLearningState,
+    autonomousRunnerState,
     interactions: debugInteractions,
   });
   /* eslint-enable react-hooks/refs */
@@ -1159,6 +1354,7 @@ function App() {
         onMindMapChange={handleMindMapChange}
         onApproveProposal={(proposalId) => void handleImprovementProposalDecision(proposalId, true)}
         onRejectProposal={(proposalId) => void handleImprovementProposalDecision(proposalId, false)}
+        onRunnerAction={handleRunnerAction}
         onToggleLiveSession={toggleLiveSession}
         onToggleSidebar={() => setSidebarCollapsed((current) => !current)}
         sessionNotice={sessionNotice}
@@ -1166,6 +1362,7 @@ function App() {
         status={status}
         statusLabel={statusCopy[status]}
         autonomousLearningState={autonomousLearningState}
+        autonomousRunnerState={autonomousRunnerState}
       />
     </main>
   );

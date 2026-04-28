@@ -25,6 +25,7 @@ const GEMINI_LIVE_WS_ENDPOINT: &str =
 const MAX_TARGET_CHARS: usize = 120;
 const MAX_TYPE_TEXT_CHARS: usize = 10_000;
 const MAX_MEMORY_JSON_BYTES: usize = 262_144;
+const MAX_RUNNER_EVIDENCE_TEXT_BYTES: usize = 1_048_576;
 const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
 const MAX_SHELL_OUTPUT_CHARS: usize = 12_000;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 10_000;
@@ -89,6 +90,16 @@ pub struct NativeCommandResult {
     stdout: Option<String>,
     stderr: Option<String>,
     artifacts: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerEvidencePersistRequest {
+    execution_id: String,
+    stdout: Option<String>,
+    stderr: Option<String>,
+    validation: Option<Value>,
+    metadata: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -2021,6 +2032,86 @@ fn save_alice_memory_json(app: tauri::AppHandle, json: String) -> Result<(), Str
     write_memory_json_atomic(&resolve_alice_memory_path(&app_data_dir), &json)
 }
 
+fn sanitize_runner_evidence_segment(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "runner-evidence".to_string()
+    } else {
+        trimmed.chars().take(120).collect()
+    }
+}
+
+fn bounded_runner_evidence_text(value: Option<String>) -> String {
+    let text = value.unwrap_or_default();
+    if text.len() <= MAX_RUNNER_EVIDENCE_TEXT_BYTES {
+        return text;
+    }
+    text.chars().take(MAX_RUNNER_EVIDENCE_TEXT_BYTES).collect()
+}
+
+#[tauri::command]
+fn save_runner_evidence(
+    app: tauri::AppHandle,
+    request: RunnerEvidencePersistRequest,
+) -> Result<NativeCommandResult, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    let execution_id = sanitize_runner_evidence_segment(&request.execution_id);
+    let evidence_dir = app_data_dir
+        .join("data")
+        .join("evidence")
+        .join(&execution_id);
+    fs::create_dir_all(&evidence_dir)
+        .map_err(|error| format!("Falha ao criar pasta de evidencia do Runner: {error}"))?;
+
+    let stdout_path = evidence_dir.join("stdout.txt");
+    let stderr_path = evidence_dir.join("stderr.txt");
+    let validation_path = evidence_dir.join("validation.json");
+    let metadata_path = evidence_dir.join("metadata.json");
+
+    fs::write(&stdout_path, bounded_runner_evidence_text(request.stdout))
+        .map_err(|error| format!("Falha ao salvar stdout do Runner: {error}"))?;
+    fs::write(&stderr_path, bounded_runner_evidence_text(request.stderr))
+        .map_err(|error| format!("Falha ao salvar stderr do Runner: {error}"))?;
+
+    let validation_json = serde_json::to_string_pretty(&request.validation.unwrap_or_else(|| json!({})))
+        .map_err(|error| format!("Falha ao serializar validacao do Runner: {error}"))?;
+    fs::write(&validation_path, validation_json)
+        .map_err(|error| format!("Falha ao salvar validacao do Runner: {error}"))?;
+
+    let metadata_json = serde_json::to_string_pretty(&request.metadata.unwrap_or_else(|| json!({})))
+        .map_err(|error| format!("Falha ao serializar metadata do Runner: {error}"))?;
+    fs::write(&metadata_path, metadata_json)
+        .map_err(|error| format!("Falha ao salvar metadata do Runner: {error}"))?;
+
+    Ok(NativeCommandResult {
+        ok: true,
+        message: "Evidencia do Runner salva.".to_string(),
+        stdout: None,
+        stderr: None,
+        artifacts: Some(json!({
+            "executionId": execution_id,
+            "evidenceDir": evidence_dir.to_string_lossy(),
+            "stdoutPath": stdout_path.to_string_lossy(),
+            "stderrPath": stderr_path.to_string_lossy(),
+            "validationPath": validation_path.to_string_lossy(),
+            "metadataPath": metadata_path.to_string_lossy()
+        })),
+    })
+}
+
 #[cfg(test)]
 fn desktop_commands_enabled() -> bool {
     cfg!(feature = "desktop-commands")
@@ -2048,6 +2139,7 @@ pub fn run() {
         create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
+        save_runner_evidence,
         local_vm::get_local_vm_status,
         local_vm::diagnose_local_vm_setup,
         local_vm::run_local_vm_guest_task,
@@ -2079,6 +2171,7 @@ pub fn run() {
         create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
+        save_runner_evidence,
         local_vm::get_local_vm_status,
         local_vm::diagnose_local_vm_setup,
         local_vm::run_local_vm_guest_task,

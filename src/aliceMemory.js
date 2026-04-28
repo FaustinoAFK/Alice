@@ -10,8 +10,21 @@ import {
   generateMindMapFromGoal,
   normalizeMindMap,
 } from './hud/mindMap/utils/mindMapData';
+import {
+  cancelAutonomousRunnerQueue,
+  cancelAutonomousRunnerTask,
+  createAutonomousRunnerSummary,
+  createEmptyAutonomousRunnerState,
+  enqueueAutonomousRunnerTask,
+  normalizeAutonomousRunnerState,
+  reorderAutonomousRunnerTask,
+  rerunAutonomousRunnerTask,
+  setAutonomousRunnerEnabled,
+  setAutonomousRunnerPaused,
+  updateAutonomousRunnerTask,
+} from './autonomousRunnerState';
 
-export const ALICE_MEMORY_SCHEMA_VERSION = 7;
+export const ALICE_MEMORY_SCHEMA_VERSION = 8;
 export const ALICE_MEMORY_FILE_NAME = 'alice-memory.json';
 export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
@@ -265,6 +278,7 @@ export const createEmptyAliceMemory = () => ({
     procedures: [],
   },
   autonomousAudit: createEmptyAutonomousAudit(),
+  autonomousRunner: createEmptyAutonomousRunnerState(),
   mindMaps: normalizeMindMapsState(),
   recentContextSummary: {
     summary: '',
@@ -292,6 +306,9 @@ export const validateAliceMemorySchema = (memory) => {
     typeof memory.proceduralMemory === 'object' &&
     Array.isArray(memory.proceduralMemory.procedures) &&
     typeof memory.autonomousAudit === 'object' &&
+    typeof memory.autonomousRunner === 'object' &&
+    typeof memory.autonomousRunner.tasksById === 'object' &&
+    Array.isArray(memory.autonomousRunner.queue) &&
     typeof memory.mindMaps === 'object' &&
     typeof memory.mindMaps.byId === 'object' &&
     typeof memory.mindMaps.activeId === 'string' &&
@@ -319,6 +336,7 @@ const upgradeAliceMemorySchema = (memory) => {
         procedures: [],
       },
       autonomousAudit: createEmptyAutonomousAudit(),
+      autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
     };
   }
@@ -328,6 +346,7 @@ const upgradeAliceMemorySchema = (memory) => {
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       autonomousAudit: createEmptyAutonomousAudit(),
+      autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
     };
   }
@@ -336,6 +355,7 @@ const upgradeAliceMemorySchema = (memory) => {
     return {
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
     };
   }
@@ -344,6 +364,16 @@ const upgradeAliceMemorySchema = (memory) => {
     return {
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      autonomousRunner: createEmptyAutonomousRunnerState(),
+      mindMaps: normalizeMindMapsState(memory),
+    };
+  }
+
+  if (memory.schemaVersion === 7) {
+    return {
+      ...memory,
+      schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
+      autonomousRunner: normalizeAutonomousRunnerState(memory.autonomousRunner),
       mindMaps: normalizeMindMapsState(memory),
     };
   }
@@ -378,6 +408,7 @@ export const pruneAliceMemory = (memory) => {
       ...createEmptyAutonomousAudit(),
       ...(baseMemory.autonomousAudit || {}),
     },
+    autonomousRunner: normalizeAutonomousRunnerState(baseMemory.autonomousRunner),
     mindMaps: normalizeMindMapsState(baseMemory),
     recentContextSummary: {
       summary: normalizeText(baseMemory.recentContextSummary.summary),
@@ -899,6 +930,134 @@ export const mergeAutonomousAudit = (
     },
   });
 };
+
+export const getAutonomousRunnerState = (memory) =>
+  normalizeAutonomousRunnerState(pruneAliceMemory(memory).autonomousRunner);
+
+export const getAutonomousRunnerSummary = (memory) =>
+  createAutonomousRunnerSummary(getAutonomousRunnerState(memory));
+
+export const updateAutonomousRunnerState = (
+  existingMemory,
+  runnerPatch,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const currentRunner = normalizeAutonomousRunnerState(baseMemory.autonomousRunner);
+  const nextRunner = typeof runnerPatch === 'function'
+    ? normalizeAutonomousRunnerState(runnerPatch(currentRunner))
+    : normalizeAutonomousRunnerState({ ...currentRunner, ...(runnerPatch || {}) });
+
+  return pruneAliceMemory({
+    ...baseMemory,
+    autonomousRunner: nextRunner,
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
+
+export const enqueueAutonomousRunnerMemoryTask = (
+  existingMemory,
+  taskInput = {},
+  { now = new Date().toISOString() } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => enqueueAutonomousRunnerTask(runner, taskInput, { now }),
+    { now },
+  );
+
+export const setAutonomousRunnerMemoryEnabled = (
+  existingMemory,
+  enabled,
+  { now = new Date().toISOString(), reason = '' } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => setAutonomousRunnerEnabled(runner, enabled, { now, reason }),
+    { now },
+  );
+
+export const setAutonomousRunnerMemoryPaused = (
+  existingMemory,
+  paused,
+  { now = new Date().toISOString(), reason = '' } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => setAutonomousRunnerPaused(runner, paused, { now, reason }),
+    { now },
+  );
+
+export const cancelAutonomousRunnerMemoryTask = (
+  existingMemory,
+  taskId,
+  { now = new Date().toISOString(), reason = '' } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => cancelAutonomousRunnerTask(runner, taskId, { now, reason }),
+    { now },
+  );
+
+export const cancelAutonomousRunnerMemoryQueue = (
+  existingMemory,
+  { now = new Date().toISOString(), reason = '' } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => cancelAutonomousRunnerQueue(runner, { now, reason }),
+    { now },
+  );
+
+export const rerunAutonomousRunnerMemoryTask = (
+  existingMemory,
+  taskId,
+  { now = new Date().toISOString() } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => rerunAutonomousRunnerTask(runner, taskId, { now }),
+    { now },
+  );
+
+export const reorderAutonomousRunnerMemoryTask = (
+  existingMemory,
+  taskId,
+  queueRank,
+  { now = new Date().toISOString() } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => reorderAutonomousRunnerTask(runner, taskId, queueRank, { now }),
+    { now },
+  );
+
+export const blockAutonomousRunnerMemoryTask = (
+  existingMemory,
+  taskId,
+  { now = new Date().toISOString(), reason = 'manual_block' } = {},
+) =>
+  updateAutonomousRunnerState(
+    existingMemory,
+    (runner) => updateAutonomousRunnerTask(runner, taskId, {
+      status: 'blocked',
+      reason,
+      updatedAt: now,
+    }, {
+      now,
+      audit: {
+        type: 'state_transition',
+        summary: 'Task bloqueada manualmente pelo HUD.',
+        reason,
+        afterState: 'blocked',
+      },
+    }),
+    { now },
+  );
 
 export const loadAliceMemory = async (storage = createAliceMemoryStorage()) => {
   try {

@@ -8,7 +8,7 @@ import {
 
 describe('HUD_PAGES', () => {
   it('keeps the HUD navigation explicit and stable', () => {
-    expect(HUD_PAGES.map((page) => page.id)).toEqual(['live', 'knowledge', 'mind-map', 'autonomy', 'debug']);
+    expect(HUD_PAGES.map((page) => page.id)).toEqual(['live', 'knowledge', 'mind-map', 'autonomy', 'runner', 'debug']);
   });
 });
 

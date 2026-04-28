@@ -26,6 +26,7 @@ describe('createAliceLiveSetup', () => {
       'fetch_web_page',
       'update_mind_map',
       'get_autonomous_learning_status',
+      'manage_autonomous_runner',
       'diagnose_local_vm_setup',
       'run_local_vm_smoke_test',
       'install_vm_guest_agent',
@@ -108,6 +109,7 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('VM playground real depende de provedor local configurado');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Workspace local fallback usa copias e nao e VM real');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('run_vm_operational_task antes de pesquisar');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('manage_autonomous_runner');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('snapshot, diff, validacao e rollback');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Auto-melhoria da Alice deve virar proposta');
   });

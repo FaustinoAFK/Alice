@@ -19,12 +19,28 @@ const createEmptyMindMapSummary = () => ({
   relatedGoalId: '',
 });
 
+const createEmptyAutonomousRunnerSummary = () => ({
+  enabled: false,
+  runnerState: 'idle',
+  activeTaskId: '',
+  activeTaskStatus: '',
+  queueSize: 0,
+  readyCount: 0,
+  blockedCount: 0,
+  failedCount: 0,
+  waitingRetryCount: 0,
+  recentFailures: [],
+  recentBlockers: [],
+  currentRiskLevel: '',
+});
+
 export const createBehaviorContext = ({
   turnContext,
   autonomousState,
   vmStatus,
   activeMindMap = null,
   mindMapSummary = null,
+  autonomousRunnerSummary = null,
   hostResourcePressure = 'unknown',
   now = Date.now(),
 } = {}) => {
@@ -53,6 +69,7 @@ export const createBehaviorContext = ({
     riskGuardStatus: (autonomousState?.risks || []).at(-1)?.reason ? 'attention' : 'clear',
     rollbackAvailable: (autonomousState?.rollbacks || []).some((rollback) => rollback.status === 'done' || rollback.status === 'ready'),
     mind_map_summary: resolvedMindMapSummary,
+    autonomous_runner_summary: autonomousRunnerSummary || createEmptyAutonomousRunnerSummary(),
     hostResourcePressure: normalizeText(hostResourcePressure) || 'unknown',
     createdAt: now,
   };
