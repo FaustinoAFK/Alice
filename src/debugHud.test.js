@@ -96,6 +96,18 @@ describe('buildDebugHudSnapshot', () => {
         audits: [{ timestamp: '2026-04-28T10:00:00.000Z', type: 'lease_acquired', taskId: 'runner-task-1', summary: 'ok' }],
         evidenceRefs: [{ kind: 'metadata', taskId: 'runner-task-1', path: 'data/evidence/x/metadata.json' }],
       },
+      persistenceDiagnostics: {
+        sizeBytes: 120000,
+        maxBytes: 52428800,
+        percentUsed: 45.8,
+        nearLimit: false,
+        status: 'ok',
+        lastMemorySaveAt: '2026-04-28T10:00:00.000Z',
+        lastMemorySaveError: '',
+        lastRunnerEvidenceError: 'disk full',
+        lastRunnerEvidenceErrorAt: '2026-04-28T10:01:00.000Z',
+        lastError: 'disk full',
+      },
       knowledgeState: {
         navigationContext: {
           url: 'https://example.com/docs',
@@ -184,6 +196,10 @@ describe('buildDebugHudSnapshot', () => {
     expect(snapshot.runner.enabled).toBe(true);
     expect(snapshot.runner.runningCount).toBe(1);
     expect(snapshot.runner.audits).toContain('lease_acquired');
+    expect(snapshot.persistence.memorySizeBytes).toBe(120000);
+    expect(snapshot.persistence.memoryStatus).toBe('ok');
+    expect(snapshot.persistence.lastRunnerEvidenceError).toBe('disk full');
+    expect(snapshot.persistence.lastError).toBe('disk full');
     expect(snapshot.interactions).toHaveLength(2);
     expect(snapshot.interactions[0]).toMatchObject({
       id: 'tool-1',

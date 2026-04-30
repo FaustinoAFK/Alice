@@ -54,6 +54,9 @@ export const RUNNER_REASONS = {
   MAX_ATTEMPTS_REACHED: 'max_attempts_reached',
   DRY_RUN_FAILED: 'dry_run_failed',
   COMPLETION_CRITERIA_MISSING: 'completion_criteria_missing',
+  EVIDENCE_PERSISTENCE_FAILED: 'evidence_persistence_failed',
+  RUNNING_REQUIRES_LEASE: 'running_requires_lease',
+  DONE_REQUIRES_EXECUTION_VALIDATION_EVIDENCE: 'done_requires_execution_validation_evidence',
 };
 
 export const RUNNER_PRIORITIES = ['low', 'medium', 'high', 'critical'];
@@ -375,7 +378,7 @@ export const normalizeAutonomousRunnerStep = (
     startedAt: normalizeTimestamp(step.startedAt),
     finishedAt: normalizeTimestamp(step.finishedAt),
     result: step.result || null,
-    evidenceRefs: normalizeArray(step.evidenceRefs).slice(-20),
+    evidenceRefs: normalizeArray(step.evidenceRefs).map(normalizeRunnerEvidenceRef).slice(-20),
   };
 };
 
@@ -429,6 +432,51 @@ const normalizePlan = (plan = {}) => ({
   validationReport: plan.validationReport || null,
 });
 
+const normalizeTaskMetadata = (metadata = {}) => {
+  const source = metadata && typeof metadata === 'object' ? metadata : {};
+
+  return {
+    ...source,
+    createdBy: normalizeText(source.createdBy),
+    testScenario: normalizeText(source.testScenario),
+    createdAt: normalizeTimestamp(source.createdAt),
+    tags: normalizeArray(source.tags).map(normalizeText).filter(Boolean).slice(0, 20),
+  };
+};
+
+const sanitizePhysicalEvidenceExecutionId = (value = '') => {
+  const sanitized = String(value || '')
+    .split('')
+    .map((ch) => (/^[a-zA-Z0-9_.-]$/.test(ch) ? ch : '-'))
+    .join('')
+    .replace(/^-+|-+$/g, '');
+  return (sanitized || 'runner-evidence').slice(0, 120);
+};
+
+const normalizeRunnerEvidenceRef = (ref = {}) => {
+  if (!ref || typeof ref !== 'object') {
+    return ref;
+  }
+  const executionId = normalizeText(ref.executionId);
+  const path = normalizeText(ref.path);
+  const physicalExecutionId = executionId ? sanitizePhysicalEvidenceExecutionId(executionId) : executionId;
+  const logicalPrefix = executionId ? `data/evidence/${executionId}/` : '';
+  const shouldUsePhysicalPath = Boolean(
+    executionId &&
+    physicalExecutionId &&
+    physicalExecutionId !== executionId &&
+    path.startsWith(logicalPrefix),
+  );
+
+  return {
+    ...ref,
+    executionId: shouldUsePhysicalPath ? physicalExecutionId : executionId,
+    path: shouldUsePhysicalPath
+      ? `data/evidence/${physicalExecutionId}/${path.slice(logicalPrefix.length)}`
+      : path,
+  };
+};
+
 export const normalizeAutonomousRunnerTask = (
   task = {},
   { now = new Date().toISOString(), defaultMaxAttempts = 3, queueRank = 0 } = {},
@@ -444,7 +492,11 @@ export const normalizeAutonomousRunnerTask = (
     TASK_STATUS_VALUES,
     statusFallback,
   );
-  const maxAttempts = Math.max(1, normalizeNonNegativeInteger(task.maxAttempts, defaultMaxAttempts));
+  const minimumAttemptsForSteps = Math.max(1, steps.filter(isExecutableRunnerStep).length);
+  const maxAttempts = Math.max(
+    minimumAttemptsForSteps,
+    normalizeNonNegativeInteger(task.maxAttempts, defaultMaxAttempts),
+  );
 
   return {
     id,
@@ -474,7 +526,7 @@ export const normalizeAutonomousRunnerTask = (
     steps,
     executionHistory: normalizeArray(task.executionHistory).slice(-30),
     auditRefs: normalizeArray(task.auditRefs).slice(-40),
-    evidenceRefs: normalizeArray(task.evidenceRefs).slice(-40),
+    evidenceRefs: normalizeArray(task.evidenceRefs).map(normalizeRunnerEvidenceRef).slice(-40),
     sourceFiles: normalizeArray(task.sourceFiles).slice(0, 40),
     requestedResources: task.requestedResources || null,
     command: normalizeText(task.command),
@@ -483,6 +535,7 @@ export const normalizeAutonomousRunnerTask = (
     requiresRealVm: Boolean(task.requiresRealVm),
     allowWorkspaceFallback: task.allowWorkspaceFallback !== false,
     riskLevel: normalizeText(task.riskLevel) || 'low',
+    metadata: normalizeTaskMetadata(task.metadata),
     learningCandidateIds: normalizeArray(task.learningCandidateIds).map(normalizeText).filter(Boolean).slice(-10),
   };
 };
@@ -500,6 +553,9 @@ export const normalizeAutonomousRunnerState = (runner = {}) => {
     retention: {
       ...base.settings.retention,
       ...(source.settings?.retention || {}),
+    },
+    devOverrides: {
+      forceVmUnavailable: Boolean(source.settings?.devOverrides?.forceVmUnavailable),
     },
     maxConcurrentTasks: 1,
     defaultMaxAttempts: Math.max(1, normalizeNonNegativeInteger(source.settings?.defaultMaxAttempts, base.settings.defaultMaxAttempts)),
@@ -555,7 +611,7 @@ export const normalizeAutonomousRunnerState = (runner = {}) => {
     tasksById,
     activeTaskId: tasksById[activeTaskId] ? activeTaskId : null,
     runnerLock: runnerLock?.activeTaskId && tasksById[runnerLock.activeTaskId] ? runnerLock : null,
-    evidenceRefs: normalizeArray(source.evidenceRefs).slice(-MAX_RUNNER_EVIDENCE_REFS),
+    evidenceRefs: normalizeArray(source.evidenceRefs).map(normalizeRunnerEvidenceRef).slice(-MAX_RUNNER_EVIDENCE_REFS),
     auditRefs: normalizeArray(source.auditRefs).slice(-MAX_RUNNER_AUDIT_EVENTS),
     audits: normalizeArray(source.audits).slice(-MAX_RUNNER_AUDIT_EVENTS),
     settings,
@@ -720,6 +776,70 @@ export const canTransitionRunnerTask = (fromStatus, toStatus) =>
 export const canTransitionRunnerStep = (fromStatus, toStatus) =>
   fromStatus === toStatus || Boolean(STEP_TRANSITIONS[fromStatus]?.includes(toStatus));
 
+const hasLeaseTransitionProof = (metadata = {}) => Boolean(normalizeText(metadata.leaseId));
+
+const hasPersistedEvidenceProof = (metadata = {}) => {
+  if (metadata.evidencePersistence?.ok === true) {
+    return true;
+  }
+
+  if (!Array.isArray(metadata.evidenceRefs) || metadata.evidenceRefs.length === 0) {
+    return false;
+  }
+
+  return metadata.evidenceRefs.every((ref) =>
+    ref?.metadata?.physicalStatus === 'ok' ||
+    ref?.metadata?.persistence?.status === 'ok' ||
+    ref?.metadata?.persistence?.ok === true,
+  );
+};
+
+const hasDoneTransitionProof = (metadata = {}) =>
+  metadata.executionVerified === true &&
+  metadata.validationPassed === true &&
+  hasPersistedEvidenceProof(metadata);
+
+const rejectTaskTransition = (runner, task, nextStatus, {
+  reason,
+  now,
+  metadata,
+  summary = `Transicao rejeitada: ${task.status} -> ${nextStatus}`,
+}) => ({
+  ok: false,
+  reason,
+  runner: appendAutonomousRunnerAudit(runner, {
+    timestamp: now,
+    type: 'state_transition_rejected',
+    taskId: task.id,
+    summary,
+    reason,
+    beforeState: task.status,
+    afterState: nextStatus,
+    metadata,
+  }),
+});
+
+const rejectStepTransition = (runner, task, step, nextStatus, {
+  reason,
+  now,
+  metadata,
+  summary = `Transicao de step rejeitada: ${step.status} -> ${nextStatus}`,
+}) => ({
+  ok: false,
+  reason,
+  runner: appendAutonomousRunnerAudit(runner, {
+    timestamp: now,
+    type: 'state_transition_rejected',
+    taskId: task.id,
+    stepId: step.id,
+    summary,
+    reason,
+    beforeState: step.status,
+    afterState: nextStatus,
+    metadata,
+  }),
+});
+
 export const transitionAutonomousRunnerTask = (
   runner,
   taskId,
@@ -739,20 +859,27 @@ export const transitionAutonomousRunnerTask = (
   }
 
   if (!canTransitionRunnerTask(task.status, nextStatus)) {
-    return {
-      ok: false,
+    return rejectTaskTransition(normalizedRunner, task, nextStatus, {
       reason: 'invalid_task_transition',
-      runner: appendAutonomousRunnerAudit(normalizedRunner, {
-        timestamp: now,
-        type: 'state_transition_rejected',
-        taskId: task.id,
-        summary: `Transicao rejeitada: ${task.status} -> ${nextStatus}`,
-        reason: reason || 'invalid_task_transition',
-        beforeState: task.status,
-        afterState: nextStatus,
-        metadata,
-      }),
-    };
+      now,
+      metadata,
+    });
+  }
+
+  if (nextStatus === RUNNER_TASK_STATUSES.RUNNING && !hasLeaseTransitionProof(metadata)) {
+    return rejectTaskTransition(normalizedRunner, task, nextStatus, {
+      reason: RUNNER_REASONS.RUNNING_REQUIRES_LEASE,
+      now,
+      metadata,
+    });
+  }
+
+  if (nextStatus === RUNNER_TASK_STATUSES.DONE && !hasDoneTransitionProof(metadata)) {
+    return rejectTaskTransition(normalizedRunner, task, nextStatus, {
+      reason: RUNNER_REASONS.DONE_REQUIRES_EXECUTION_VALIDATION_EVIDENCE,
+      now,
+      metadata,
+    });
   }
 
   const patch = {
@@ -807,21 +934,27 @@ export const transitionAutonomousRunnerStep = (
   }
 
   if (!canTransitionRunnerStep(step.status, nextStatus)) {
-    return {
-      ok: false,
+    return rejectStepTransition(normalizedRunner, task, step, nextStatus, {
       reason: 'invalid_step_transition',
-      runner: appendAutonomousRunnerAudit(normalizedRunner, {
-        timestamp: now,
-        type: 'state_transition_rejected',
-        taskId: task.id,
-        stepId: step.id,
-        summary: `Transicao de step rejeitada: ${step.status} -> ${nextStatus}`,
-        reason: reason || 'invalid_step_transition',
-        beforeState: step.status,
-        afterState: nextStatus,
-        metadata,
-      }),
-    };
+      now,
+      metadata,
+    });
+  }
+
+  if (nextStatus === RUNNER_STEP_STATUSES.RUNNING && !hasLeaseTransitionProof(metadata)) {
+    return rejectStepTransition(normalizedRunner, task, step, nextStatus, {
+      reason: RUNNER_REASONS.RUNNING_REQUIRES_LEASE,
+      now,
+      metadata,
+    });
+  }
+
+  if (nextStatus === RUNNER_STEP_STATUSES.DONE && !hasDoneTransitionProof(metadata)) {
+    return rejectStepTransition(normalizedRunner, task, step, nextStatus, {
+      reason: RUNNER_REASONS.DONE_REQUIRES_EXECUTION_VALIDATION_EVIDENCE,
+      now,
+      metadata,
+    });
   }
 
   const patch = {

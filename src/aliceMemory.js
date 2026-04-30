@@ -23,19 +23,68 @@ import {
   setAutonomousRunnerPaused,
   updateAutonomousRunnerTask,
 } from './autonomousRunnerState';
+import { normalizeAutonomousLearningPolicy } from './autonomousLearningPolicy';
+import {
+  normalizeProcedureReuseIndex,
+  rebuildProcedureReuseIndex,
+} from './autonomousReuseIndex';
 
-export const ALICE_MEMORY_SCHEMA_VERSION = 8;
+export const ALICE_MEMORY_SCHEMA_VERSION = 9;
 export const ALICE_MEMORY_FILE_NAME = 'alice-memory.json';
+export const ALICE_MEMORY_MAX_JSON_BYTES = 52428800;
+export const ALICE_MEMORY_NEAR_LIMIT_RATIO = 0.85;
 export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
 export const MAX_TOOL_FACTS = 50;
 export const MAX_PROCEDURES = 30;
+export const MAX_AUTONOMOUS_LEARNING_GAPS = 40;
+export const MAX_AUTONOMOUS_LEARNING_EXPERIMENTS = 60;
+export const MAX_AUTONOMOUS_LEARNING_AUDITS = 120;
 
 const DEFAULT_ASSISTANT_NAME = 'Alice';
 const DEFAULT_PERSONA_STYLE = 'playful_confident';
 const DEFAULT_TRAITS = ['espirituosa', 'confiante', 'calorosa', 'provocadora de leve'];
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
+
+export const estimateAliceMemoryJsonBytes = (memory) => {
+  const json = JSON.stringify(memory || {}, null, 2);
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(json).length;
+  }
+  return json.length;
+};
+
+export const createAliceMemoryPersistenceSnapshot = (
+  memory,
+  {
+    lastMemorySaveError = '',
+    lastMemorySaveAt = '',
+    lastRunnerEvidenceError = '',
+    lastRunnerEvidenceErrorAt = '',
+  } = {},
+) => {
+  const sizeBytes = estimateAliceMemoryJsonBytes(memory);
+  const usageRatio = sizeBytes / ALICE_MEMORY_MAX_JSON_BYTES;
+
+  return {
+    sizeBytes,
+    maxBytes: ALICE_MEMORY_MAX_JSON_BYTES,
+    usageRatio,
+    percentUsed: Math.round(usageRatio * 1000) / 10,
+    nearLimit: usageRatio >= ALICE_MEMORY_NEAR_LIMIT_RATIO,
+    status: usageRatio >= 1
+      ? 'over_limit'
+      : usageRatio >= ALICE_MEMORY_NEAR_LIMIT_RATIO
+        ? 'near_limit'
+        : 'ok',
+    lastMemorySaveAt: normalizeText(lastMemorySaveAt),
+    lastMemorySaveError: normalizeText(lastMemorySaveError),
+    lastRunnerEvidenceError: normalizeText(lastRunnerEvidenceError),
+    lastRunnerEvidenceErrorAt: normalizeText(lastRunnerEvidenceErrorAt),
+    lastError: normalizeText(lastRunnerEvidenceError || lastMemorySaveError),
+  };
+};
 
 const normalizeFactKey = (value) => normalizeText(value).toLowerCase();
 
@@ -162,6 +211,7 @@ const mergeProcedures = (existingProcedures = [], incomingProcedures = [], limit
     }
 
     const normalizedProcedure = {
+      ...procedure,
       procedureId: normalizeText(procedure.procedureId),
       title: normalizeText(procedure.title),
       summary: normalizeText(procedure.summary),
@@ -171,6 +221,17 @@ const mergeProcedures = (existingProcedures = [], incomingProcedures = [], limit
       source: normalizeText(procedure.source) || 'validated_operational_learning',
       updatedAt: normalizeText(procedure.updatedAt),
       createdAt: normalizeText(procedure.createdAt),
+      capabilities: uniqueNormalizedStrings(procedure.capabilities || []).slice(0, 12),
+      evidenceRefs: Array.isArray(procedure.evidenceRefs) ? procedure.evidenceRefs.slice(-16) : [],
+      usageCount: Math.max(0, Math.trunc(Number(procedure.usageCount || 0))),
+      successCount: Math.max(0, Math.trunc(Number(procedure.successCount || 0))),
+      failureCount: Math.max(0, Math.trunc(Number(procedure.failureCount || 0))),
+      fallbackStrategy: normalizeText(procedure.fallbackStrategy),
+      version: normalizeText(procedure.version || 'v1'),
+      previousVersion: normalizeText(procedure.previousVersion),
+      fallbackVersion: normalizeText(procedure.fallbackVersion),
+      versionHistory: Array.isArray(procedure.versionHistory) ? procedure.versionHistory.slice(-8) : [],
+      lastUsedAt: normalizeText(procedure.lastUsedAt),
     };
 
     if (!normalizedProcedure.procedureId || !normalizedProcedure.title) {
@@ -258,6 +319,104 @@ const buildRecentSummary = ({ inputTranscript = '', outputTranscript = '' }) => 
   return lines.join(' | ');
 };
 
+const boundedObjects = (items = [], limit = 40) =>
+  (Array.isArray(items) ? items.filter((item) => item && typeof item === 'object') : []).slice(-limit);
+
+export const createEmptyAutonomousLearningMemoryState = () => ({
+  enabled: true,
+  lastStartupRunAt: '',
+  lastScanAt: '',
+  lastExperimentAt: '',
+  knownGaps: [],
+  recentExperiments: [],
+  procedureCandidates: [],
+  promotedProcedures: [],
+  generatedScripts: [],
+  policy: normalizeAutonomousLearningPolicy(),
+  stats: {
+    scans: 0,
+    gapsDetected: 0,
+    tasksCreated: 0,
+    experimentsValidated: 0,
+    experimentsRejected: 0,
+    promotions: 0,
+    reinforcements: 0,
+    dryRuns: 0,
+  },
+  auditLog: [],
+});
+
+export const normalizeAutonomousLearningMemoryState = (state = {}) => {
+  const base = createEmptyAutonomousLearningMemoryState();
+  const source = state && typeof state === 'object' ? state : {};
+  const policy = normalizeAutonomousLearningPolicy({
+    ...base.policy,
+    ...(source.policy || {}),
+    enabled: source.enabled ?? source.policy?.enabled ?? base.policy.enabled,
+  });
+  return {
+    ...base,
+    ...source,
+    enabled: policy.enabled,
+    lastStartupRunAt: normalizeText(source.lastStartupRunAt),
+    lastScanAt: normalizeText(source.lastScanAt),
+    lastExperimentAt: normalizeText(source.lastExperimentAt),
+    knownGaps: boundedObjects(source.knownGaps, MAX_AUTONOMOUS_LEARNING_GAPS),
+    recentExperiments: boundedObjects(source.recentExperiments, MAX_AUTONOMOUS_LEARNING_EXPERIMENTS),
+    procedureCandidates: boundedObjects(source.procedureCandidates, 60),
+    promotedProcedures: mergeProcedures(source.promotedProcedures || [], [], 60),
+    generatedScripts: boundedObjects(source.generatedScripts, 40),
+    policy,
+    stats: {
+      ...base.stats,
+      ...(source.stats || {}),
+    },
+    auditLog: boundedObjects(source.auditLog, MAX_AUTONOMOUS_LEARNING_AUDITS),
+  };
+};
+
+export const createEmptyAutonomousOptimizationMemoryState = () => ({
+  enabled: true,
+  lastOptimizationRunAt: '',
+  candidates: [],
+  recentBenchmarks: [],
+  promotedVariants: [],
+  rejectedVariants: [],
+  stats: {
+    tasksCreated: 0,
+    variantsPromoted: 0,
+    variantsRejected: 0,
+  },
+  policy: {
+    minSuccessRate: 1,
+    requireEvidence: true,
+    requireNoRiskIncrease: true,
+  },
+});
+
+export const normalizeAutonomousOptimizationMemoryState = (state = {}) => {
+  const base = createEmptyAutonomousOptimizationMemoryState();
+  const source = state && typeof state === 'object' ? state : {};
+  return {
+    ...base,
+    ...source,
+    enabled: source.enabled !== false,
+    lastOptimizationRunAt: normalizeText(source.lastOptimizationRunAt),
+    candidates: boundedObjects(source.candidates, 40),
+    recentBenchmarks: boundedObjects(source.recentBenchmarks, 40),
+    promotedVariants: boundedObjects(source.promotedVariants, 40),
+    rejectedVariants: boundedObjects(source.rejectedVariants, 40),
+    stats: {
+      ...base.stats,
+      ...(source.stats || {}),
+    },
+    policy: {
+      ...base.policy,
+      ...(source.policy || {}),
+    },
+  };
+};
+
 export const createEmptyAliceMemory = () => ({
   schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
   identity: {
@@ -279,6 +438,9 @@ export const createEmptyAliceMemory = () => ({
   },
   autonomousAudit: createEmptyAutonomousAudit(),
   autonomousRunner: createEmptyAutonomousRunnerState(),
+  autonomousLearning: createEmptyAutonomousLearningMemoryState(),
+  autonomousOptimization: createEmptyAutonomousOptimizationMemoryState(),
+  procedureReuseIndex: normalizeProcedureReuseIndex(),
   mindMaps: normalizeMindMapsState(),
   recentContextSummary: {
     summary: '',
@@ -309,6 +471,9 @@ export const validateAliceMemorySchema = (memory) => {
     typeof memory.autonomousRunner === 'object' &&
     typeof memory.autonomousRunner.tasksById === 'object' &&
     Array.isArray(memory.autonomousRunner.queue) &&
+    typeof memory.autonomousLearning === 'object' &&
+    typeof memory.autonomousOptimization === 'object' &&
+    typeof memory.procedureReuseIndex === 'object' &&
     typeof memory.mindMaps === 'object' &&
     typeof memory.mindMaps.byId === 'object' &&
     typeof memory.mindMaps.activeId === 'string' &&
@@ -319,17 +484,27 @@ export const validateAliceMemorySchema = (memory) => {
 
 export const recoverFromCorruptMemory = () => createEmptyAliceMemory();
 
+const withAutonomousLearningDefaults = (memory = {}) => ({
+  ...memory,
+  autonomousLearning: normalizeAutonomousLearningMemoryState(memory.autonomousLearning),
+  autonomousOptimization: normalizeAutonomousOptimizationMemoryState(memory.autonomousOptimization),
+  procedureReuseIndex: normalizeProcedureReuseIndex(memory.procedureReuseIndex, {
+    procedures: memory.proceduralMemory?.procedures || [],
+    candidates: memory.autonomousLearning?.procedureCandidates || memory.autonomousAudit?.skillCandidates || [],
+  }),
+});
+
 const upgradeAliceMemorySchema = (memory) => {
   if (!memory || typeof memory !== 'object') {
     return createEmptyAliceMemory();
   }
 
   if (memory.schemaVersion === ALICE_MEMORY_SCHEMA_VERSION) {
-    return memory;
+    return withAutonomousLearningDefaults(memory);
   }
 
   if (memory.schemaVersion === 1 || memory.schemaVersion === 2 || memory.schemaVersion === 3) {
-    return {
+    return withAutonomousLearningDefaults({
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       proceduralMemory: {
@@ -338,44 +513,44 @@ const upgradeAliceMemorySchema = (memory) => {
       autonomousAudit: createEmptyAutonomousAudit(),
       autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
-    };
+    });
   }
 
   if (memory.schemaVersion === 4) {
-    return {
+    return withAutonomousLearningDefaults({
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       autonomousAudit: createEmptyAutonomousAudit(),
       autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
-    };
+    });
   }
 
   if (memory.schemaVersion === 5) {
-    return {
+    return withAutonomousLearningDefaults({
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
-    };
+    });
   }
 
   if (memory.schemaVersion === 6) {
-    return {
+    return withAutonomousLearningDefaults({
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       autonomousRunner: createEmptyAutonomousRunnerState(),
       mindMaps: normalizeMindMapsState(memory),
-    };
+    });
   }
 
-  if (memory.schemaVersion === 7) {
-    return {
+  if (memory.schemaVersion === 7 || memory.schemaVersion === 8) {
+    return withAutonomousLearningDefaults({
       ...memory,
       schemaVersion: ALICE_MEMORY_SCHEMA_VERSION,
       autonomousRunner: normalizeAutonomousRunnerState(memory.autonomousRunner),
       mindMaps: normalizeMindMapsState(memory),
-    };
+    });
   }
 
   return createEmptyAliceMemory();
@@ -409,6 +584,15 @@ export const pruneAliceMemory = (memory) => {
       ...(baseMemory.autonomousAudit || {}),
     },
     autonomousRunner: normalizeAutonomousRunnerState(baseMemory.autonomousRunner),
+    autonomousLearning: normalizeAutonomousLearningMemoryState(baseMemory.autonomousLearning),
+    autonomousOptimization: normalizeAutonomousOptimizationMemoryState(baseMemory.autonomousOptimization),
+    procedureReuseIndex: normalizeProcedureReuseIndex(baseMemory.procedureReuseIndex, {
+      procedures: [
+        ...(baseMemory.proceduralMemory?.procedures || []),
+        ...(baseMemory.autonomousLearning?.promotedProcedures || []),
+      ],
+      candidates: baseMemory.autonomousLearning?.procedureCandidates || baseMemory.autonomousAudit?.skillCandidates || [],
+    }),
     mindMaps: normalizeMindMapsState(baseMemory),
     recentContextSummary: {
       summary: normalizeText(baseMemory.recentContextSummary.summary),
@@ -936,6 +1120,73 @@ export const getAutonomousRunnerState = (memory) =>
 
 export const getAutonomousRunnerSummary = (memory) =>
   createAutonomousRunnerSummary(getAutonomousRunnerState(memory));
+
+export const getAutonomousLearningMemoryState = (memory) =>
+  normalizeAutonomousLearningMemoryState(pruneAliceMemory(memory).autonomousLearning);
+
+export const getAutonomousOptimizationMemoryState = (memory) =>
+  normalizeAutonomousOptimizationMemoryState(pruneAliceMemory(memory).autonomousOptimization);
+
+export const rebuildAutonomousProcedureReuseIndex = (memory) => {
+  const normalizedMemory = pruneAliceMemory(memory);
+  return rebuildProcedureReuseIndex({
+    procedures: [
+      ...(normalizedMemory.proceduralMemory?.procedures || []),
+      ...(normalizedMemory.autonomousLearning?.promotedProcedures || []),
+    ],
+    candidates: normalizedMemory.autonomousLearning?.procedureCandidates || [],
+  });
+};
+
+export const updateAutonomousLearningMemoryState = (
+  existingMemory,
+  learningPatch,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const currentLearning = normalizeAutonomousLearningMemoryState(baseMemory.autonomousLearning);
+  const nextLearning = typeof learningPatch === 'function'
+    ? normalizeAutonomousLearningMemoryState(learningPatch(currentLearning))
+    : normalizeAutonomousLearningMemoryState({ ...currentLearning, ...(learningPatch || {}) });
+  const withLearning = {
+    ...baseMemory,
+    autonomousLearning: nextLearning,
+    procedureReuseIndex: rebuildProcedureReuseIndex({
+      procedures: [
+        ...(baseMemory.proceduralMemory?.procedures || []),
+        ...(nextLearning.promotedProcedures || []),
+      ],
+      candidates: nextLearning.procedureCandidates || [],
+    }),
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  };
+  return pruneAliceMemory(withLearning);
+};
+
+export const updateAutonomousOptimizationMemoryState = (
+  existingMemory,
+  optimizationPatch,
+  { now = new Date().toISOString() } = {},
+) => {
+  const baseMemory = pruneAliceMemory(existingMemory);
+  const currentOptimization = normalizeAutonomousOptimizationMemoryState(baseMemory.autonomousOptimization);
+  const nextOptimization = typeof optimizationPatch === 'function'
+    ? normalizeAutonomousOptimizationMemoryState(optimizationPatch(currentOptimization))
+    : normalizeAutonomousOptimizationMemoryState({ ...currentOptimization, ...(optimizationPatch || {}) });
+  return pruneAliceMemory({
+    ...baseMemory,
+    autonomousOptimization: nextOptimization,
+    bootstrapMeta: {
+      ...baseMemory.bootstrapMeta,
+      lastUpdatedAt: now,
+      memoryRevision: baseMemory.bootstrapMeta.memoryRevision + 1,
+    },
+  });
+};
 
 export const updateAutonomousRunnerState = (
   existingMemory,

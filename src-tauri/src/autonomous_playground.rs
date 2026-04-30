@@ -68,6 +68,66 @@ fn is_safe_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_) | Component::CurDir))
 }
 
+fn relative_path_string(base: &Path, path: &Path) -> Option<String> {
+    path.strip_prefix(base)
+        .ok()
+        .map(|relative| relative.to_string_lossy().replace('\\', "/"))
+        .filter(|relative| !relative.is_empty())
+}
+
+fn collect_files_recursive(
+    root: &Path,
+    base: &Path,
+    current: &Path,
+    files: &mut Vec<String>,
+) -> Result<(), String> {
+    if !current.exists() {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(current)
+        .map_err(|error| format!("Falha ao listar arquivos do workspace local fallback: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("Falha ao ler entrada do workspace local fallback: {error}"))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("Falha ao ler tipo de arquivo do workspace local fallback: {error}"))?;
+
+        if file_type.is_dir() {
+            collect_files_recursive(root, base, &path, files)?;
+            continue;
+        }
+
+        if file_type.is_file() {
+            if let Some(root_relative) = relative_path_string(root, &path) {
+                files.push(root_relative);
+            }
+            if let Some(base_relative) = relative_path_string(base, &path) {
+                files.push(base_relative);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_workspace_files(
+    workspace_root: &Path,
+    input_dir: &Path,
+    output_dir: &Path,
+    logs_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let mut files = Vec::new();
+    collect_files_recursive(workspace_root, input_dir, input_dir, &mut files)?;
+    collect_files_recursive(workspace_root, output_dir, output_dir, &mut files)?;
+    collect_files_recursive(workspace_root, logs_dir, logs_dir, &mut files)?;
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 fn source_display_name(source_file: &WorkspaceSourceFile, index: usize) -> String {
     source_file
         .target_path
@@ -436,6 +496,7 @@ pub fn run_local_workspace_playground_task(
         .map_err(|error| format!("Falha ao gravar stdout do workspace local fallback: {error}"))?;
     fs::write(logs_dir.join("stderr.txt"), &stderr)
         .map_err(|error| format!("Falha ao gravar stderr do workspace local fallback: {error}"))?;
+    let files = collect_workspace_files(&workspace_root, &input_dir, &output_dir, &logs_dir)?;
 
     Ok(NativeCommandResult {
         ok: output.status.success(),
@@ -457,6 +518,7 @@ pub fn run_local_workspace_playground_task(
             "args": args,
             "timeoutMs": timeout_ms,
             "statusCode": status_code,
+            "files": files,
             "totalCopiedBytes": total_bytes,
             "isRealVm": false,
             "executionMode": "local_workspace_fallback",
@@ -481,6 +543,33 @@ mod tests {
         assert!(is_safe_relative_path(Path::new("input/file.txt")));
         assert!(!is_safe_relative_path(Path::new("../file.txt")));
         assert!(!is_safe_relative_path(Path::new("C:\\temp\\file.txt")));
+    }
+
+    #[test]
+    fn collect_workspace_files_includes_root_and_dir_relative_paths() {
+        let root = std::env::temp_dir().join(format!(
+            "alice-workspace-files-test-{}",
+            std::process::id()
+        ));
+        let input_dir = root.join("input");
+        let output_dir = root.join("output");
+        let logs_dir = root.join("logs");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::create_dir_all(&output_dir).unwrap();
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::write(input_dir.join("runner-smoke-test.txt"), "ok").unwrap();
+        fs::write(output_dir.join("report.txt"), "ok").unwrap();
+        fs::write(logs_dir.join("stdout.txt"), "ok").unwrap();
+
+        let files = collect_workspace_files(&root, &input_dir, &output_dir, &logs_dir).unwrap();
+
+        assert!(files.contains(&"input/runner-smoke-test.txt".to_string()));
+        assert!(files.contains(&"runner-smoke-test.txt".to_string()));
+        assert!(files.contains(&"output/report.txt".to_string()));
+        assert!(files.contains(&"report.txt".to_string()));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

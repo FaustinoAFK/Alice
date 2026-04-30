@@ -19,6 +19,15 @@ const APP_CATALOG = [
     openCommand: 'code',
   },
   {
+    aliases: ['virtualbox', 'oracle virtualbox', 'oracle vm virtualbox'],
+    displayName: 'Oracle VirtualBox',
+    wingetId: 'Oracle.VirtualBox',
+    openCommand: 'VirtualBox.exe',
+    requiresElevatedInstall: true,
+    installNotes:
+      'VirtualBox instala drivers e normalmente exige elevacao/UAC dentro da VM; nao deve rodar como background automatico sem supervisao.',
+  },
+  {
     aliases: ['explorador de arquivos', 'explorer', 'file explorer', 'arquivos'],
     displayName: 'Explorador de Arquivos',
     openCommand: 'explorer.exe',
@@ -27,6 +36,11 @@ const APP_CATALOG = [
     aliases: ['bloco de notas', 'notepad'],
     displayName: 'Bloco de Notas',
     openCommand: 'notepad.exe',
+  },
+  {
+    aliases: ['powershell', 'windows powershell', 'power shell', 'power shelf', 'terminal powershell'],
+    displayName: 'Windows PowerShell',
+    openCommand: 'powershell.exe',
   },
   {
     aliases: ['edge', 'microsoft edge', 'navegador'],
@@ -67,6 +81,21 @@ const INSTALL_WORDS = [
 
 const OPEN_WORDS = ['abre', 'abrir', 'abra', 'inicia', 'iniciar', 'rode', 'roda', 'executa'];
 
+const ELEVATION_WORDS = [
+  'administrador',
+  'admin',
+  'elevado',
+  'elevada',
+  'permissao',
+  'permissão',
+  'privilegio',
+  'privilégio',
+];
+
+const ELEVATED_WINGET_IDS = new Set([
+  'oracle.virtualbox',
+]);
+
 const slug = (value) =>
   normalizeText(value)
     .toLowerCase()
@@ -77,6 +106,19 @@ const slug = (value) =>
     .slice(0, 80);
 
 const includesAny = (text, words) => words.some((word) => text.includes(word));
+
+const requiresElevatedVmAction = (value = '') => {
+  const text = normalizeText(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  return includesAny(
+    text,
+    ELEVATION_WORDS.map((word) =>
+      word.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase(),
+    ),
+  );
+};
 
 const cleanTextToType = (value = '') =>
   normalizeText(value)
@@ -112,6 +154,10 @@ export const resolveVmApp = (input = '') => {
   ) || null;
 };
 
+export const requiresElevatedVmInstall = ({ app = null, wingetId = '' } = {}) =>
+  Boolean(app?.requiresElevatedInstall) ||
+  ELEVATED_WINGET_IDS.has(normalizeText(wingetId).toLowerCase());
+
 export const inferVmOperationalTaskKind = ({ objective = '', taskKind = '' } = {}) => {
   const normalizedKind = normalizeText(taskKind).toLowerCase();
   if (normalizedKind) {
@@ -144,6 +190,7 @@ export const createVmOperationalTaskPlan = ({
   url = '',
   backgroundTaskId = '',
   timeoutMs,
+  allowElevatedInstall = false,
 } = {}) => {
   const normalizedObjective = normalizeText(objective);
   const kind = inferVmOperationalTaskKind({ objective: normalizedObjective, taskKind });
@@ -161,6 +208,7 @@ export const createVmOperationalTaskPlan = ({
       nativeArgs: { request: { timeoutMs } },
       app,
       backgroundTaskId: '',
+      requiresElevatedAgent: false,
     };
   }
 
@@ -232,6 +280,8 @@ export const createVmOperationalTaskPlan = ({
       };
     }
 
+    const requiresElevatedInstall = requiresElevatedVmInstall({ app, wingetId });
+
     const installArgs = args.length > 0
       ? args
       : [
@@ -246,7 +296,9 @@ export const createVmOperationalTaskPlan = ({
     return {
       ok: true,
       kind,
-      message: `Instalacao iniciada em background na VM: ${app?.displayName || wingetId}.`,
+      message: requiresElevatedInstall && !allowElevatedInstall
+        ? `Instalacao elevada preparada na VM: ${app?.displayName || wingetId}.`
+        : `Instalacao iniciada em background na VM: ${app?.displayName || wingetId}.`,
       nativeTool: 'run_vm_guest_agent_action',
       nativeArgs: {
         request: {
@@ -264,6 +316,10 @@ export const createVmOperationalTaskPlan = ({
       },
       app,
       backgroundTaskId: resolvedBackgroundTaskId,
+      wingetId,
+      requiresElevatedInstall,
+      requiresSupervision: Boolean(requiresElevatedInstall && !allowElevatedInstall),
+      suggestedCommand: `winget install --id ${wingetId} -e --accept-source-agreements --accept-package-agreements`,
       notes: app?.installNotes || '',
     };
   }
@@ -295,11 +351,13 @@ export const createVmOperationalTaskPlan = ({
       },
       app,
       backgroundTaskId: '',
+      requiresElevatedAgent: false,
     };
   }
 
   const openCommand = normalizeText(command) || app?.openCommand;
   const resolvedTextToType = extractVmTextToType(normalizedObjective, textToType);
+  const requiresElevatedAgent = requiresElevatedVmAction(normalizedObjective);
   if (!openCommand) {
     return {
       ok: false,
@@ -343,5 +401,6 @@ export const createVmOperationalTaskPlan = ({
     textToType: resolvedTextToType,
     app,
     backgroundTaskId: '',
+    requiresElevatedAgent,
   };
 };

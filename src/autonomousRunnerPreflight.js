@@ -81,11 +81,16 @@ export const checkTaskExecutable = (task = {}, nowMs = Date.now()) => {
 
 export const checkVmAvailability = (task = {}, step = {}, vmStatus = {}) => {
   const normalizedVm = normalizeVmStatus(vmStatus);
+  const requestsWorkspaceFallback = ['local_workspace', 'local_workspace_fallback', 'workspace']
+    .includes(step.action?.environment);
   const requiresRealVm =
-    Boolean(task.requiresRealVm) ||
-    step.type === 'visual' ||
-    step.action?.kind === 'visual' ||
-    step.action?.environment === 'real_vm';
+    !requestsWorkspaceFallback &&
+    (
+      Boolean(task.requiresRealVm) ||
+      step.type === 'visual' ||
+      step.action?.kind === 'visual' ||
+      step.action?.environment === 'real_vm'
+    );
 
   if (requiresRealVm && !normalizedVm.realVmAvailable) {
     return {
@@ -103,7 +108,11 @@ export const checkVmAvailability = (task = {}, step = {}, vmStatus = {}) => {
       vmStatus: normalizedVm,
     };
   }
-  if (!requiresRealVm && !normalizedVm.realVmAvailable && !normalizedVm.fallbackWorkspaceAvailable) {
+  if (
+    !requiresRealVm &&
+    !normalizedVm.fallbackWorkspaceAvailable &&
+    (requestsWorkspaceFallback || !(normalizedVm.realVmAvailable && normalizedVm.guestCommandReady))
+  ) {
     return {
       ok: false,
       state: RUNNER_TASK_STATUSES.WAITING_RETRY,
@@ -115,7 +124,9 @@ export const checkVmAvailability = (task = {}, step = {}, vmStatus = {}) => {
   return {
     ok: true,
     vmStatus: normalizedVm,
-    executionMode: requiresRealVm || normalizedVm.realVmAvailable ? 'real_vm' : 'local_workspace_fallback',
+    executionMode: requiresRealVm || (!requestsWorkspaceFallback && normalizedVm.realVmAvailable && normalizedVm.guestCommandReady)
+      ? 'real_vm'
+      : 'local_workspace_fallback',
   };
 };
 

@@ -7,9 +7,42 @@ import {
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 
 const truncatePreview = (value, maxLength = 600) => normalizeText(value).slice(0, maxLength);
+const hashText = (value = '') => {
+  let hash = 2166136261;
+  for (const char of String(value)) {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+const safeEvidenceSegment = (value = '', fallback = 'item', maxLength = 32) => {
+  const normalized = String(value || '')
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-zA-Z0-9_.-]+/g, '-')
+    .replace(/^-+|-+$/g, '') || fallback;
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  const suffix = hashText(normalized);
+  return `${normalized.slice(0, Math.max(1, maxLength - suffix.length - 1)).replace(/-+$/g, '')}-${suffix}`;
+};
+
+const requiredEvidenceIncludes = (step = {}, token = '') =>
+  (step.expectedEvidence?.required || [])
+    .map((item) => normalizeText(item).toLowerCase())
+    .includes(token);
+
+export const RUNNER_PHYSICAL_EVIDENCE_STATUS = {
+  OK: 'ok',
+  PARTIAL: 'partial',
+  MISSING: 'missing',
+  UNAVAILABLE: 'unavailable',
+  NOT_VERIFIED: 'not_verified',
+};
 
 export const createRunnerExecutionId = (taskId = '', stepId = '') =>
-  `runner-exec-${normalizeText(taskId) || 'task'}-${normalizeText(stepId) || 'step'}-${uuidv4()}`;
+  `runner-exec-${safeEvidenceSegment(taskId, 'task')}-${safeEvidenceSegment(stepId, 'step')}-${uuidv4()}`;
 
 export const createRunnerEvidenceRef = ({
   executionId = '',
@@ -47,6 +80,7 @@ export const buildRunnerEvidenceFromExecution = ({
   const basePath = `data/evidence/${executionId}`;
   const kind = step.expectedEvidence?.kind || (step.type === 'visual' ? 'visual' : 'complete');
   const refs = [];
+  const includeCompleteTextRefs = kind === 'complete';
 
   refs.push(createRunnerEvidenceRef({
     executionId,
@@ -66,7 +100,7 @@ export const buildRunnerEvidenceFromExecution = ({
     createdAt: finishedAt,
   }));
 
-  if (executionResult?.stdout) {
+  if (executionResult?.stdout || includeCompleteTextRefs || requiredEvidenceIncludes(step, 'stdout')) {
     refs.push(createRunnerEvidenceRef({
       executionId,
       taskId: task.id,
@@ -79,7 +113,7 @@ export const buildRunnerEvidenceFromExecution = ({
     }));
   }
 
-  if (executionResult?.stderr) {
+  if (executionResult?.stderr || includeCompleteTextRefs || requiredEvidenceIncludes(step, 'stderr')) {
     refs.push(createRunnerEvidenceRef({
       executionId,
       taskId: task.id,
@@ -87,7 +121,7 @@ export const buildRunnerEvidenceFromExecution = ({
       kind: 'stderr',
       path: `${basePath}/stderr.txt`,
       label: 'stderr',
-      important: true,
+      important: Boolean(executionResult?.stderr),
       metadata: { preview: truncatePreview(executionResult.stderr) },
       createdAt: finishedAt,
     }));
@@ -128,6 +162,120 @@ export const buildRunnerEvidenceFromExecution = ({
   });
 
   return refs;
+};
+
+export const applyRunnerEvidencePersistenceMetadata = (refs = [], persistence = {}) => {
+  const status = normalizeText(persistence.status) || (
+    persistence.ok ? RUNNER_PHYSICAL_EVIDENCE_STATUS.OK : RUNNER_PHYSICAL_EVIDENCE_STATUS.UNAVAILABLE
+  );
+  const persistedExecutionId = normalizeText(persistence.executionId);
+  const persistedFiles = new Set((Array.isArray(persistence.files) ? persistence.files : [])
+    .map((file) => (typeof file === 'string' ? file : file?.file || ''))
+    .filter(Boolean));
+
+  return refs.filter(Boolean).map((ref) => {
+    const originalExecutionId = normalizeText(ref.executionId);
+    const originalPath = normalizeText(ref.path);
+    const originalPrefix = `data/evidence/${originalExecutionId}/`;
+    const shouldUsePersistedPath = persistedExecutionId &&
+      originalExecutionId &&
+      persistedExecutionId !== originalExecutionId &&
+      originalPath.startsWith(originalPrefix);
+    const path = shouldUsePersistedPath
+      ? `data/evidence/${persistedExecutionId}/${originalPath.slice(originalPrefix.length)}`
+      : originalPath;
+    const fileName = path.split(/[\\/]/).filter(Boolean).at(-1);
+    const isPersistedFile = persistedExecutionId &&
+      path.startsWith(`data/evidence/${persistedExecutionId}/`) &&
+      persistedFiles.has(fileName);
+    const physicalStatus = isPersistedFile ? status : RUNNER_PHYSICAL_EVIDENCE_STATUS.NOT_VERIFIED;
+
+    return {
+      ...ref,
+      executionId: shouldUsePersistedPath ? persistedExecutionId : ref.executionId,
+      path,
+      metadata: {
+        ...(ref.metadata || {}),
+        physicalStatus,
+        persistence: {
+          ok: Boolean(persistence.ok),
+          status: physicalStatus,
+          reason: normalizeText(persistence.reason),
+          message: truncatePreview(persistence.message, 300),
+          checkedAt: normalizeText(persistence.checkedAt),
+          files: Array.isArray(persistence.files) ? persistence.files : [],
+          missingFiles: Array.isArray(persistence.missingFiles) ? persistence.missingFiles : [],
+        },
+      },
+    };
+  });
+};
+
+export const summarizeRunnerEvidencePhysicalStatus = (refs = []) => {
+  const normalizedRefs = refs.filter(Boolean);
+  if (normalizedRefs.length === 0) {
+    return {
+      status: RUNNER_PHYSICAL_EVIDENCE_STATUS.NOT_VERIFIED,
+      label: 'nao verificada',
+      total: 0,
+      confirmed: 0,
+      partial: 0,
+      missing: 0,
+      unavailable: 0,
+      notVerified: 0,
+    };
+  }
+
+  const counts = normalizedRefs.reduce((acc, ref) => {
+    const status =
+      ref?.metadata?.physicalStatus ||
+      ref?.metadata?.persistence?.status ||
+      RUNNER_PHYSICAL_EVIDENCE_STATUS.NOT_VERIFIED;
+    if (status === RUNNER_PHYSICAL_EVIDENCE_STATUS.OK) {
+      acc.confirmed += 1;
+    } else if (status === RUNNER_PHYSICAL_EVIDENCE_STATUS.PARTIAL) {
+      acc.partial += 1;
+    } else if (status === RUNNER_PHYSICAL_EVIDENCE_STATUS.MISSING) {
+      acc.missing += 1;
+    } else if (status === RUNNER_PHYSICAL_EVIDENCE_STATUS.UNAVAILABLE) {
+      acc.unavailable += 1;
+    } else {
+      acc.notVerified += 1;
+    }
+    return acc;
+  }, {
+    confirmed: 0,
+    partial: 0,
+    missing: 0,
+    unavailable: 0,
+    notVerified: 0,
+  });
+
+  let status = RUNNER_PHYSICAL_EVIDENCE_STATUS.OK;
+  if (counts.missing > 0) {
+    status = RUNNER_PHYSICAL_EVIDENCE_STATUS.MISSING;
+  } else if (counts.partial > 0) {
+    status = RUNNER_PHYSICAL_EVIDENCE_STATUS.PARTIAL;
+  } else if (counts.unavailable > 0) {
+    status = RUNNER_PHYSICAL_EVIDENCE_STATUS.UNAVAILABLE;
+  } else if (counts.notVerified > 0) {
+    status = RUNNER_PHYSICAL_EVIDENCE_STATUS.NOT_VERIFIED;
+  }
+
+  const labels = {
+    [RUNNER_PHYSICAL_EVIDENCE_STATUS.OK]: 'confirmada',
+    [RUNNER_PHYSICAL_EVIDENCE_STATUS.PARTIAL]: 'parcialmente ausente',
+    [RUNNER_PHYSICAL_EVIDENCE_STATUS.MISSING]: 'ausente',
+    [RUNNER_PHYSICAL_EVIDENCE_STATUS.UNAVAILABLE]: 'indisponivel',
+    [RUNNER_PHYSICAL_EVIDENCE_STATUS.NOT_VERIFIED]: 'nao verificada',
+  };
+
+  return {
+    status,
+    label: labels[status],
+    total: normalizedRefs.length,
+    ...counts,
+  };
 };
 
 export const attachRunnerEvidenceRefs = (runner, refs = []) => {

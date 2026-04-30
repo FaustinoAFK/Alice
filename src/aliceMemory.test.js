@@ -1,10 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   ALICE_MEMORY_SCHEMA_VERSION,
+  ALICE_MEMORY_MAX_JSON_BYTES,
   buildMemoryPrefixTurns,
+  createAliceMemoryPersistenceSnapshot,
   createMindMap,
   createEmptyAliceMemory,
   deleteMindMap,
+  estimateAliceMemoryJsonBytes,
   extractImportantFacts,
   getActiveMindMap,
   loadAliceMemory,
@@ -27,6 +30,31 @@ describe('validateAliceMemorySchema', () => {
 
   it('rejects malformed memory payloads', () => {
     expect(validateAliceMemorySchema({ schemaVersion: 999 })).toBe(false);
+  });
+});
+
+describe('alice memory persistence diagnostics', () => {
+  it('estimates the formatted JSON payload sent to native storage', () => {
+    const memory = { schemaVersion: 8, nested: { value: true } };
+
+    expect(estimateAliceMemoryJsonBytes(memory)).toBe(
+      new TextEncoder().encode(JSON.stringify(memory, null, 2)).length,
+    );
+  });
+
+  it('estimates memory size and warns near the native save limit', () => {
+    const small = createAliceMemoryPersistenceSnapshot(createEmptyAliceMemory());
+    const large = createAliceMemoryPersistenceSnapshot({
+      payload: 'x'.repeat(Math.ceil(ALICE_MEMORY_MAX_JSON_BYTES * 0.9)),
+    }, {
+      lastMemorySaveError: 'disk full',
+    });
+
+    expect(small.status).toBe('ok');
+    expect(small.nearLimit).toBe(false);
+    expect(large.status).toBe('near_limit');
+    expect(large.nearLimit).toBe(true);
+    expect(large.lastError).toBe('disk full');
   });
 });
 

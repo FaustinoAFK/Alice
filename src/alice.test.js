@@ -31,6 +31,7 @@ describe('createAliceLiveSetup', () => {
       'run_local_vm_smoke_test',
       'install_vm_guest_agent',
       'diagnose_vm_guest_agent',
+      'start_vm_guest_agent_resident',
       'capture_vm_guest_screen',
       'run_vm_guest_agent_action',
       'run_vm_visual_smoke_test',

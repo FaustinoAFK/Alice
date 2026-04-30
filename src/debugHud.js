@@ -223,7 +223,11 @@ export const buildDebugHudSnapshot = ({
   memorySummary = '',
   knowledgeState = null,
   autonomousLearningState = null,
+  autonomousLearningMemoryState = null,
+  autonomousOptimizationState = null,
+  procedureReuseIndex = null,
   autonomousRunnerState = null,
+  persistenceDiagnostics = null,
   interactions = [],
   now = Date.now(),
 } = {}) => {
@@ -351,6 +355,45 @@ export const buildDebugHudSnapshot = ({
     ),
   };
   const runnerTasks = Object.values(autonomousRunnerState?.tasksById || {});
+  const learningLoop = {
+    enabled: Boolean(autonomousLearningMemoryState?.enabled),
+    lastStartupRunAt: autonomousLearningMemoryState?.lastStartupRunAt || '-',
+    lastScanAt: autonomousLearningMemoryState?.lastScanAt || '-',
+    lastExperimentAt: autonomousLearningMemoryState?.lastExperimentAt || '-',
+    gaps: formatAutonomousList(autonomousLearningMemoryState?.knownGaps, (gap) =>
+      `${gap.gapId || '-'} | ${gap.priority || '-'} | ${gap.riskLevel || '-'} | ${gap.description || '-'}`,
+    ),
+    experiments: formatAutonomousList(autonomousLearningMemoryState?.recentExperiments, (experiment) =>
+      `${experiment.taskId || experiment.experimentId || '-'} | ${experiment.status || '-'} | ${experiment.gapId || '-'} | ${experiment.reason || '-'}`,
+    ),
+    candidates: formatAutonomousList(autonomousLearningMemoryState?.procedureCandidates, (candidate) =>
+      `${candidate.candidateId || candidate.procedureId || '-'} | ${candidate.status || '-'} | confidence=${candidate.confidence ?? '-'}`,
+    ),
+    procedures: formatAutonomousList(autonomousLearningMemoryState?.promotedProcedures, (procedure) =>
+      `${procedure.procedureId || '-'} | ${procedure.status || '-'} | confidence=${procedure.confidence ?? '-'} | used=${procedure.usageCount ?? 0}`,
+    ),
+    scripts: formatAutonomousList(autonomousLearningMemoryState?.generatedScripts, (script) =>
+      `${script.scriptId || '-'} | ${script.scriptType || '-'} | ${script.relativePath || '-'}`,
+    ),
+    reuseIndex: formatDebugValue(procedureReuseIndex),
+    optimization: formatDebugValue(autonomousOptimizationState),
+    stats: formatDebugValue(autonomousLearningMemoryState?.stats),
+    audits: formatAutonomousList((autonomousLearningMemoryState?.auditLog || []).slice(-16), (event) =>
+      `${event.timestamp || '-'} | ${event.type || '-'} | ${event.reason || ''} | ${event.summary || ''}`.trim(),
+    ),
+  };
+  const persistence = {
+    memorySizeBytes: Number(persistenceDiagnostics?.sizeBytes || 0),
+    memoryMaxBytes: Number(persistenceDiagnostics?.maxBytes || 0),
+    memoryPercentUsed: Number(persistenceDiagnostics?.percentUsed || 0),
+    memoryNearLimit: Boolean(persistenceDiagnostics?.nearLimit),
+    memoryStatus: persistenceDiagnostics?.status || '-',
+    lastMemorySaveAt: persistenceDiagnostics?.lastMemorySaveAt || '-',
+    lastMemorySaveError: persistenceDiagnostics?.lastMemorySaveError || '-',
+    lastRunnerEvidenceError: persistenceDiagnostics?.lastRunnerEvidenceError || '-',
+    lastRunnerEvidenceErrorAt: persistenceDiagnostics?.lastRunnerEvidenceErrorAt || '-',
+    lastError: persistenceDiagnostics?.lastError || '-',
+  };
   const runner = {
     enabled: Boolean(autonomousRunnerState?.enabled),
     runnerState: autonomousRunnerState?.runnerState || '-',
@@ -423,7 +466,9 @@ export const buildDebugHudSnapshot = ({
       ...autonomous,
       display: buildAutonomousDisplay(autonomous),
     },
+    learningLoop,
     runner,
+    persistence,
     interactions: Array.isArray(interactions)
       ? interactions.slice(-80).map(normalizeInteraction).reverse()
       : [],

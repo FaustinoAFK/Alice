@@ -37,6 +37,7 @@ export const AUTONOMOUS_LEARNING_TOOL_NAMES = [
   'run_local_vm_smoke_test',
   'install_vm_guest_agent',
   'diagnose_vm_guest_agent',
+  'start_vm_guest_agent_resident',
   'capture_vm_guest_screen',
   'run_vm_guest_agent_action',
   'run_vm_visual_smoke_test',
@@ -87,6 +88,114 @@ const buildDefaultValidationChecks = ({ run, executionMode }) => [
         : 'execucao limitada ao workspace local fallback com copias',
   },
 ];
+
+const BACKGROUND_FAILURE_STATUSES = new Set(['failed', 'timeout', 'cancelled']);
+const BACKGROUND_ACTIVE_STATUSES = new Set(['starting', 'running']);
+
+const extractBackgroundAgentResult = (result) =>
+  result?.artifacts?.agentResponse?.result ||
+  result?.agentResponse?.result ||
+  result?.result ||
+  null;
+
+export const summarizeBackgroundTaskResult = (result) => {
+  const agentResult = extractBackgroundAgentResult(result);
+  if (!agentResult || typeof agentResult !== 'object') {
+    return {
+      known: false,
+      ok: Boolean(result?.ok),
+      status: '',
+      terminal: false,
+      message: result?.message || '',
+    };
+  }
+
+  const status = normalizeToolString(agentResult.status).toLowerCase();
+  const exitCodeValue = agentResult.exit_code ?? agentResult.exitCode;
+  const exitCode = exitCodeValue === undefined || exitCodeValue === null || exitCodeValue === ''
+    ? null
+    : Number(exitCodeValue);
+  const exitCodeKnown = Number.isFinite(exitCode);
+  const backgroundTaskId = normalizeToolString(
+    agentResult.background_task_id,
+    agentResult.backgroundTaskId,
+  );
+
+  if (BACKGROUND_FAILURE_STATUSES.has(status)) {
+    return {
+      known: true,
+      ok: false,
+      status,
+      terminal: true,
+      exitCode: exitCodeKnown ? exitCode : null,
+      backgroundTaskId,
+      message: `Tarefa em background terminou com status=${status}${exitCodeKnown ? ` exitCode=${exitCode}` : ''}.`,
+    };
+  }
+
+  if (status === 'completed') {
+    const ok = !exitCodeKnown || exitCode === 0;
+    return {
+      known: true,
+      ok,
+      status,
+      terminal: true,
+      exitCode: exitCodeKnown ? exitCode : null,
+      backgroundTaskId,
+      message: ok
+        ? 'Tarefa em background concluida com sucesso.'
+        : `Tarefa em background concluiu com exitCode=${exitCode}.`,
+    };
+  }
+
+  if (BACKGROUND_ACTIVE_STATUSES.has(status)) {
+    return {
+      known: true,
+      ok: true,
+      status,
+      terminal: false,
+      exitCode: exitCodeKnown ? exitCode : null,
+      backgroundTaskId,
+      message: `Tarefa em background esta ${status}.`,
+    };
+  }
+
+  return {
+    known: true,
+    ok: Boolean(result?.ok),
+    status,
+    terminal: false,
+    exitCode: exitCodeKnown ? exitCode : null,
+    backgroundTaskId,
+    message: status ? `Status da tarefa em background: ${status}.` : result?.message || '',
+  };
+};
+
+const vmOperationalLogType = ({ plan, finalOk, backgroundSummary }) => {
+  if (!finalOk) {
+    return 'vm_operational_task_failed';
+  }
+  if (plan.kind === 'install_app' && backgroundSummary?.known && !backgroundSummary.terminal) {
+    return 'vm_operational_task_started';
+  }
+  if (plan.kind === 'check_background_task' && backgroundSummary?.known && !backgroundSummary.terminal) {
+    return 'vm_operational_task_status_checked';
+  }
+  return 'vm_operational_task_finished';
+};
+
+const isVmGuestAgentElevated = (diagnosis) => {
+  const artifacts = diagnosis?.artifacts || {};
+  const agentResult = artifacts.agentResponse?.result || {};
+  const capabilities = artifacts.capabilities || agentResult.capabilities || {};
+  return Boolean(
+    artifacts.isElevated ||
+    artifacts.is_elevated ||
+    agentResult.isElevated ||
+    agentResult.is_elevated ||
+    capabilities.can_run_elevated_commands,
+  );
+};
 
 export const executeAutonomousLearningFunctionCall = async ({
   functionCall,
@@ -275,6 +384,7 @@ export const executeAutonomousLearningFunctionCall = async ({
 
     case 'install_vm_guest_agent':
     case 'diagnose_vm_guest_agent':
+    case 'start_vm_guest_agent_resident':
     case 'capture_vm_guest_screen':
     case 'run_vm_guest_agent_action':
     case 'run_vm_visual_smoke_test': {
@@ -295,6 +405,14 @@ export const executeAutonomousLearningFunctionCall = async ({
       const nativeArgs =
         toolName === 'install_vm_guest_agent'
           ? { request: { timeoutMs: args.timeoutMs } }
+          : toolName === 'start_vm_guest_agent_resident'
+            ? {
+                request: {
+                  timeoutMs: args.timeoutMs,
+                  hostPort: args.hostPort,
+                  guestPort: args.guestPort,
+                },
+              }
           : toolName === 'run_vm_guest_agent_action'
             ? {
                 request: {
@@ -417,6 +535,7 @@ export const executeAutonomousLearningFunctionCall = async ({
         url: args.url,
         backgroundTaskId: args.backgroundTaskId,
         timeoutMs: args.timeoutMs,
+        allowElevatedInstall: args.allowElevatedInstall,
       });
 
       if (!plan.ok) {
@@ -513,6 +632,51 @@ export const executeAutonomousLearningFunctionCall = async ({
         };
       }
 
+      if ((plan.requiresElevatedInstall || plan.requiresElevatedAgent) && !isVmGuestAgentElevated(diagnosis)) {
+        const message =
+          'Essa acao exige permissao administrativa dentro da VM. O agente atual nao esta elevado; inicie o agente residente como administrador na VM ou use um fluxo elevado controlado antes de executar.';
+        const nextState = appendAutonomousLog(
+          mergeAutonomousLearningState(autonomousState, {
+            vm: {
+              ...autonomousState.vm,
+              visualAgent: {
+                ...(autonomousState.vm?.visualAgent || {}),
+                online: true,
+                status: 'online',
+                capabilities:
+                  diagnosis?.artifacts?.capabilities ||
+                  diagnosis?.artifacts?.agentResponse?.result?.capabilities ||
+                  autonomousState.vm?.visualAgent?.capabilities ||
+                  {},
+                lastError: message,
+              },
+            },
+          }),
+          'vm_operational_task_blocked_elevation_required',
+          {
+            objective: args.objective || trustedUtterance,
+            kind: plan.kind,
+            appName: plan.app?.displayName || args.appName || '',
+            backgroundTaskId: plan.backgroundTaskId,
+            reason: 'elevated_agent_required',
+          },
+          { now },
+        );
+        return {
+          handled: true,
+          toolName,
+          response: {
+            ok: false,
+            message,
+            reason: 'elevated_agent_required',
+            plan,
+            ensureSteps,
+          },
+          statePatch: nextState,
+          memoryProcedures: [],
+        };
+      }
+
       const nativeResult = await invokeTool(plan.nativeTool, plan.nativeArgs);
       const followUpResults = [];
       if (nativeResult?.ok && Array.isArray(plan.followUpActions)) {
@@ -533,9 +697,8 @@ export const executeAutonomousLearningFunctionCall = async ({
         }
       }
       const followUpsOk = followUpResults.every((result) => result?.ok);
-      const finalOk = Boolean(nativeResult?.ok) && followUpsOk;
       let backgroundStatus = null;
-      if (finalOk && plan.backgroundTaskId && plan.kind === 'install_app') {
+      if (Boolean(nativeResult?.ok) && followUpsOk && plan.backgroundTaskId && plan.kind === 'install_app') {
         try {
           backgroundStatus = await invokeTool('run_vm_guest_agent_action', {
             request: {
@@ -553,6 +716,12 @@ export const executeAutonomousLearningFunctionCall = async ({
           };
         }
       }
+      const statusSource = plan.kind === 'check_background_task' ? nativeResult : backgroundStatus;
+      const backgroundSummary = statusSource ? summarizeBackgroundTaskResult(statusSource) : null;
+      const finalOk =
+        Boolean(nativeResult?.ok) &&
+        followUpsOk &&
+        (!backgroundSummary?.known || backgroundSummary.ok);
 
       const artifacts = nativeResult?.artifacts || {};
       const statusArtifacts = backgroundStatus?.artifacts || {};
@@ -610,19 +779,24 @@ export const executeAutonomousLearningFunctionCall = async ({
                     start: artifacts,
                     followUps: followUpResults.map((result) => result?.artifacts || result),
                     status: statusArtifacts,
+                    backgroundSummary,
                   },
                   createdAt: now,
                 },
               ]
             : autonomousState.vmTaskRuns || [],
         }),
-        finalOk ? 'vm_operational_task_finished' : 'vm_operational_task_failed',
+        vmOperationalLogType({ plan, finalOk, backgroundSummary }),
         {
           objective: args.objective || trustedUtterance,
           kind: plan.kind,
           appName: plan.app?.displayName || args.appName || '',
           backgroundTaskId: plan.backgroundTaskId,
-          reason: followUpResults.find((result) => !result?.ok)?.message || nativeResult?.message || '',
+          reason:
+            backgroundSummary?.message ||
+            followUpResults.find((result) => !result?.ok)?.message ||
+            nativeResult?.message ||
+            '',
         },
         { now },
       );
@@ -634,7 +808,8 @@ export const executeAutonomousLearningFunctionCall = async ({
           ok: finalOk,
           message: finalOk
             ? plan.message
-            : followUpResults.find((result) => !result?.ok)?.message ||
+            : backgroundSummary?.message ||
+              followUpResults.find((result) => !result?.ok)?.message ||
               nativeResult?.message ||
               'Tarefa operacional na VM falhou.',
           plan,
@@ -642,6 +817,7 @@ export const executeAutonomousLearningFunctionCall = async ({
           result: nativeResult,
           followUpResults,
           backgroundStatus,
+          backgroundSummary,
           nextAction: plan.backgroundTaskId
             ? `Use run_vm_operational_task com taskKind=check_background_task e backgroundTaskId=${plan.backgroundTaskId} para acompanhar.`
             : '',

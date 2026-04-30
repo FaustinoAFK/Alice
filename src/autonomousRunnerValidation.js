@@ -2,6 +2,9 @@ import { RUNNER_COMPLETION_TYPES } from './autonomousRunnerState';
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 
+const normalizeEvidenceToken = (value) =>
+  normalizeText(value).toLowerCase().replace(/[^a-z0-9]/g, '');
+
 const getExitCode = (executionResult = {}) => {
   const artifacts = executionResult.artifacts || {};
   const code = artifacts.statusCode ?? artifacts.exitCode ?? executionResult.exitCode;
@@ -12,18 +15,25 @@ const getExitCode = (executionResult = {}) => {
 };
 
 const hasRequiredEvidence = (step = {}, evidenceRefs = []) => {
-  const required = step.expectedEvidence?.required || [];
+  const required = (step.expectedEvidence?.required || [])
+    .filter((item) => normalizeEvidenceToken(item) !== 'validationresult');
   if (required.length === 0) {
     return evidenceRefs.length > 0;
   }
 
   return required.every((item) => {
-    const token = normalizeText(item).toLowerCase();
-    return evidenceRefs.some((ref) =>
-      normalizeText(ref.kind).toLowerCase().includes(token) ||
-      normalizeText(ref.label).toLowerCase().includes(token) ||
-      normalizeText(ref.path).toLowerCase().includes(token),
-    );
+    const token = normalizeEvidenceToken(item);
+    const acceptedTokens = token === 'validationresult' ? [token, 'validation'] : [token];
+    return evidenceRefs.some((ref) => {
+      const metadata = ref.metadata && typeof ref.metadata === 'object' ? ref.metadata : {};
+      const haystack = [
+        ref.kind,
+        ref.label,
+        ref.path,
+        ...Object.keys(metadata),
+      ].map(normalizeEvidenceToken);
+      return haystack.some((value) => acceptedTokens.some((acceptedToken) => value.includes(acceptedToken)));
+    });
   });
 };
 

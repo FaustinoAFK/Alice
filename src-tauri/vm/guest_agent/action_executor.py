@@ -4,6 +4,7 @@ import os
 import sys
 import time
 import uuid
+import ctypes
 
 from input_controller import click, hotkey, move_mouse, press_key, type_text
 from screen_capture import capture_screen
@@ -22,6 +23,15 @@ def _tail(path, max_chars=4000):
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         data = handle.read()
     return data[-max_chars:]
+
+
+def _is_elevated():
+    if os.name != "nt":
+        return os.geteuid() == 0 if hasattr(os, "geteuid") else False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
 
 
 def _status_path(background_task_id):
@@ -142,9 +152,11 @@ def execute_action(action, parameters):
     if action == "cancel_background_command":
         return cancel_background_command(parameters), None
     if action == "get_status":
+        is_elevated = _is_elevated()
         return {
             "online": True,
             "agent": "alice_guest_agent",
+            "is_elevated": is_elevated,
             "capabilities": {
                 "can_capture_screen": True,
                 "can_mouse": True,
@@ -153,6 +165,7 @@ def execute_action(action, parameters):
                 "can_type_clipboard_fallback": True,
                 "can_run_command": True,
                 "can_run_background_command": True,
+                "can_run_elevated_commands": is_elevated,
                 "can_poll_background_command": True,
                 "can_cancel_background_command": True,
                 "ocr_provider": "optional",

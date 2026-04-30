@@ -37,17 +37,16 @@ const buildProps = (overrides = {}) => ({
   ...overrides,
 });
 
-describe('AliceHud mind map lazy loading', () => {
+describe('AliceHud lazy loading', () => {
   it('renders the mind map tab with a suspense fallback instead of breaking navigation', () => {
     const html = renderToString(<AliceHud {...buildProps()} />);
 
     expect(html).toContain('Carregando mapa mental');
   });
 
-  it('renders the runner audit tab controls', () => {
+  it('renders the runner tab with a suspense fallback instead of loading the audit page eagerly', () => {
     const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'runner', debugHud: { runner: {} } })} />);
 
-    expect(html).toContain('Autonomous Task Runner');
-    expect(html).toContain('Ligar autonomia');
+    expect(html).toContain('Carregando runner autonomo');
   });
 });

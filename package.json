@@ -11,7 +11,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "test": "vitest run",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "runner:harness": "node scripts/runner-harness.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

@@ -119,6 +119,24 @@ export function DebugHudPage({ debugHud }) {
             <pre>{debugHud.memorySummary}</pre>
           </details>
         </section>
+
+        <section className="debug-hud__section">
+          <details open>
+            <summary>Persistencia</summary>
+            <DefinitionList
+              items={[
+                ['Memoria', `${debugHud.persistence?.memorySizeBytes || 0}/${debugHud.persistence?.memoryMaxBytes || 0} bytes`],
+                ['Uso', `${debugHud.persistence?.memoryPercentUsed || 0}%`],
+                ['Status', debugHud.persistence?.memoryStatus || '-'],
+                ['Perto do limite', debugHud.persistence?.memoryNearLimit ? 'sim' : 'nao'],
+                ['Ult. save memoria', debugHud.persistence?.lastMemorySaveAt || '-'],
+                ['Erro memoria', debugHud.persistence?.lastMemorySaveError || '-'],
+                ['Erro evidencia', debugHud.persistence?.lastRunnerEvidenceError || '-'],
+                ['Ult. erro', debugHud.persistence?.lastError || '-'],
+              ]}
+            />
+          </details>
+        </section>
       </div>
     </section>
   );

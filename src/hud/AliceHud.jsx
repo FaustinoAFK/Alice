@@ -1,14 +1,15 @@
 import { lazy, Suspense } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
-import { AutonomousRunnerHudPage } from './pages/AutonomousRunnerHudPage';
 import { AutonomyHudPage } from './pages/AutonomyHudPage';
 import { DebugHudPage } from './pages/DebugHudPage';
 import { KnowledgeHudPage } from './pages/KnowledgeHudPage';
 import { LiveHudPage } from './pages/LiveHudPage';
+import { AutonomousLearningHudPage } from './pages/AutonomousLearningHudPage';
 import { buildLiveActivity } from './hudViewModel';
 
 const MindMapHudPage = lazy(() => import('./pages/MindMapHudPage'));
+const AutonomousRunnerHudPage = lazy(() => import('./pages/AutonomousRunnerHudPage'));
 
 export function AliceHud({
   activeHudPage,
@@ -25,6 +26,7 @@ export function AliceHud({
   mindMapRevision,
   onMindMapChange,
   onApproveProposal,
+  onAutonomousLearningAction,
   onNavigate,
   onRejectProposal,
   onRunnerAction,
@@ -90,12 +92,21 @@ export function AliceHud({
           />
         ) : null}
 
-        {activeHudPage === 'runner' ? (
-          <AutonomousRunnerHudPage
+        {activeHudPage === 'learning' ? (
+          <AutonomousLearningHudPage
             debugHud={debugHud}
-            onRunnerAction={onRunnerAction}
-            runnerState={autonomousRunnerState}
+            onAutonomousLearningAction={onAutonomousLearningAction}
           />
+        ) : null}
+
+        {activeHudPage === 'runner' ? (
+          <Suspense fallback={<section className="hud-page hud-page-loading">Carregando runner autonomo...</section>}>
+            <AutonomousRunnerHudPage
+              debugHud={debugHud}
+              onRunnerAction={onRunnerAction}
+              runnerState={autonomousRunnerState}
+            />
+          </Suspense>
         ) : null}
 
         {activeHudPage === 'debug' ? <DebugHudPage debugHud={debugHud} /> : null}

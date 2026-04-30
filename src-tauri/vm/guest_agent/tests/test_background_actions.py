@@ -50,6 +50,17 @@ class BackgroundActionTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "background_task_not_found"):
                     execute_action("get_background_command_status", {"background_task_id": "missing"})
 
+    def test_status_reports_elevation_capability(self):
+        result, screenshot_id = execute_action("get_status", {})
+
+        self.assertIsNone(screenshot_id)
+        self.assertIn("is_elevated", result)
+        self.assertIsInstance(result["is_elevated"], bool)
+        self.assertEqual(
+            result["capabilities"]["can_run_elevated_commands"],
+            result["is_elevated"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,10 @@
 import { DefinitionList } from '../components/DefinitionList';
+import {
+  formatRunnerEvidencePhysicalStatus,
+  getRunnerQueueMove,
+  isTerminalRunnerTask,
+  sortRunnerTasksForHud,
+} from './runnerHudViewModel';
 
 const formatTime = (value) => {
   if (!value) {
@@ -15,8 +21,7 @@ const statusLabel = (status) => String(status || '-').replace(/_/g, ' ');
 
 export function AutonomousRunnerHudPage({ runnerState, debugHud, onRunnerAction }) {
   const runner = runnerState || {};
-  const tasks = Object.values(runner.tasksById || {})
-    .sort((left, right) => Number(left.queueRank || 0) - Number(right.queueRank || 0));
+  const tasks = sortRunnerTasksForHud(Object.values(runner.tasksById || {}));
   const activeTask = runner.activeTaskId ? runner.tasksById?.[runner.activeTaskId] : null;
   const activeStep = activeTask?.steps?.find((step) => step.status === 'running') ||
     activeTask?.steps?.find((step) => step.status !== 'done');
@@ -105,36 +110,51 @@ export function AutonomousRunnerHudPage({ runnerState, debugHud, onRunnerAction 
         <section className="debug-hud__section debug-hud__section--wide">
           <div className="section-header">
             <span>fila</span>
-            <strong>Prioridade, queueRank e controles</strong>
+            <strong>Ordem operacional: prioridade + queueRank</strong>
           </div>
           <div className="runner-task-list">
-            {tasks.length > 0 ? tasks.map((task) => (
-              <article key={task.id} className={`runner-task runner-task--${task.status}`}>
-                <div>
-                  <strong>{task.title}</strong>
-                  <span>{task.id}</span>
-                </div>
-                <div>
-                  <span>{statusLabel(task.status)}</span>
-                  <span>{task.priority}</span>
-                  <span>rank {task.queueRank}</span>
-                </div>
-                <div className="runner-task__actions">
-                  <button type="button" onClick={() => onRunnerAction?.('reorder_task', { taskId: task.id, queueRank: Number(task.queueRank || 0) - 1 })}>
-                    Subir
-                  </button>
-                  <button type="button" onClick={() => onRunnerAction?.('reorder_task', { taskId: task.id, queueRank: Number(task.queueRank || 0) + 1 })}>
-                    Descer
-                  </button>
-                  <button type="button" onClick={() => onRunnerAction?.('rerun_task', { taskId: task.id })}>
-                    Reexecutar
-                  </button>
-                  <button type="button" onClick={() => onRunnerAction?.('cancel_task', { taskId: task.id })}>
-                    Cancelar
-                  </button>
-                </div>
-              </article>
-            )) : <p className="empty-state">Nenhuma task no Runner.</p>}
+            {tasks.length > 0 ? tasks.map((task) => {
+              const terminalTask = isTerminalRunnerTask(task);
+              const moveUp = getRunnerQueueMove(tasks, task.id, 'up');
+              const moveDown = getRunnerQueueMove(tasks, task.id, 'down');
+
+              return (
+                <article key={task.id} className={`runner-task runner-task--${task.status}`}>
+                  <div>
+                    <strong>{task.title}</strong>
+                    <span>{task.id}</span>
+                  </div>
+                  <div>
+                    <span>{statusLabel(task.status)}</span>
+                    <span>priority {task.priority}</span>
+                    <span>rank {task.queueRank}</span>
+                    {terminalTask ? <span>historico</span> : <span>fila ativa</span>}
+                  </div>
+                  <div className="runner-task__actions">
+                    <button
+                      type="button"
+                      onClick={() => onRunnerAction?.('reorder_task', { taskId: task.id, queueRank: moveUp.queueRank })}
+                      disabled={!moveUp.canMove}
+                    >
+                      Subir
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onRunnerAction?.('reorder_task', { taskId: task.id, queueRank: moveDown.queueRank })}
+                      disabled={!moveDown.canMove}
+                    >
+                      Descer
+                    </button>
+                    <button type="button" onClick={() => onRunnerAction?.('rerun_task', { taskId: task.id })}>
+                      Reexecutar
+                    </button>
+                    <button type="button" onClick={() => onRunnerAction?.('cancel_task', { taskId: task.id })} disabled={terminalTask}>
+                      Cancelar
+                    </button>
+                  </div>
+                </article>
+              );
+            }) : <p className="empty-state">Nenhuma task no Runner.</p>}
           </div>
         </section>
 
@@ -154,10 +174,12 @@ export function AutonomousRunnerHudPage({ runnerState, debugHud, onRunnerAction 
             <strong>Refs leves para artefatos</strong>
           </div>
           <pre>{evidenceRefs.length ? evidenceRefs.map((ref) =>
-            `${ref.createdAt} | ${ref.kind} | ${ref.taskId}/${ref.stepId} | ${ref.path}`,
+            `${ref.createdAt} | ${formatRunnerEvidencePhysicalStatus(ref)} | ${ref.kind} | ${ref.taskId}/${ref.stepId} | ${ref.path}`,
           ).join('\n') : '-'}</pre>
         </section>
       </div>
     </section>
   );
 }
+
+export default AutonomousRunnerHudPage;

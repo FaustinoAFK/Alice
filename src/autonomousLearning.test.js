@@ -51,7 +51,10 @@ import {
   createEmptyAliceMemory,
   mergeValidatedProcedures,
 } from './aliceMemory';
-import { executeAutonomousLearningFunctionCall } from './autonomousLearningToolExecutor';
+import {
+  executeAutonomousLearningFunctionCall,
+  summarizeBackgroundTaskResult,
+} from './autonomousLearningToolExecutor';
 
 describe('autonomous learning policy', () => {
   it('pauses background work when a user request arrives', () => {
@@ -212,6 +215,32 @@ describe('VM visual interaction layer contracts', () => {
     ]);
   });
 
+  it('recognizes PowerShell admin requests as elevated VM app opens', () => {
+    const plan = createVmOperationalTaskPlan({
+      objective: 'abra Windows PowerShell como administrador na VM',
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.kind).toBe('open_app');
+    expect(plan.app.displayName).toBe('Windows PowerShell');
+    expect(plan.requiresElevatedAgent).toBe(true);
+    expect(plan.nativeArgs.request.parameters.args).toEqual([
+      '/c',
+      'start',
+      '',
+      'powershell.exe',
+    ]);
+  });
+
+  it('recognizes common speech transcription misspelling for PowerShell', () => {
+    const plan = createVmOperationalTaskPlan({
+      objective: 'abra Windows Power Shelf na VM',
+    });
+
+    expect(plan.ok).toBe(true);
+    expect(plan.app.displayName).toBe('Windows PowerShell');
+  });
+
   it('blocks unknown VM install tasks with a clear reason instead of searching forever', () => {
     const plan = createVmOperationalTaskPlan({
       objective: 'baixe aquele aplicativo estranho na VM',
@@ -220,6 +249,51 @@ describe('VM visual interaction layer contracts', () => {
 
     expect(plan.ok).toBe(false);
     expect(plan.reason).toBe('unknown_app_install_command');
+  });
+
+  it('marks known elevated VM installers without relying on install dictionary permission', () => {
+    const app = resolveVmApp('instale Oracle VirtualBox na VM');
+    const plan = createVmOperationalTaskPlan({
+      objective: 'instale Oracle VirtualBox na VM',
+      taskKind: 'install_app',
+    });
+    const explicitCommandPlan = createVmOperationalTaskPlan({
+      objective: 'instale VirtualBox na VM',
+      taskKind: 'install_app',
+      command: 'Oracle.VirtualBox',
+    });
+
+    expect(app.displayName).toBe('Oracle VirtualBox');
+    expect(plan.ok).toBe(true);
+    expect(plan.requiresElevatedInstall).toBe(true);
+    expect(plan.requiresSupervision).toBe(true);
+    expect(plan.suggestedCommand).toContain('Oracle.VirtualBox');
+    expect(explicitCommandPlan.ok).toBe(true);
+    expect(explicitCommandPlan.requiresElevatedInstall).toBe(true);
+  });
+
+  it('summarizes failed background VM tasks as operational failures', () => {
+    const summary = summarizeBackgroundTaskResult({
+      ok: true,
+      artifacts: {
+        agentResponse: {
+          result: {
+            status: 'failed',
+            exit_code: 1602,
+            background_task_id: 'task-1',
+          },
+        },
+      },
+    });
+
+    expect(summary).toMatchObject({
+      known: true,
+      ok: false,
+      status: 'failed',
+      terminal: true,
+      exitCode: 1602,
+      backgroundTaskId: 'task-1',
+    });
   });
 
   it('records coordinate fallback only with reason and screenshot evidence', () => {
@@ -949,7 +1023,185 @@ describe('autonomous learning tool executor', () => {
       ok: true,
       provider: 'virtualbox',
     });
-    expect(result.statePatch.logs.at(-1).type).toBe('vm_operational_task_finished');
+    expect(result.response.backgroundSummary).toMatchObject({
+      known: true,
+      ok: true,
+      status: 'running',
+      terminal: false,
+    });
+    expect(result.statePatch.logs.at(-1).type).toBe('vm_operational_task_started');
+  });
+
+  it('blocks elevated VM installs until the guest agent itself is elevated', async () => {
+    const calls = [];
+    const invokeTool = async (name, payload) => {
+      calls.push([name, payload]);
+      if (name === 'diagnose_vm_guest_agent') {
+        return {
+          ok: true,
+          message: 'Agente online sem elevacao.',
+          artifacts: {
+            guestAgentOnline: true,
+            agentResponse: {
+              result: {
+                is_elevated: false,
+                capabilities: { can_run_background_command: true, can_run_elevated_commands: false },
+              },
+            },
+            capabilities: { can_run_background_command: true, can_run_elevated_commands: false },
+          },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+
+    const result = await executeAutonomousLearningFunctionCall({
+      functionCall: {
+        name: 'run_vm_operational_task',
+        args: {
+          objective: 'instale VirtualBox na VM',
+          taskKind: 'install_app',
+        },
+      },
+      invokeTool,
+      now: 5332,
+    });
+
+    expect(result.response.ok).toBe(false);
+    expect(result.response.reason).toBe('elevated_agent_required');
+    expect(result.response.plan.requiresElevatedInstall).toBe(true);
+    expect(result.statePatch.logs.at(-1).type).toBe('vm_operational_task_blocked_elevation_required');
+    expect(calls.some(([name]) => name === 'run_vm_guest_agent_action')).toBe(false);
+  });
+
+  it('allows elevated VM installs when the guest agent reports elevated capability', async () => {
+    const calls = [];
+    const invokeTool = async (name, payload) => {
+      calls.push([name, payload]);
+      if (name === 'diagnose_vm_guest_agent') {
+        return {
+          ok: true,
+          message: 'Agente elevado online.',
+          artifacts: {
+            guestAgentOnline: true,
+            agentResponse: {
+              result: {
+                is_elevated: true,
+                capabilities: { can_run_background_command: true, can_run_elevated_commands: true },
+              },
+            },
+            capabilities: { can_run_background_command: true, can_run_elevated_commands: true },
+          },
+        };
+      }
+      if (name === 'run_vm_guest_agent_action' && payload.request.action === 'start_background_command') {
+        return {
+          ok: true,
+          message: 'Background elevado iniciado.',
+          artifacts: {
+            taskId: payload.request.taskId,
+            provider: 'virtualbox',
+            vmName: 'AliceVM',
+            action: 'start_background_command',
+          },
+        };
+      }
+      if (name === 'run_vm_guest_agent_action' && payload.request.action === 'get_background_command_status') {
+        return {
+          ok: true,
+          message: 'Status carregado.',
+          artifacts: {
+            agentResponse: {
+              result: {
+                status: 'running',
+                background_task_id: payload.request.parameters.background_task_id,
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+
+    const result = await executeAutonomousLearningFunctionCall({
+      functionCall: {
+        name: 'run_vm_operational_task',
+        args: {
+          objective: 'instale VirtualBox na VM',
+          taskKind: 'install_app',
+        },
+      },
+      invokeTool,
+      now: 5333,
+    });
+
+    const startCall = calls.find(
+      ([name, payload]) =>
+        name === 'run_vm_guest_agent_action' &&
+        payload.request.action === 'start_background_command',
+    );
+
+    expect(result.response.ok).toBe(true);
+    expect(result.response.plan.requiresElevatedInstall).toBe(true);
+    expect(startCall[1].request.parameters.args).toEqual(expect.arrayContaining(['Oracle.VirtualBox']));
+    expect(result.statePatch.logs.at(-1).type).toBe('vm_operational_task_started');
+  });
+
+  it('reports background VM status failures without treating the status fetch as success', async () => {
+    const calls = [];
+    const invokeTool = async (name, payload) => {
+      calls.push([name, payload]);
+      if (name === 'diagnose_vm_guest_agent') {
+        return {
+          ok: true,
+          message: 'Agente online.',
+          artifacts: {
+            guestAgentOnline: true,
+            capabilities: { can_poll_background_command: true },
+          },
+        };
+      }
+      if (name === 'run_vm_guest_agent_action' && payload.request.action === 'get_background_command_status') {
+        return {
+          ok: true,
+          message: 'Status carregado.',
+          artifacts: {
+            agentResponse: {
+              result: {
+                status: 'failed',
+                exit_code: 1602,
+                background_task_id: payload.request.parameters.background_task_id,
+              },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+
+    const result = await executeAutonomousLearningFunctionCall({
+      functionCall: {
+        name: 'run_vm_operational_task',
+        args: {
+          objective: 'verifique o status da instalação',
+          taskKind: 'check_background_task',
+          backgroundTaskId: 'vm-bg-install',
+        },
+      },
+      invokeTool,
+      now: 5335,
+    });
+
+    expect(result.response.ok).toBe(false);
+    expect(result.response.backgroundSummary).toMatchObject({
+      known: true,
+      ok: false,
+      status: 'failed',
+      exitCode: 1602,
+    });
+    expect(result.response.message).toContain('status=failed');
+    expect(result.statePatch.logs.at(-1).type).toBe('vm_operational_task_failed');
+    expect(result.statePatch.vm.visualAgent.status).toBe('error');
   });
 
   it('opens Notepad and types requested text through official VM operational flow', async () => {

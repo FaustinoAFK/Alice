@@ -24,12 +24,18 @@ const GEMINI_LIVE_WS_ENDPOINT: &str =
     "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const MAX_TARGET_CHARS: usize = 120;
 const MAX_TYPE_TEXT_CHARS: usize = 10_000;
-const MAX_MEMORY_JSON_BYTES: usize = 262_144;
+const MAX_MEMORY_JSON_BYTES: usize = 52_428_800;
 const MAX_RUNNER_EVIDENCE_TEXT_BYTES: usize = 1_048_576;
 const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
 const MAX_SHELL_OUTPUT_CHARS: usize = 12_000;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 10_000;
-const MAX_SHELL_TIMEOUT_MS: u64 = 60_000;
+const MAX_SHELL_TIMEOUT_MS: u64 = 600_000;
+const RUNNER_EVIDENCE_FILE_NAMES: [&str; 4] = [
+    "metadata.json",
+    "stdout.txt",
+    "stderr.txt",
+    "validation.json",
+];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +106,13 @@ struct RunnerEvidencePersistRequest {
     stderr: Option<String>,
     validation: Option<Value>,
     metadata: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunnerEvidenceVerifyRequest {
+    execution_id: String,
+    files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -2059,6 +2072,125 @@ fn bounded_runner_evidence_text(value: Option<String>) -> String {
     text.chars().take(MAX_RUNNER_EVIDENCE_TEXT_BYTES).collect()
 }
 
+fn normalize_runner_evidence_file_names(files: Option<Vec<String>>) -> Result<Vec<String>, String> {
+    let source = files.unwrap_or_else(|| {
+        RUNNER_EVIDENCE_FILE_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    });
+    let mut normalized = Vec::new();
+
+    for raw_file in source {
+        let file = raw_file.trim();
+        if file.is_empty()
+            || file.contains('/')
+            || file.contains('\\')
+            || file == "."
+            || file == ".."
+            || !RUNNER_EVIDENCE_FILE_NAMES.contains(&file)
+        {
+            return Err(format!("Arquivo de evidencia do Runner nao permitido: {raw_file}"));
+        }
+        if !normalized.iter().any(|existing| existing == file) {
+            normalized.push(file.to_string());
+        }
+    }
+
+    if normalized.is_empty() {
+        return Err("Nenhum arquivo de evidencia do Runner foi informado.".to_string());
+    }
+
+    Ok(normalized)
+}
+
+fn runner_evidence_root(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("data").join("evidence")
+}
+
+fn verify_runner_evidence_in_dir(
+    app_data_dir: &Path,
+    request: RunnerEvidenceVerifyRequest,
+) -> Result<Value, String> {
+    if request.execution_id.trim().is_empty() {
+        return Err("executionId da evidencia do Runner e obrigatorio.".to_string());
+    }
+
+    let execution_id = sanitize_runner_evidence_segment(&request.execution_id);
+    let expected_files = normalize_runner_evidence_file_names(request.files)?;
+    let evidence_root = runner_evidence_root(app_data_dir);
+    let evidence_dir = evidence_root.join(&execution_id);
+    let mut files = Vec::new();
+    let mut existing_files = Vec::new();
+    let mut missing_files = Vec::new();
+    let mut unavailable_files = Vec::new();
+
+    for file in &expected_files {
+        let path = evidence_dir.join(file);
+        if !path.starts_with(&evidence_dir) {
+            return Err("Caminho de evidencia do Runner saiu do diretorio esperado.".to_string());
+        }
+
+        match fs::metadata(&path) {
+            Ok(metadata) if metadata.is_file() => {
+                existing_files.push(file.clone());
+                files.push(json!({
+                    "file": file,
+                    "exists": true,
+                    "sizeBytes": metadata.len()
+                }));
+            }
+            Ok(_) => {
+                missing_files.push(file.clone());
+                files.push(json!({
+                    "file": file,
+                    "exists": false,
+                    "sizeBytes": Value::Null,
+                    "reason": "not_a_file"
+                }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing_files.push(file.clone());
+                files.push(json!({
+                    "file": file,
+                    "exists": false,
+                    "sizeBytes": Value::Null
+                }));
+            }
+            Err(error) => {
+                unavailable_files.push(file.clone());
+                files.push(json!({
+                    "file": file,
+                    "exists": false,
+                    "sizeBytes": Value::Null,
+                    "reason": error.to_string()
+                }));
+            }
+        }
+    }
+
+    let status = if !unavailable_files.is_empty() {
+        "unavailable"
+    } else if missing_files.is_empty() {
+        "ok"
+    } else if existing_files.is_empty() {
+        "missing"
+    } else {
+        "partial"
+    };
+
+    Ok(json!({
+        "executionId": execution_id,
+        "status": status,
+        "expectedFiles": expected_files,
+        "files": files,
+        "existingFiles": existing_files,
+        "missingFiles": missing_files,
+        "unavailableFiles": unavailable_files,
+        "relativeDir": format!("data/evidence/{execution_id}")
+    }))
+}
+
 #[tauri::command]
 fn save_runner_evidence(
     app: tauri::AppHandle,
@@ -2112,6 +2244,35 @@ fn save_runner_evidence(
     })
 }
 
+#[tauri::command]
+fn verify_runner_evidence(
+    app: tauri::AppHandle,
+    request: RunnerEvidenceVerifyRequest,
+) -> Result<NativeCommandResult, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    let artifacts = verify_runner_evidence_in_dir(&app_data_dir, request)?;
+    let status = artifacts
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unavailable");
+
+    Ok(NativeCommandResult {
+        ok: status == "ok",
+        message: match status {
+            "ok" => "Evidencia fisica do Runner confirmada.".to_string(),
+            "partial" => "Evidencia fisica do Runner parcialmente ausente.".to_string(),
+            "missing" => "Evidencia fisica do Runner ausente.".to_string(),
+            _ => "Evidencia fisica do Runner indisponivel para verificacao.".to_string(),
+        },
+        stdout: None,
+        stderr: None,
+        artifacts: Some(artifacts),
+    })
+}
+
 #[cfg(test)]
 fn desktop_commands_enabled() -> bool {
     cfg!(feature = "desktop-commands")
@@ -2140,12 +2301,14 @@ pub fn run() {
         load_alice_memory_json,
         save_alice_memory_json,
         save_runner_evidence,
+        verify_runner_evidence,
         local_vm::get_local_vm_status,
         local_vm::diagnose_local_vm_setup,
         local_vm::run_local_vm_guest_task,
         local_vm::run_local_vm_smoke_test,
         vm_visual::install_vm_guest_agent,
         vm_visual::diagnose_vm_guest_agent,
+        vm_visual::start_vm_guest_agent_resident,
         vm_visual::run_vm_guest_agent_action,
         vm_visual::capture_vm_guest_screen,
         vm_visual::run_vm_visual_smoke_test,
@@ -2172,12 +2335,14 @@ pub fn run() {
         load_alice_memory_json,
         save_alice_memory_json,
         save_runner_evidence,
+        verify_runner_evidence,
         local_vm::get_local_vm_status,
         local_vm::diagnose_local_vm_setup,
         local_vm::run_local_vm_guest_task,
         local_vm::run_local_vm_smoke_test,
         vm_visual::install_vm_guest_agent,
         vm_visual::diagnose_vm_guest_agent,
+        vm_visual::start_vm_guest_agent_resident,
         vm_visual::run_vm_guest_agent_action,
         vm_visual::capture_vm_guest_screen,
         vm_visual::run_vm_visual_smoke_test,
@@ -2468,6 +2633,89 @@ mod tests {
             read_memory_json(&memory_path),
             Ok(Some("{\"ok\":false}".to_string()))
         );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn normalize_runner_evidence_file_names_rejects_path_traversal() {
+        assert!(normalize_runner_evidence_file_names(Some(vec![
+            "../metadata.json".to_string()
+        ]))
+        .is_err());
+        assert!(normalize_runner_evidence_file_names(Some(vec![
+            "metadata.json".to_string(),
+            "stdout.txt".to_string(),
+        ]))
+        .is_ok());
+    }
+
+    #[test]
+    fn verify_runner_evidence_reports_ok_for_existing_files() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "alice-runner-evidence-ok-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let execution_id = "runner-exec-test-ok";
+        let evidence_dir = runner_evidence_root(&base_dir).join(execution_id);
+        fs::create_dir_all(&evidence_dir).unwrap();
+        fs::write(evidence_dir.join("metadata.json"), "{}").unwrap();
+        fs::write(evidence_dir.join("stdout.txt"), "ok").unwrap();
+
+        let summary = verify_runner_evidence_in_dir(
+            &base_dir,
+            RunnerEvidenceVerifyRequest {
+                execution_id: execution_id.to_string(),
+                files: Some(vec!["metadata.json".to_string(), "stdout.txt".to_string()]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(summary["status"], "ok");
+        assert_eq!(summary["existingFiles"].as_array().unwrap().len(), 2);
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn verify_runner_evidence_reports_partial_and_missing_files() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "alice-runner-evidence-missing-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let execution_id = "runner-exec-test-partial";
+        let evidence_dir = runner_evidence_root(&base_dir).join(execution_id);
+        fs::create_dir_all(&evidence_dir).unwrap();
+        fs::write(evidence_dir.join("metadata.json"), "{}").unwrap();
+
+        let partial = verify_runner_evidence_in_dir(
+            &base_dir,
+            RunnerEvidenceVerifyRequest {
+                execution_id: execution_id.to_string(),
+                files: Some(vec!["metadata.json".to_string(), "validation.json".to_string()]),
+            },
+        )
+        .unwrap();
+        let missing = verify_runner_evidence_in_dir(
+            &base_dir,
+            RunnerEvidenceVerifyRequest {
+                execution_id: "runner-exec-test-missing".to_string(),
+                files: Some(vec!["metadata.json".to_string()]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(partial["status"], "partial");
+        assert_eq!(partial["missingFiles"][0], "validation.json");
+        assert_eq!(missing["status"], "missing");
 
         let _ = fs::remove_dir_all(&base_dir);
     }

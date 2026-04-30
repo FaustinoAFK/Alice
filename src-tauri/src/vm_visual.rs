@@ -12,8 +12,11 @@ use super::{truncate_shell_output, NativeCommandResult, MAX_SHELL_TIMEOUT_MS};
 const DEFAULT_VISUAL_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_GUEST_AGENT_DIR: &str = r"C:\AliceGuestAgent";
 const DEFAULT_GUEST_PYTHON: &str = "python.exe";
+const DEFAULT_RESIDENT_AGENT_PORT: u16 = 38_948;
+const RESIDENT_AGENT_NAT_RULE_NAME: &str = "alice-guest-agent";
 const AGENT_FILES: &[(&str, &str)] = &[
     ("agent.py", include_str!("../vm/guest_agent/agent.py")),
+    ("server.py", include_str!("../vm/guest_agent/server.py")),
     ("protocol.py", include_str!("../vm/guest_agent/protocol.py")),
     (
         "screen_capture.py",
@@ -68,6 +71,14 @@ pub struct VmVisualTimeoutRequest {
     timeout_ms: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmResidentAgentRequest {
+    timeout_ms: Option<u64>,
+    host_port: Option<u16>,
+    guest_port: Option<u16>,
+}
+
 #[derive(Debug, Clone)]
 struct VmVisualState {
     provider: String,
@@ -90,6 +101,25 @@ fn env_value_any(names: &[&str]) -> String {
         .map(|name| env_value(name))
         .find(|value| !value.is_empty())
         .unwrap_or_default()
+}
+
+fn env_bool(name: &str, default: bool) -> bool {
+    let value = env_value(name);
+    if value.is_empty() {
+        return default;
+    }
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn env_u16(name: &str, default: u16) -> u16 {
+    env_value(name)
+        .parse::<u16>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 fn command_available(command: &str, args: &[&str]) -> bool {
@@ -298,7 +328,7 @@ fn run_type_text_with_host_fallback(
     correlation_id: &str,
     timeout_ms: u64,
 ) -> Result<(Value, String, String, Option<i32>, bool), String> {
-    let (mut agent_response, mut stdout, mut stderr, mut status_code) = run_agent_request(
+    let (mut agent_response, mut stdout, mut stderr, mut status_code, _transport) = run_agent_request(
         state,
         build_agent_request(
             "type_text",
@@ -307,6 +337,7 @@ fn run_type_text_with_host_fallback(
             correlation_id,
         ),
         timeout_ms,
+        true,
     )?;
     let success = agent_response
         .get("success")
@@ -487,12 +518,223 @@ fn parse_agent_stdout(stdout: &str) -> Result<Value, String> {
         .ok_or_else(|| format!("Guest agent nao retornou JSON valido. stdout={stdout}"))
 }
 
+fn resident_agent_enabled() -> bool {
+    env_bool("ALICE_VM_GUEST_AGENT_RESIDENT", true)
+}
+
+fn resident_agent_host_port() -> u16 {
+    env_u16("ALICE_VM_GUEST_AGENT_HOST_PORT", DEFAULT_RESIDENT_AGENT_PORT)
+}
+
+fn resident_agent_guest_port() -> u16 {
+    env_u16("ALICE_VM_GUEST_AGENT_GUEST_PORT", DEFAULT_RESIDENT_AGENT_PORT)
+}
+
+fn resident_agent_token() -> String {
+    env_value("ALICE_VM_GUEST_AGENT_TOKEN")
+}
+
+fn build_resident_agent_url(host_port: u16, path: &str) -> String {
+    format!(
+        "http://127.0.0.1:{}{}",
+        host_port,
+        if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        }
+    )
+}
+
+fn build_nat_port_forward_rule(name: &str, host_port: u16, guest_port: u16) -> String {
+    format!("{name},tcp,127.0.0.1,{host_port},,{guest_port}")
+}
+
+fn configure_resident_agent_port_forward(
+    state: &VmVisualState,
+    host_port: u16,
+    guest_port: u16,
+    timeout_ms: u64,
+) -> Result<(), String> {
+    let mut delete = Command::new(&state.vboxmanage_path);
+    delete.args([
+        "controlvm",
+        &state.vm_name,
+        "natpf1",
+        "delete",
+        RESIDENT_AGENT_NAT_RULE_NAME,
+    ]);
+    let _ = run_command_capture(delete, timeout_ms);
+
+    let rule = build_nat_port_forward_rule(
+        RESIDENT_AGENT_NAT_RULE_NAME,
+        host_port,
+        guest_port,
+    );
+    let mut add = Command::new(&state.vboxmanage_path);
+    add.args(["controlvm", &state.vm_name, "natpf1", &rule]);
+    let (ok, _stdout, stderr, _status_code) = run_command_capture(add, timeout_ms)?;
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "Nao foi possivel configurar port-forward do agente residente: {stderr}"
+        ))
+    }
+}
+
+fn resident_agent_health(host_port: u16, timeout_ms: u64) -> Result<Value, String> {
+    let token = resident_agent_token();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms.clamp(250, 2_000)))
+        .build()
+        .map_err(|error| format!("Falha ao criar cliente do agente residente: {error}"))?;
+    let mut request = client.get(build_resident_agent_url(host_port, "/health"));
+    if !token.is_empty() {
+        request = request.header("X-Alice-Agent-Token", token);
+    }
+    let response = request
+        .send()
+        .map_err(|error| format!("Agente residente nao respondeu healthcheck: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .map_err(|error| format!("Falha ao ler healthcheck do agente residente: {error}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "Healthcheck do agente residente retornou HTTP {}: {}",
+            status.as_u16(),
+            body
+        ));
+    }
+    serde_json::from_str::<Value>(&body)
+        .map_err(|error| format!("Healthcheck do agente residente retornou JSON invalido: {error}"))
+}
+
+fn run_resident_agent_request(
+    request: &Value,
+    host_port: u16,
+    timeout_ms: u64,
+) -> Result<(Value, String, String, Option<i32>), String> {
+    let token = resident_agent_token();
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .build()
+        .map_err(|error| format!("Falha ao criar cliente do agente residente: {error}"))?;
+    let mut http_request = client
+        .post(build_resident_agent_url(host_port, "/v1/action"))
+        .header("Content-Type", "application/json")
+        .body(request.to_string());
+    if !token.is_empty() {
+        http_request = http_request.header("X-Alice-Agent-Token", token);
+    }
+    let response = http_request
+        .send()
+        .map_err(|error| format!("Agente residente indisponivel: {error}"))?;
+    let status_code = Some(i32::from(response.status().as_u16()));
+    let body = response
+        .text()
+        .map_err(|error| format!("Falha ao ler resposta do agente residente: {error}"))?;
+    let parsed = serde_json::from_str::<Value>(&body).map_err(|error| {
+        format!("Agente residente retornou JSON invalido: {error}. body={body}")
+    })?;
+    Ok((parsed, body, String::new(), status_code))
+}
+
+fn start_resident_agent(
+    state: &VmVisualState,
+    host_port: u16,
+    guest_port: u16,
+    timeout_ms: u64,
+) -> Result<Value, String> {
+    validate_ready(state)?;
+    install_agent_files(state, timeout_ms)?;
+    configure_resident_agent_port_forward(state, host_port, guest_port, timeout_ms)?;
+
+    let server_path = format!(r"{}\server.py", state.guest_agent_dir);
+    let guest_port_arg = guest_port.to_string();
+    let token = resident_agent_token();
+    let args = if token.is_empty() {
+        vec![
+            server_path.as_str(),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            guest_port_arg.as_str(),
+        ]
+    } else {
+        vec![
+            server_path.as_str(),
+            "--host",
+            "0.0.0.0",
+            "--port",
+            guest_port_arg.as_str(),
+            "--token",
+            token.as_str(),
+        ]
+    };
+    let _ = vbox_guest_start(state, &state.guest_python, &args, timeout_ms)?;
+
+    let deadline = std::time::Instant::now()
+        .checked_add(Duration::from_millis(timeout_ms.min(10_000)))
+        .unwrap_or_else(std::time::Instant::now);
+    let mut last_error = String::new();
+    while std::time::Instant::now() < deadline {
+        match resident_agent_health(host_port, 750) {
+            Ok(health) => return Ok(health),
+            Err(error) => {
+                last_error = error;
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+
+    Err(format!(
+        "Agente residente nao ficou pronto dentro do timeout: {last_error}"
+    ))
+}
+
 fn run_agent_request(
     state: &VmVisualState,
     request: Value,
     timeout_ms: u64,
-) -> Result<(Value, String, String, Option<i32>), String> {
+    allow_resident_start: bool,
+) -> Result<(Value, String, String, Option<i32>, String), String> {
     validate_ready(state)?;
+    if resident_agent_enabled() {
+        let host_port = resident_agent_host_port();
+        match run_resident_agent_request(&request, host_port, timeout_ms) {
+            Ok((response, stdout, stderr, status_code)) => {
+                return Ok((
+                    response,
+                    stdout,
+                    stderr,
+                    status_code,
+                    "resident_http".to_string(),
+                ));
+            }
+            Err(first_error) => {
+                let guest_port = resident_agent_guest_port();
+                if allow_resident_start
+                    && start_resident_agent(state, host_port, guest_port, timeout_ms).is_ok()
+                {
+                    if let Ok((response, stdout, stderr, status_code)) =
+                        run_resident_agent_request(&request, host_port, timeout_ms)
+                    {
+                        return Ok((
+                            response,
+                            stdout,
+                            stderr,
+                            status_code,
+                            "resident_http_started".to_string(),
+                        ));
+                    }
+                }
+                log::debug!("Agente residente indisponivel; fallback guestcontrol: {first_error}");
+            }
+        }
+    }
+
     let encoded = base64::engine::general_purpose::STANDARD.encode(request.to_string());
     let agent_path = format!(r"{}\agent.py", state.guest_agent_dir);
     let (ok, stdout, stderr, status_code) = vbox_guest_run(
@@ -521,9 +763,10 @@ fn run_agent_request(
             stdout,
             stderr,
             status_code,
+            "guestcontrol_run".to_string(),
         ));
     }
-    Ok((parsed, stdout, stderr, status_code))
+    Ok((parsed, stdout, stderr, status_code, "guestcontrol_run".to_string()))
 }
 
 #[tauri::command]
@@ -566,9 +809,9 @@ pub fn install_vm_guest_agent(
 pub fn diagnose_vm_guest_agent() -> Result<NativeCommandResult, String> {
     let state = read_state();
     let request = build_agent_request("get_status", json!({}), "diagnostic", "diagnostic");
-    let result = run_agent_request(&state, request, DEFAULT_VISUAL_TIMEOUT_MS);
+    let result = run_agent_request(&state, request, DEFAULT_VISUAL_TIMEOUT_MS, false);
     match result {
-        Ok((agent_response, stdout, stderr, status_code)) => {
+        Ok((agent_response, stdout, stderr, status_code, transport)) => {
             let success = agent_response
                 .get("success")
                 .and_then(Value::as_bool)
@@ -589,6 +832,9 @@ pub fn diagnose_vm_guest_agent() -> Result<NativeCommandResult, String> {
                     "guestPython": state.guest_python,
                     "guestAgentOnline": success,
                     "statusCode": status_code,
+                    "transport": transport,
+                    "residentAgentEnabled": resident_agent_enabled(),
+                    "residentAgentHostPort": resident_agent_host_port(),
                     "agentResponse": agent_response,
                     "capabilities": agent_response.get("result").and_then(|value| value.get("capabilities")).cloned().unwrap_or_else(|| json!({})),
                 })),
@@ -606,6 +852,63 @@ pub fn diagnose_vm_guest_agent() -> Result<NativeCommandResult, String> {
                 "guestPython": state.guest_python,
                 "guestAgentOnline": false,
                 "requiresInstall": true,
+                "error": error,
+            })),
+        }),
+    }
+}
+
+#[tauri::command]
+pub fn start_vm_guest_agent_resident(
+    request: Option<VmResidentAgentRequest>,
+) -> Result<NativeCommandResult, String> {
+    let state = read_state();
+    let request = request.unwrap_or(VmResidentAgentRequest {
+        timeout_ms: None,
+        host_port: None,
+        guest_port: None,
+    });
+    let timeout_ms = request.timeout_ms.unwrap_or(DEFAULT_VISUAL_TIMEOUT_MS);
+    if timeout_ms == 0 || timeout_ms > MAX_SHELL_TIMEOUT_MS {
+        return Err(format!(
+            "Timeout do agente visual residente fora do limite: {timeout_ms}ms."
+        ));
+    }
+    let host_port = request.host_port.unwrap_or_else(resident_agent_host_port);
+    let guest_port = request.guest_port.unwrap_or_else(resident_agent_guest_port);
+    match start_resident_agent(&state, host_port, guest_port, timeout_ms) {
+        Ok(health) => Ok(NativeCommandResult {
+            ok: true,
+            message: "Guest Interaction Agent residente online.".to_string(),
+            stdout: Some(health.to_string()),
+            stderr: None,
+            artifacts: Some(json!({
+                "provider": state.provider,
+                "vmName": state.vm_name,
+                "guestAgentDir": state.guest_agent_dir,
+                "guestPython": state.guest_python,
+                "guestAgentOnline": true,
+                "residentAgentOnline": true,
+                "residentAgentHostPort": host_port,
+                "residentAgentGuestPort": guest_port,
+                "transport": "resident_http",
+                "health": health,
+            })),
+        }),
+        Err(error) => Ok(NativeCommandResult {
+            ok: false,
+            message: format!("Nao foi possivel iniciar agente residente: {error}"),
+            stdout: None,
+            stderr: Some(error.clone()),
+            artifacts: Some(json!({
+                "provider": state.provider,
+                "vmName": state.vm_name,
+                "guestAgentDir": state.guest_agent_dir,
+                "guestPython": state.guest_python,
+                "guestAgentOnline": false,
+                "residentAgentOnline": false,
+                "residentAgentHostPort": host_port,
+                "residentAgentGuestPort": guest_port,
                 "error": error,
             })),
         }),
@@ -635,8 +938,8 @@ pub fn run_vm_guest_agent_action(
         &task_id,
         &correlation_id,
     );
-    let (mut agent_response, mut stdout, mut stderr, mut status_code) =
-        run_agent_request(&state, agent_request, timeout_ms)?;
+    let (mut agent_response, mut stdout, mut stderr, mut status_code, mut transport) =
+        run_agent_request(&state, agent_request, timeout_ms, true)?;
     let mut success = agent_response
         .get("success")
         .and_then(Value::as_bool)
@@ -657,6 +960,7 @@ pub fn run_vm_guest_agent_action(
             stderr = fallback.2;
             status_code = fallback.3;
             host_input_fallback = fallback.4;
+            transport = "host_keyboard_fallback".to_string();
             success = agent_response
                 .get("success")
                 .and_then(Value::as_bool)
@@ -706,6 +1010,9 @@ pub fn run_vm_guest_agent_action(
             "vmName": state.vm_name,
             "isRealVm": true,
             "executionMode": "real_vm_visual",
+            "transport": transport,
+            "residentAgentEnabled": resident_agent_enabled(),
+            "residentAgentHostPort": resident_agent_host_port(),
             "guestAgentOnline": true,
             "action": action,
             "hostInputFallback": host_input_fallback,
@@ -763,6 +1070,7 @@ pub fn run_vm_visual_smoke_test(
         &state,
         build_agent_request("capture_screen", json!({}), &task_id, &task_id),
         timeout_ms,
+        true,
     )?;
     let typed_ok = typed
         .0
@@ -867,5 +1175,25 @@ mod tests {
         );
         assert_eq!(extract_type_text_value(&json!({"text": ""})), None);
         assert_eq!(extract_type_text_value(&json!({"value": "missing"})), None);
+    }
+
+    #[test]
+    fn resident_agent_url_is_loopback_only() {
+        assert_eq!(
+            build_resident_agent_url(38948, "/health"),
+            "http://127.0.0.1:38948/health"
+        );
+        assert_eq!(
+            build_resident_agent_url(38948, "v1/action"),
+            "http://127.0.0.1:38948/v1/action"
+        );
+    }
+
+    #[test]
+    fn resident_nat_rule_uses_named_localhost_forward() {
+        assert_eq!(
+            build_nat_port_forward_rule("alice-guest-agent", 38948, 38949),
+            "alice-guest-agent,tcp,127.0.0.1,38948,,38949"
+        );
     }
 }

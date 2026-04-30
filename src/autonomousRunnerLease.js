@@ -8,6 +8,7 @@ import {
   normalizeAutonomousRunnerState,
   transitionAutonomousRunnerStep,
   transitionAutonomousRunnerTask,
+  updateAutonomousRunnerStep,
   updateAutonomousRunnerTask,
 } from './autonomousRunnerState';
 
@@ -172,9 +173,26 @@ export const releaseRunnerLease = (
     return normalizedRunner;
   }
 
+  const releasedTaskRunner = updateAutonomousRunnerTask(normalizedRunner, lock.activeTaskId, {
+    leaseId: null,
+    runningStartedAt: null,
+    heartbeatAt: null,
+    activeStepId: null,
+    updatedAt: now,
+  });
+  const releasedStepRunner = updateAutonomousRunnerStep(
+    releasedTaskRunner,
+    lock.activeTaskId,
+    lock.activeStepId,
+    (step) => step.status === 'running'
+      ? { ...step, status: 'waiting_retry', reason }
+      : step,
+    { now },
+  );
+
   return appendAutonomousRunnerAudit(
     {
-      ...normalizedRunner,
+      ...releasedStepRunner,
       runnerState: normalizedRunner.enabled ? RUNNER_STATES.IDLE : RUNNER_STATES.IDLE,
       activeTaskId: null,
       runnerLock: null,
@@ -230,6 +248,18 @@ export const recoverAutonomousTasksOnStartup = (
           ? new Date(Date.parse(now) + 5000).toISOString()
           : task.nextRunAt,
       });
+      task.steps
+        .filter((step) => step.status === 'running')
+        .forEach((step) => {
+          nextRunner = updateAutonomousRunnerStep(nextRunner, task.id, step.id, {
+            status: nextStatus === RUNNER_TASK_STATUSES.FAILED ? 'failed' : 'waiting_retry',
+            reason: RUNNER_REASONS.STALE_RUNNING_TASK,
+            nextRunAt: nextStatus === RUNNER_TASK_STATUSES.WAITING_RETRY
+              ? new Date(Date.parse(now) + 5000).toISOString()
+              : step.nextRunAt,
+            finishedAt: now,
+          });
+        });
       recovered = true;
     }
   });

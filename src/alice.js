@@ -30,6 +30,7 @@ export const ALICE_SYSTEM_INSTRUCTION = [
   'Para controle visual dentro da VM real, use Guest Interaction Layer: diagnostique/instale o agente, capture screenshot, execute acao visual e valide com replay. Nunca use fallback local fingindo controle visual de VM.',
   'Quando o usuario pedir algo operacional dentro da VM como abrir aplicativo, digitar texto em aplicativo aberto, instalar, baixar, testar um programa ou acompanhar progresso, use run_vm_operational_task antes de pesquisar. Pesquisa so entra para descobrir um comando/id ausente ou explicar erro real.',
   'Para downloads/instalacoes longas dentro da VM, prefira run_vm_operational_task com taskKind=install_app; ele inicia em background e devolve backgroundTaskId. Depois acompanhe com taskKind=check_background_task. Nao espere instaladores grandes em chamadas sincronas curtas.',
+  'Se uma instalacao exigir elevacao/UAC, so execute automaticamente quando o Guest Interaction Agent reportar capacidade elevada; caso contrario informe que precisa iniciar o agente/fluxo elevado dentro da VM. Acompanhe status real se houver backgroundTaskId.',
   'Para tarefas grandes com varios passos, fila, retry, evidencias e validacao continua, use manage_autonomous_runner para enfileirar e controlar o Autonomous Task Runner. Nao trate task planned/running como concluida sem evidencia validada.',
   'Acoes visuais dentro da VM passam pelo DecisionEngine/policy; coordenadas sao fallback e precisam de motivo, screenshot antes/depois e validacao.',
   'No PC real, qualquer acao relevante precisa considerar snapshot, diff, validacao e rollback antes de aplicar.',
@@ -255,6 +256,18 @@ export const ALICE_LIVE_TOOLS = [
         },
       },
       {
+        name: 'start_vm_guest_agent_resident',
+        description: 'Inicia o Guest Interaction Agent visual em modo residente na VM para reduzir latencia de acoes repetidas. Mantem fallback por guestcontrol quando indisponivel.',
+        parameters: {
+          type: 'OBJECT',
+          properties: {
+            timeoutMs: { type: 'NUMBER', minimum: 1, maximum: 60000 },
+            hostPort: { type: 'NUMBER', minimum: 1, maximum: 65535 },
+            guestPort: { type: 'NUMBER', minimum: 1, maximum: 65535 },
+          },
+        },
+      },
+      {
         name: 'capture_vm_guest_screen',
         description: 'Captura uma screenshot real dentro da VM via Guest Interaction Agent e coleta a imagem para o host.',
         parameters: {
@@ -291,7 +304,7 @@ export const ALICE_LIVE_TOOLS = [
       },
       {
         name: 'run_vm_operational_task',
-        description: 'Executa uma tarefa operacional de alto nivel dentro da VM real: abrir aplicativo, instalar/baixar app via winget em background, abrir URL, capturar tela, consultar ou cancelar progresso. Use para pedidos praticos na VM antes de pesquisar.',
+        description: 'Executa uma tarefa operacional de alto nivel dentro da VM real: abrir aplicativo, instalar/baixar app via winget em background quando seguro, abrir URL, capturar tela, consultar ou cancelar progresso. Instaladores que exigem elevacao/UAC podem ser bloqueados para supervisao em vez de rodar em background.',
         parameters: {
           type: 'OBJECT',
           properties: {
@@ -306,7 +319,7 @@ export const ALICE_LIVE_TOOLS = [
             },
             appName: {
               type: 'STRING',
-              description: 'Nome do aplicativo quando houver, por exemplo Visual Studio Code, Visual Studio Community, Explorador de Arquivos, Notepad, Edge.',
+              description: 'Nome do aplicativo quando houver, por exemplo Visual Studio Code, Visual Studio Community, VirtualBox, Explorador de Arquivos, Notepad, Edge.',
             },
             command: {
               type: 'STRING',
