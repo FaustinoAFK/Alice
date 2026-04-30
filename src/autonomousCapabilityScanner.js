@@ -4,7 +4,64 @@ const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ')
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
 
-const hasBrowserSearchProcedure = (procedures = []) =>
+const FOUNDATION_CAPABILITY_GAPS = [
+  {
+    gapId: 'gap-browser-search-address-bar',
+    type: 'browser_search',
+    capability: 'browser.search',
+    description: 'Alice nao tem procedimento confiavel para pesquisar usando a barra do navegador.',
+    priority: 'high',
+    evidenceKey: 'procedural_memory_missing_browser_search',
+    keywords: ['browser.search', 'barra', 'pesquis', 'address bar', 'ctrl+l'],
+  },
+  {
+    gapId: 'gap-text-input-focused-field',
+    type: 'text_input',
+    capability: 'text.input',
+    description: 'Alice nao tem procedimento confiavel para digitar texto em um campo focado e validar o valor inserido.',
+    priority: 'high',
+    evidenceKey: 'procedural_memory_missing_text_input',
+    keywords: ['text.input', 'digitar', 'campo focado', 'type text', 'keyboard_type_text'],
+  },
+  {
+    gapId: 'gap-page-load-validation',
+    type: 'page_validation',
+    capability: 'page.validate',
+    description: 'Alice nao tem procedimento confiavel para validar se uma pagina carregou pelo titulo, URL ou conteudo.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_page_validation',
+    keywords: ['page.validate', 'validar pagina', 'titulo', 'url', 'content_loaded'],
+  },
+  {
+    gapId: 'gap-app-launch-safe',
+    type: 'app_launch',
+    capability: 'app.launch',
+    description: 'Alice nao tem procedimento confiavel para abrir um aplicativo seguro em ambiente controlado e validar que iniciou.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_app_launch',
+    keywords: ['app.launch', 'abrir aplicativo', 'process_started', 'janela'],
+  },
+  {
+    gapId: 'gap-text-field-interaction',
+    type: 'field_interaction',
+    capability: 'field.interaction',
+    description: 'Alice nao tem procedimento confiavel para focar, preencher e validar um campo de texto em UI controlada.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_field_interaction',
+    keywords: ['field.interaction', 'campo de texto', 'focus field', 'field_value_changed'],
+  },
+  {
+    gapId: 'gap-page-read-content',
+    type: 'page_read',
+    capability: 'page.read',
+    description: 'Alice nao tem procedimento confiavel para extrair e validar conteudo textual de uma pagina em ambiente controlado.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_page_read',
+    keywords: ['page.read', 'ler pagina', 'extrair conteudo', 'content_marker'],
+  },
+];
+
+const hasTrustedProcedureForCapability = (procedures = [], capability = {}) =>
   procedures.some((procedure) => {
     const haystack = normalizeLower([
       procedure.procedureId,
@@ -16,11 +73,8 @@ const hasBrowserSearchProcedure = (procedures = []) =>
     return (
       ['active', 'guarded', 'validated'].includes(procedure.status || '') &&
       Number(procedure.confidence || 0) >= 0.6 &&
-      (haystack.includes('browser.search') ||
-        haystack.includes('barra') ||
-        haystack.includes('pesquis') ||
-        haystack.includes('address bar') ||
-        haystack.includes('ctrl+l'))
+      normalizeArray([capability.capability, ...(capability.keywords || [])])
+        .some((keyword) => haystack.includes(normalizeLower(keyword)))
     );
   });
 
@@ -73,24 +127,27 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
   const knownGapSet = existingGapIds(memory.autonomousLearning);
   const gaps = [];
 
-  if (!hasBrowserSearchProcedure(procedures)) {
+  FOUNDATION_CAPABILITY_GAPS.forEach((capability) => {
+    if (hasTrustedProcedureForCapability(procedures, capability)) {
+      return;
+    }
     gaps.push(createGap({
-      gapId: 'gap-browser-search-address-bar',
-      type: 'browser_search',
-      capability: 'browser.search',
-      description: 'Alice nao tem procedimento confiavel para pesquisar usando a barra do navegador.',
-      priority: 'high',
+      gapId: capability.gapId,
+      type: capability.type,
+      capability: capability.capability,
+      description: capability.description,
+      priority: capability.priority,
       evidence: [
-        'procedural_memory_missing_browser_search',
+        capability.evidenceKey,
         candidates.length ? `learning_candidates=${candidates.length}` : 'no_learning_candidates',
       ],
       riskLevel: 'low',
-      firstSeenAt: knownGapSet.has('gap-browser-search-address-bar')
-        ? memory.autonomousLearning?.knownGaps?.find((gap) => gap.gapId === 'gap-browser-search-address-bar')?.firstSeenAt || now
+      firstSeenAt: knownGapSet.has(capability.gapId)
+        ? memory.autonomousLearning?.knownGaps?.find((gap) => gap.gapId === capability.gapId)?.firstSeenAt || now
         : now,
       lastSeenAt: now,
     }, { policy }));
-  }
+  });
 
   procedures
     .filter((procedure) => Number(procedure.confidence || 0) > 0 && Number(procedure.confidence || 0) < 0.45)

@@ -16,7 +16,10 @@ import {
 import { validateLearningExperimentTask } from './autonomousLearningValidator';
 import { promoteLearningValidation } from './autonomousProcedurePromoter';
 import { validateSynthesizedScript } from './autonomousScriptSynthesizer';
-import { actionViolatesAutonomousLearningPolicy } from './autonomousLearningPolicy';
+import {
+  actionViolatesAutonomousLearningPolicy,
+  countRecentLearningExperiments,
+} from './autonomousLearningPolicy';
 import { resolveProcedureReuseForGap } from './autonomousProcedureReuseEngine';
 import { createProcedureVariantVersion } from './autonomousProcedureVersioning';
 import { acquireRunnerLease } from './autonomousRunnerLease';
@@ -91,7 +94,76 @@ describe('autonomous learning loop governance', () => {
     });
 
     expect(scan.gaps.some((gap) => gap.gapId === 'gap-browser-search-address-bar')).toBe(true);
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-text-input-focused-field')).toBe(true);
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-page-load-validation')).toBe(true);
     expect(scan.gaps[0].suggestedExperiments).toContain('ctrl_l_address_bar');
+  });
+
+  it('scanner suppresses foundational gaps when guarded procedures already cover them', () => {
+    const memory = {
+      ...createEmptyAliceMemory(),
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        promotedProcedures: [
+          {
+            procedureId: 'procedure_browser_search',
+            title: 'Pesquisar no navegador',
+            summary: 'Usa browser.search com Ctrl+L.',
+            status: 'guarded',
+            confidence: 0.66,
+            capabilities: ['browser.search'],
+          },
+          {
+            procedureId: 'procedure_text_input',
+            title: 'Digitar em campo focado',
+            summary: 'Cobre text.input e field_value_changed.',
+            status: 'guarded',
+            confidence: 0.7,
+            capabilities: ['text.input'],
+          },
+        ],
+      },
+    };
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-browser-search-address-bar')).toBe(false);
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-text-input-focused-field')).toBe(false);
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-page-load-validation')).toBe(true);
+  });
+
+  it('rate limit counts only unique unprocessed task_created experiment records', () => {
+    const nowMs = Date.parse('2026-04-30T10:30:00.000Z');
+    const recentExperiments = [
+      {
+        taskId: 'learning-1',
+        status: 'task_created',
+        createdAt: '2026-04-30T10:00:00.000Z',
+      },
+      {
+        taskId: 'learning-1',
+        status: 'validated',
+        updatedAt: '2026-04-30T10:05:00.000Z',
+      },
+      {
+        taskId: 'learning-2',
+        status: 'task_created',
+        createdAt: '2026-04-30T10:10:00.000Z',
+      },
+      {
+        taskId: 'learning-2',
+        status: 'task_created',
+        createdAt: '2026-04-30T10:11:00.000Z',
+      },
+      {
+        taskId: 'learning-old',
+        status: 'task_created',
+        createdAt: '2026-04-30T08:00:00.000Z',
+      },
+    ];
+
+    expect(countRecentLearningExperiments(recentExperiments, { nowMs })).toBe(1);
   });
 
   it('scanner ignores successful Runner audit events when looking for failure gaps', () => {

@@ -141,10 +141,28 @@ export const actionViolatesAutonomousLearningPolicy = ({
 };
 
 export const countRecentLearningExperiments = (recentExperiments = [], { nowMs = Date.now(), windowMs = 3600000 } = {}) =>
-  normalizeArray(recentExperiments).filter((experiment) => {
-    const timestamp = Date.parse(experiment.createdAt || experiment.startedAt || experiment.updatedAt || '');
-    return Number.isFinite(timestamp) && nowMs - timestamp <= windowMs;
-  }).length;
+  (() => {
+    const experiments = normalizeArray(recentExperiments);
+    const terminalTaskIds = new Set(experiments
+      .filter((experiment) => ['validated', 'rejected', 'promoted'].includes(normalizeText(experiment.status)))
+      .map((experiment) => normalizeText(experiment.taskId))
+      .filter(Boolean));
+    const countedTaskIds = new Set();
+    return experiments.filter((experiment) => {
+      const taskId = normalizeText(experiment.taskId);
+      if (normalizeText(experiment.status) !== 'task_created' || terminalTaskIds.has(taskId)) {
+        return false;
+      }
+      if (taskId && countedTaskIds.has(taskId)) {
+        return false;
+      }
+      if (taskId) {
+        countedTaskIds.add(taskId);
+      }
+      const timestamp = Date.parse(experiment.createdAt || experiment.startedAt || experiment.updatedAt || '');
+      return Number.isFinite(timestamp) && nowMs - timestamp <= windowMs;
+    }).length;
+  })();
 
 export const canStartAutonomousLearningCycle = ({
   memoryHydrated = false,
