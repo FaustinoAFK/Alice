@@ -7,11 +7,38 @@ const normalizeEvidenceToken = (value) =>
 
 const getExitCode = (executionResult = {}) => {
   const artifacts = executionResult.artifacts || {};
-  const code = artifacts.statusCode ?? artifacts.exitCode ?? executionResult.exitCode;
+  const agentResponse = artifacts.agentResponse || {};
+  const agentResult = agentResponse.result || {};
+  const agentSuccessExitCode = agentResponse.success === true
+    ? 0
+    : agentResponse.success === false
+      ? 1
+      : undefined;
+  const code = agentResult.exit_code ??
+    agentResult.exitCode ??
+    agentSuccessExitCode ??
+    artifacts.statusCode ??
+    artifacts.exitCode ??
+    executionResult.exitCode;
   if (Number.isFinite(Number(code))) {
     return Number(code);
   }
   return executionResult.ok ? 0 : 1;
+};
+
+const getExecutionOutput = (executionResult = {}) => {
+  const artifacts = executionResult.artifacts || {};
+  const agentResponse = artifacts.agentResponse || {};
+  const agentResult = agentResponse.result || {};
+  return [
+    executionResult.stdout,
+    executionResult.stderr,
+    agentResult.stdout,
+    agentResult.stderr,
+    agentResponse.stdout,
+    agentResponse.stderr,
+    agentResponse.success !== undefined ? JSON.stringify(agentResponse) : '',
+  ].map(normalizeText).filter(Boolean).join('\n');
 };
 
 const hasRequiredEvidence = (step = {}, evidenceRefs = []) => {
@@ -52,7 +79,7 @@ export const validateRunnerCompletionCriteria = ({
   }
 
   const exitCode = getExitCode(executionResult);
-  const output = `${normalizeText(executionResult.stdout)}\n${normalizeText(executionResult.stderr)}`;
+  const output = getExecutionOutput(executionResult);
   const evidenceOk = hasRequiredEvidence(step, evidenceRefs);
   let criterionPassed = false;
   let reason = '';
@@ -114,8 +141,8 @@ export const validateRunnerCompletionCriteria = ({
     ],
     commandResult: {
       exitCode,
-      stdout: normalizeText(executionResult.stdout).slice(0, 1000),
-      stderr: normalizeText(executionResult.stderr).slice(0, 1000),
+      stdout: output.slice(0, 1000),
+      stderr: normalizeText(executionResult.stderr || executionResult.artifacts?.agentResponse?.result?.stderr).slice(0, 1000),
     },
   };
 };

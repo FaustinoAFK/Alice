@@ -1,9 +1,24 @@
 import { createAutonomousReuseTask } from './autonomousLearningPlanner';
-import { normalizeAutonomousLearningPolicy } from './autonomousLearningPolicy';
+import {
+  AUTONOMOUS_REUSE_CREATED_BY,
+  normalizeAutonomousLearningPolicy,
+} from './autonomousLearningPolicy';
 import { matchProceduresForNeed } from './autonomousProcedureMatcher';
 import { canReuseProcedureAutomatically } from './autonomousReusePolicy';
 
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
+const normalizeText = (value) => String(value || '').trim();
+
+const reuseAlreadyAttempted = ({ memory = {}, gap = {}, procedureId = '' } = {}) => {
+  const gapId = normalizeText(gap.gapId);
+  const targetProcedureId = normalizeText(procedureId);
+  return Object.values(memory.autonomousRunner?.tasksById || {}).some((task) =>
+    task.metadata?.createdBy === AUTONOMOUS_REUSE_CREATED_BY &&
+    normalizeText(task.metadata?.gapId) === gapId &&
+    normalizeText(task.metadata?.procedureId || task.procedureId) === targetProcedureId &&
+    ['planned', 'ready', 'running', 'waiting_retry', 'blocked', 'done'].includes(task.status),
+  );
+};
 
 export const resolveProcedureReuseForGap = ({
   gap = {},
@@ -30,6 +45,15 @@ export const resolveProcedureReuseForGap = ({
     return {
       ok: false,
       reason: matches.length ? 'matches_not_reusable_by_policy' : 'no_reusable_procedure',
+      matches,
+      task: null,
+    };
+  }
+  if (reuseAlreadyAttempted({ memory, gap, procedureId: reusable.procedureId })) {
+    return {
+      ok: false,
+      reason: 'reuse_already_attempted_for_gap',
+      match: reusable,
       matches,
       task: null,
     };

@@ -1,4 +1,6 @@
 import {
+  createEmptyAutonomousLearningMemoryState,
+  createEmptyAutonomousOptimizationMemoryState,
   enqueueAutonomousRunnerMemoryTask,
   getAutonomousLearningMemoryState,
   getAutonomousOptimizationMemoryState,
@@ -23,7 +25,7 @@ import { validateLearningExperimentTask } from './autonomousLearningValidator';
 import { promoteLearningValidation } from './autonomousProcedurePromoter';
 import { resolveProcedureReuseForGap } from './autonomousProcedureReuseEngine';
 import { planProcedureOptimizationTasks } from './autonomousProcedureOptimizer';
-import { rebuildProcedureReuseIndex } from './autonomousReuseIndex';
+import { normalizeProcedureReuseIndex, rebuildProcedureReuseIndex } from './autonomousReuseIndex';
 import {
   RUNNER_STEP_STATUSES,
   RUNNER_TASK_STATUSES,
@@ -45,6 +47,24 @@ const createdBySet = new Set([
   AUTONOMOUS_REUSE_CREATED_BY,
   AUTONOMOUS_OPTIMIZER_CREATED_BY,
 ]);
+
+const learnedSourceSet = new Set([
+  ...createdBySet,
+  'autonomous_learning_loop',
+  'autonomous_learning',
+  'autonomous_procedure_reuse',
+  'autonomous_procedure_optimizer',
+]);
+
+const isLearnedProcedure = (procedure = {}, learnedProcedureIds = new Set()) => {
+  const procedureId = normalizeText(procedure.procedureId || procedure.id);
+  const source = normalizeText(procedure.source || procedure.metadata?.createdBy || procedure.createdBy);
+  return (
+    (procedureId && learnedProcedureIds.has(procedureId)) ||
+    learnedSourceSet.has(source) ||
+    source.startsWith('autonomous_')
+  );
+};
 
 export const isRunnerSafeForAutonomousLearning = (runner = {}) => {
   const normalizedRunner = normalizeAutonomousRunnerState(runner);
@@ -91,16 +111,43 @@ const activeLoopTasks = (runner = {}) =>
 const isTerminalExperimentRecord = (experiment = {}) =>
   ['validated', 'rejected', 'promoted'].includes(normalizeText(experiment.status));
 
-const completedUnprocessedLearningTasks = (runner = {}, learningState = {}) => {
+const terminalUnprocessedTasksByCreatedBy = (runner = {}, learningState = {}, createdBy = '') => {
   const processed = new Set(
     normalizeArray(learningState.recentExperiments)
       .filter(isTerminalExperimentRecord)
       .map((experiment) => experiment.taskId),
   );
   return Object.values(normalizeAutonomousRunnerState(runner).tasksById)
-    .filter((task) => task.metadata?.createdBy === AUTONOMOUS_LEARNING_CREATED_BY)
-    .filter((task) => task.status === RUNNER_TASK_STATUSES.DONE)
+    .filter((task) => task.metadata?.createdBy === createdBy)
+    .filter((task) => TERMINAL_TASK_STATUSES.has(task.status))
     .filter((task) => !processed.has(task.id));
+};
+
+const terminalUnprocessedLearningTasks = (runner = {}, learningState = {}) =>
+  terminalUnprocessedTasksByCreatedBy(runner, learningState, AUTONOMOUS_LEARNING_CREATED_BY);
+
+const terminalUnprocessedReuseTasks = (runner = {}, learningState = {}) =>
+  terminalUnprocessedTasksByCreatedBy(runner, learningState, AUTONOMOUS_REUSE_CREATED_BY);
+
+const recentlyRejectedGapIds = (learningState = {}, { nowMs = Date.now(), windowMs = 3600000 } = {}) =>
+  new Set(
+    normalizeArray(learningState.recentExperiments)
+      .filter((experiment) => normalizeText(experiment.status) === 'rejected')
+      .filter((experiment) => {
+        const timestamp = Date.parse(experiment.updatedAt || experiment.createdAt || '');
+        return Number.isFinite(timestamp) && nowMs - timestamp <= windowMs;
+      })
+      .map((experiment) => normalizeText(experiment.gapId))
+      .filter(Boolean),
+  );
+
+export const shouldRunAutonomousLearningAfterRunnerTick = ({ result = null, task = null } = {}) => {
+  const completedTask = task || result?.task || null;
+  return Boolean(
+    completedTask &&
+    createdBySet.has(completedTask.metadata?.createdBy) &&
+    TERMINAL_TASK_STATUSES.has(completedTask.status),
+  );
 };
 
 const buildVerificationAdapter = (verifyRunnerEvidence) => {
@@ -108,6 +155,73 @@ const buildVerificationAdapter = (verifyRunnerEvidence) => {
     return verifyRunnerEvidence;
   }
   return null;
+};
+
+const withRealVmEnvironment = (procedure = {}, validation = {}, now = new Date().toISOString()) => ({
+  ...procedure,
+  environment: 'real_vm',
+  environments: [...new Set([
+    ...normalizeArray(procedure.environments),
+    normalizeText(procedure.environment),
+    'real_vm',
+  ].filter(Boolean))],
+  confidence: Math.min(1, Math.max(Number(procedure.confidence || 0), 0.62) + 0.02),
+  evidenceRefs: [
+    ...normalizeArray(procedure.evidenceRefs),
+    ...normalizeArray(validation.evidenceRefs).map((ref) => ({
+      id: ref.id,
+      executionId: ref.executionId,
+      taskId: ref.taskId,
+      stepId: ref.stepId,
+      path: ref.path,
+      kind: ref.kind,
+      physicalStatus: ref.metadata?.physicalStatus || ref.metadata?.persistence?.status || 'ok',
+    })),
+  ].slice(-12),
+  usageCount: Number(procedure.usageCount || 0) + 1,
+  successCount: Number(procedure.successCount || 0) + 1,
+  lastUsedAt: now,
+  updatedAt: now,
+});
+
+const reinforceProcedureFromReuse = ({ memory, task = {}, validation = {}, now } = {}) => {
+  const procedureId = normalizeText(task.metadata?.procedureId || task.procedureId);
+  if (!procedureId || !validation.ok) {
+    return memory;
+  }
+  const updateList = (items = []) =>
+    normalizeArray(items).map((procedure) =>
+      normalizeText(procedure.procedureId) === procedureId
+        ? withRealVmEnvironment(procedure, validation, now)
+        : procedure);
+
+  return {
+    ...memory,
+    proceduralMemory: {
+      ...(memory.proceduralMemory || {}),
+      procedures: updateList(memory.proceduralMemory?.procedures),
+    },
+    autonomousLearning: {
+      ...(memory.autonomousLearning || {}),
+      promotedProcedures: updateList(memory.autonomousLearning?.promotedProcedures),
+    },
+    autonomousAudit: {
+      ...(memory.autonomousAudit || {}),
+      procedures: updateList(memory.autonomousAudit?.procedures),
+      learningMemoryEvents: [
+        ...normalizeArray(memory.autonomousAudit?.learningMemoryEvents),
+        {
+          eventId: `reuse-reinforcement-${Date.parse(now) || Date.now()}`,
+          type: 'procedure_reuse_reinforced',
+          procedureId,
+          taskId: task.id,
+          evidenceRefs: normalizeArray(validation.evidenceRefs).map((ref) => ref.id || ref.path),
+          createdAt: now,
+        },
+      ].slice(-60),
+      updatedAt: now,
+    },
+  };
 };
 
 const processCompletedLearningTasks = async ({
@@ -118,7 +232,7 @@ const processCompletedLearningTasks = async ({
   let nextMemory = pruneAliceMemory(memory);
   let learningState = getAutonomousLearningMemoryState(nextMemory);
   const runner = getAutonomousRunnerState(nextMemory);
-  const tasks = completedUnprocessedLearningTasks(runner, learningState).slice(0, learningState.policy.maxPromotionsPerRun || 2);
+  const tasks = terminalUnprocessedLearningTasks(runner, learningState).slice(0, learningState.policy.maxPromotionsPerRun || 2);
   const promotions = [];
 
   for (const task of tasks) {
@@ -178,6 +292,54 @@ const processCompletedLearningTasks = async ({
     nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
   }
 
+  const reuseTasks = terminalUnprocessedReuseTasks(runner, learningState).slice(0, learningState.policy.maxPromotionsPerRun || 2);
+  for (const task of reuseTasks) {
+    const validation = await validateLearningExperimentTask({
+      runner,
+      task,
+      verifyRunnerEvidence: buildVerificationAdapter(verifyRunnerEvidence),
+      now,
+    });
+    if (validation.ok) {
+      nextMemory = reinforceProcedureFromReuse({ memory: nextMemory, task, validation, now });
+      learningState = getAutonomousLearningMemoryState(nextMemory);
+    }
+    const experimentRecord = {
+      experimentId: `experiment-${task.id}`,
+      taskId: task.id,
+      gapId: task.metadata?.gapId || '',
+      createdBy: task.metadata?.createdBy || AUTONOMOUS_REUSE_CREATED_BY,
+      procedureId: task.metadata?.procedureId || '',
+      status: validation.ok ? 'validated' : 'rejected',
+      reason: validation.reason,
+      evidenceRefs: normalizeArray(validation.evidenceRefs).map((ref) => ref.id || ref.path),
+      updatedAt: now,
+    };
+    learningState = appendLearningAudit({
+      ...learningState,
+      recentExperiments: [
+        ...normalizeArray(learningState.recentExperiments),
+        experimentRecord,
+      ].slice(-60),
+      stats: {
+        ...(learningState.stats || {}),
+        reuseValidated: Number(learningState.stats?.reuseValidated || 0) + (validation.ok ? 1 : 0),
+        reuseRejected: Number(learningState.stats?.reuseRejected || 0) + (validation.ok ? 0 : 1),
+      },
+    }, {
+      timestamp: now,
+      type: validation.ok ? 'procedure_reuse_validated' : 'procedure_reuse_rejected',
+      summary: validation.ok ? 'Reuso de procedimento validado na VM.' : 'Reuso de procedimento recusado.',
+      reason: validation.reason,
+      metadata: {
+        taskId: task.id,
+        gapId: task.metadata?.gapId || '',
+        procedureId: task.metadata?.procedureId || '',
+      },
+    });
+    nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
+  }
+
   return {
     memory: nextMemory,
     promotions,
@@ -215,7 +377,7 @@ export const runAutonomousLearningLoop = async ({
   const runner = getAutonomousRunnerState(nextMemory);
   const runnerSafety = isRunnerSafeForAutonomousLearning(runner);
   const policy = normalizeAutonomousLearningPolicy(learningState.policy);
-  const canStart = canStartAutonomousLearningCycle({
+  const initialCanStart = canStartAutonomousLearningCycle({
     memoryHydrated,
     runnerSafe: runnerSafety.ok,
     hasRunnerLock: Boolean(runner.runnerLock),
@@ -226,20 +388,22 @@ export const runAutonomousLearningLoop = async ({
     nowMs,
   });
 
+  const hardBlocked = !initialCanStart.ok && initialCanStart.reason !== 'learning_rate_limited';
+
   learningState = appendLearningAudit(learningState, {
     timestamp: now,
     type: 'learning_loop_checked',
-    summary: canStart.ok ? 'Loop de aprendizado autorizado.' : 'Loop de aprendizado nao iniciou.',
-    reason: canStart.reason,
+    summary: hardBlocked ? 'Loop de aprendizado nao iniciou.' : 'Loop de aprendizado autorizado para verificar pendencias.',
+    reason: initialCanStart.reason,
     metadata: { startup, runnerSafety },
   });
   nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
 
-  if (!canStart.ok) {
+  if (hardBlocked) {
     return {
       ok: true,
       started: false,
-      reason: canStart.reason,
+      reason: initialCanStart.reason,
       memory: nextMemory,
       createdTasks: [],
       promotions: [],
@@ -254,6 +418,52 @@ export const runAutonomousLearningLoop = async ({
   });
   nextMemory = processed.memory;
   learningState = getAutonomousLearningMemoryState(nextMemory);
+
+  const canStart = canStartAutonomousLearningCycle({
+    memoryHydrated,
+    runnerSafe: runnerSafety.ok,
+    hasRunnerLock: Boolean(runner.runnerLock),
+    hasRunningTasks: !runnerSafety.ok,
+    recoveryPending: false,
+    policy,
+    recentExperiments: learningState.recentExperiments,
+    nowMs,
+  });
+
+  if (!canStart.ok) {
+    const scan = scanAutonomousCapabilityGaps(nextMemory, { policy, now });
+    learningState = getAutonomousLearningMemoryState(nextMemory);
+    learningState = appendLearningAudit({
+      ...learningState,
+      lastScanAt: now,
+      knownGaps: scan.gaps,
+      stats: {
+        ...(learningState.stats || {}),
+        scans: Number(learningState.stats?.scans || 0) + 1,
+        gapsDetected: scan.gaps.length,
+      },
+    }, {
+      timestamp: now,
+      type: 'learning_loop_idle',
+      summary: processed.promotions.length
+        ? 'Pendencias de aprendizado foram consolidadas; novas tasks aguardam limite seguro.'
+        : 'Loop de aprendizado nao criou novas tasks.',
+      reason: canStart.reason,
+      metadata: {
+        promotions: processed.promotions.map((promotion) => promotion.procedure?.procedureId || ''),
+      },
+    });
+    nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
+    return {
+      ok: true,
+      started: processed.promotions.length > 0,
+      reason: canStart.reason,
+      memory: nextMemory,
+      createdTasks: [],
+      promotions: processed.promotions,
+      gaps: learningState.knownGaps || [],
+    };
+  }
 
   if (activeLoopTasks(getAutonomousRunnerState(nextMemory)).length > 0) {
     learningState = appendLearningAudit(learningState, {
@@ -306,10 +516,14 @@ export const runAutonomousLearningLoop = async ({
 
   const dryRunEffective = dryRun ?? policy.dryRunDefault;
   const createdTasks = [];
+  const rejectedGapCooldown = recentlyRejectedGapIds(learningState, { nowMs });
   if (!dryRunEffective) {
     for (const gap of knownGaps.slice(0, policy.maxExperimentsPerStartup)) {
       if (createdTasks.length >= policy.maxTasksCreatedPerRun) {
         break;
+      }
+      if (rejectedGapCooldown.has(gap.gapId)) {
+        continue;
       }
       const reuse = resolveProcedureReuseForGap({ gap, memory: nextMemory, policy, now });
       if (reuse.ok && reuse.task) {
@@ -328,6 +542,8 @@ export const runAutonomousLearningLoop = async ({
       const optimizationState = getAutonomousOptimizationMemoryState(nextMemory);
       const plannedOptimizations = planProcedureOptimizationTasks({
         procedures: nextMemory.proceduralMemory?.procedures || [],
+        existingTasks: Object.values(getAutonomousRunnerState(nextMemory).tasksById),
+        optimizationState,
         now,
       }).slice(0, policy.maxTasksCreatedPerRun - createdTasks.length);
       plannedOptimizations.forEach(({ task, procedure, variant, benchmark }) => {
@@ -358,6 +574,22 @@ export const runAutonomousLearningLoop = async ({
   }
 
   learningState = getAutonomousLearningMemoryState(nextMemory);
+  const completionAuditType = dryRunEffective
+    ? 'learning_loop_dry_run'
+    : createdTasks.length > 0
+      ? 'learning_loop_completed'
+      : 'learning_loop_idle';
+  const completionAuditReason = dryRunEffective
+    ? 'dry_run'
+    : createdTasks.length > 0
+      ? 'tasks_enqueued'
+      : 'no_tasks_created';
+  const completionAuditSummary = dryRunEffective
+    ? 'Loop de aprendizado rodou em dry-run.'
+    : createdTasks.length > 0
+      ? `Loop criou ${createdTasks.length} task(s) oficiais do Runner.`
+      : 'Loop de aprendizado terminou sem criar tasks.';
+
   learningState = appendLearningAudit({
     ...learningState,
     lastExperimentAt: createdTasks.length ? now : learningState.lastExperimentAt,
@@ -379,11 +611,9 @@ export const runAutonomousLearningLoop = async ({
     },
   }, {
     timestamp: now,
-    type: dryRunEffective ? 'learning_loop_dry_run' : 'learning_loop_completed',
-    summary: dryRunEffective
-      ? 'Loop de aprendizado rodou em dry-run.'
-      : `Loop criou ${createdTasks.length} task(s) oficiais do Runner.`,
-    reason: dryRunEffective ? 'dry_run' : 'tasks_enqueued',
+    type: completionAuditType,
+    summary: completionAuditSummary,
+    reason: completionAuditReason,
     metadata: { createdTaskIds: createdTasks.map((task) => task.id) },
   });
   nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
@@ -442,5 +672,96 @@ export const clearAutonomousLearningTestData = (memory, { now = new Date().toISO
       { now },
     ),
     removedTaskIds: [...taskIdsToRemove],
+  };
+};
+
+export const clearAutonomousLearnedData = (
+  memory,
+  { now = new Date().toISOString(), disableLearning = false } = {},
+) => {
+  const cleared = clearAutonomousLearningTestData(memory, { now });
+  const normalizedMemory = pruneAliceMemory(cleared.memory);
+  const learning = getAutonomousLearningMemoryState(normalizedMemory);
+  const optimization = getAutonomousOptimizationMemoryState(normalizedMemory);
+  const learnedProcedureIds = new Set([
+    ...normalizeArray(learning.procedureCandidates).map((item) => normalizeText(item.procedureId || item.candidateId)),
+    ...normalizeArray(learning.promotedProcedures).map((item) => normalizeText(item.procedureId || item.id)),
+    ...normalizeArray(normalizedMemory.autonomousAudit?.procedures).map((item) => normalizeText(item.procedureId || item.id)),
+  ].filter(Boolean));
+  const currentProcedures = normalizeArray(normalizedMemory.proceduralMemory?.procedures);
+  const retainedProcedures = currentProcedures
+    .filter((procedure) => !isLearnedProcedure(procedure, learnedProcedureIds));
+  const removedProcedures = currentProcedures.length - retainedProcedures.length;
+  const emptyLearning = createEmptyAutonomousLearningMemoryState();
+  const emptyOptimization = createEmptyAutonomousOptimizationMemoryState();
+  const nextPolicy = {
+    ...learning.policy,
+    enabled: disableLearning ? false : learning.enabled,
+  };
+  const nextLearning = {
+    ...emptyLearning,
+    enabled: !disableLearning && learning.enabled,
+    policy: nextPolicy,
+    auditLog: [
+      {
+        id: `learning-cleared-${String(Date.parse(now) || Date.now())}`,
+        timestamp: now,
+        type: 'learning_memory_cleared',
+        summary: 'Aprendizado autonomo, candidatos, procedures e scripts foram apagados.',
+        reason: disableLearning ? 'clear_learned_data_and_disable' : 'clear_learned_data',
+        metadata: {
+          removedTaskIds: cleared.removedTaskIds,
+          removedProcedureCandidates: learning.procedureCandidates.length,
+          removedPromotedProcedures: learning.promotedProcedures.length,
+          removedGeneratedScripts: learning.generatedScripts.length,
+          removedProceduralMemoryProcedures: removedProcedures,
+          removedOptimizationCandidates: optimization.candidates.length,
+          removedRecentBenchmarks: optimization.recentBenchmarks.length,
+          disabled: disableLearning,
+        },
+      },
+    ],
+  };
+  const nextOptimization = {
+    ...emptyOptimization,
+    enabled: !disableLearning && optimization.enabled,
+    policy: optimization.policy || emptyOptimization.policy,
+  };
+  const nextAutonomousAudit = {
+    ...(normalizedMemory.autonomousAudit || {}),
+    skillCandidates: [],
+    improvementProposals: [],
+    pendingApprovals: [],
+    researchFindings: [],
+    validationReports: [],
+    procedures: normalizeArray(normalizedMemory.autonomousAudit?.procedures)
+      .filter((procedure) => !isLearnedProcedure(procedure, learnedProcedureIds)),
+    learningMemoryEvents: [],
+    auditLogs: [],
+    updatedAt: now,
+  };
+
+  return {
+    memory: {
+      ...normalizedMemory,
+      proceduralMemory: {
+        ...(normalizedMemory.proceduralMemory || {}),
+        procedures: retainedProcedures,
+      },
+      autonomousAudit: nextAutonomousAudit,
+      autonomousLearning: nextLearning,
+      autonomousOptimization: nextOptimization,
+      procedureReuseIndex: normalizeProcedureReuseIndex(),
+    },
+    removedTaskIds: cleared.removedTaskIds,
+    removedLearning: {
+      procedureCandidates: learning.procedureCandidates.length,
+      promotedProcedures: learning.promotedProcedures.length,
+      generatedScripts: learning.generatedScripts.length,
+      proceduralMemoryProcedures: removedProcedures,
+      optimizationCandidates: optimization.candidates.length,
+      recentBenchmarks: optimization.recentBenchmarks.length,
+      disabled: disableLearning,
+    },
   };
 };

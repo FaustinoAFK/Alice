@@ -358,6 +358,32 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     expect(JSON.parse(state.outputText).enabled).toBe(false);
 
     await runHarnessCommand(['autonomous-learning', 'enable', '--memory-path', memoryPath]);
+    await runHarnessCommand([
+      'autonomous-learning',
+      'set-policy',
+      '--memory-path',
+      memoryPath,
+      '--max-experiments-per-hour',
+      '8',
+      '--max-experiments-per-startup',
+      '2',
+      '--max-tasks-created-per-run',
+      '2',
+      '--max-promotions-per-run',
+      '4',
+      '--allowed-environments',
+      'real_vm',
+    ]);
+    state = await runHarnessCommand(['autonomous-learning', 'print-state', '--memory-path', memoryPath], {
+      outputJson: true,
+    });
+    expect(JSON.parse(state.outputText).policy).toMatchObject({
+      maxExperimentsPerHour: 8,
+      maxExperimentsPerStartup: 2,
+      maxTasksCreatedPerRun: 2,
+      maxPromotionsPerRun: 4,
+      allowedEnvironments: ['real_vm'],
+    });
     const scan = await runHarnessCommand(['autonomous-learning', 'scan', '--memory-path', memoryPath]);
     expect(scan.output.gaps.some((gap) => gap.gapId === 'gap-browser-search-address-bar')).toBe(true);
 
@@ -368,6 +394,102 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     const loaded = loadHarnessMemory({ memoryPath }).memory;
     expect(Object.values(getAutonomousRunnerState(loaded).tasksById)
       .some((task) => task.metadata?.createdBy === 'autonomous_learning_loop')).toBe(false);
+  });
+
+  it('CLI autonomous-learning add-goal stores broad goals with staged gaps', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    saveHarnessMemory(createEmptyAliceMemory(), { memoryPath });
+
+    const result = await runHarnessCommand([
+      'autonomous-learning',
+      'add-goal',
+      'Aprender a pesquisar documentacao em um site, validar a pagina e resumir conteudo',
+      '--memory-path',
+      memoryPath,
+    ], { outputJson: true });
+    const output = JSON.parse(result.outputText);
+    const loaded = loadHarnessMemory({ memoryPath }).memory;
+
+    expect(output.goalId).toMatch(/^learning-goal-/);
+    expect(loaded.autonomousLearning.learningGoals).toHaveLength(1);
+    expect(loaded.autonomousLearning.learningGoals[0].broad).toBe(true);
+    expect(loaded.autonomousLearning.learningGoals[0].stages.map((stage) => stage.type)).toEqual(
+      expect.arrayContaining(['browser_search', 'page_validation', 'page_read']),
+    );
+
+    const goals = await runHarnessCommand([
+      'autonomous-learning',
+      'print-goals',
+      '--memory-path',
+      memoryPath,
+    ], { outputJson: true });
+    expect(JSON.parse(goals.outputText)[0].goalId).toBe(output.goalId);
+  });
+
+  it('CLI autonomous-learning clear-learned removes learned procedures and can disable learning', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    saveHarnessMemory({
+      ...createEmptyAliceMemory(),
+      proceduralMemory: {
+        procedures: [
+          {
+            procedureId: 'procedure_browser_search',
+            title: 'Pesquisar no navegador',
+            source: 'autonomous_learning_loop',
+            status: 'guarded',
+            confidence: 0.8,
+            capabilities: ['browser.search'],
+          },
+          {
+            procedureId: 'procedure_user_kept',
+            title: 'Procedimento manual',
+            source: 'user',
+            status: 'active',
+            confidence: 0.9,
+            capabilities: ['user.preference'],
+          },
+        ],
+      },
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        procedureCandidates: [{ candidateId: 'candidate-1', procedureId: 'procedure_browser_search' }],
+        promotedProcedures: [{
+          procedureId: 'procedure_browser_search',
+          title: 'Pesquisar no navegador',
+          summary: 'Aprendizado autonomo de busca.',
+          source: 'autonomous_learning_loop',
+          status: 'guarded',
+          confidence: 0.8,
+          environment: 'real_vm',
+          environments: ['real_vm'],
+          capabilities: ['browser.search'],
+        }],
+        generatedScripts: [{ scriptId: 'script-1' }],
+      },
+    }, { memoryPath });
+
+    const result = await runHarnessCommand([
+      'autonomous-learning',
+      'clear-learned',
+      '--disable',
+      '--memory-path',
+      memoryPath,
+    ], { outputJson: true });
+    const output = JSON.parse(result.outputText);
+    const loaded = loadHarnessMemory({ memoryPath }).memory;
+
+    expect(output.removedLearning).toMatchObject({
+      procedureCandidates: 1,
+      promotedProcedures: 1,
+      generatedScripts: 1,
+      proceduralMemoryProcedures: 1,
+      disabled: true,
+    });
+    expect(loaded.autonomousLearning.enabled).toBe(false);
+    expect(loaded.autonomousLearning.procedureCandidates).toEqual([]);
+    expect(loaded.autonomousLearning.promotedProcedures).toEqual([]);
+    expect(loaded.proceduralMemory.procedures.map((procedure) => procedure.procedureId))
+      .toEqual(['procedure_user_kept']);
   });
 
   it('CLI autonomous-reuse can simulate a match without creating Runner tasks', async () => {

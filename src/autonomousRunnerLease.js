@@ -211,7 +211,7 @@ export const releaseRunnerLease = (
 
 export const recoverAutonomousTasksOnStartup = (
   runner,
-  { now = new Date().toISOString(), nowMs = Date.now() } = {},
+  { now = new Date().toISOString(), nowMs = Date.now(), auditContext = 'startup' } = {},
 ) => {
   let nextRunner = normalizeAutonomousRunnerState(runner);
   const runningTasks = Object.values(nextRunner.tasksById).filter(
@@ -273,13 +273,19 @@ export const recoverAutonomousTasksOnStartup = (
     };
   }
 
+  if (!recovered && auditContext !== 'startup') {
+    return nextRunner;
+  }
+
   return appendAutonomousRunnerAudit(nextRunner, {
     timestamp: now,
-    type: 'startup_recovery',
+    type: auditContext === 'startup' ? 'startup_recovery' : 'runner_recovery',
     summary: recovered
-      ? 'Recovery de startup recuperou tasks running sem heartbeat valido.'
+      ? (auditContext === 'startup'
+        ? 'Recovery de startup recuperou tasks running sem heartbeat valido.'
+        : 'Recovery do Runner recuperou tasks running sem heartbeat valido durante tick.')
       : 'Recovery de startup verificou runner sem tasks presas.',
     reason: recovered ? RUNNER_REASONS.STALE_RUNNING_TASK : 'no_stale_task',
-    metadata: { recovered },
+    metadata: { auditContext, recovered },
   });
 };

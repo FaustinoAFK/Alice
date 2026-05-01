@@ -270,6 +270,18 @@ describe('autonomous runner lease and recovery', () => {
     expect(recovered.tasksById['task-a'].steps[0].reason).toBe(RUNNER_REASONS.STALE_RUNNING_TASK);
     expect(recovered.runnerLock).toBeNull();
   });
+
+  it('does not record startup recovery noise during a clean tick', async () => {
+    const result = await runAutonomousTaskRunnerTick({
+      runner: { ...createEmptyAutonomousRunnerState(), enabled: true },
+      nowMs: Date.parse('2026-04-28T10:00:00.000Z'),
+    });
+
+    expect(result.executed).toBe(false);
+    expect(result.reason).toBe('no_eligible_task');
+    expect(result.runner.audits.some((event) => event.type === 'startup_recovery')).toBe(false);
+    expect(result.runner.audits.some((event) => event.type === 'runner_recovery')).toBe(false);
+  });
 });
 
 describe('autonomous runner scheduler and preflight', () => {
@@ -688,6 +700,88 @@ describe('autonomous runner evidence retention and volume hardening', () => {
     );
   });
 
+  it('validates visual agent run_command output instead of treating HTTP 200 as the command exit code', () => {
+    const step = {
+      ...executableStep,
+      completionCriteria: {
+        type: 'file_contains',
+        contains: 'alice-learning-vm:app-opened',
+      },
+      expectedEvidence: {
+        kind: 'complete',
+        required: ['stdout'],
+      },
+    };
+    const validationResult = validateRunnerCompletionCriteria({
+      step,
+      executionResult: {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        artifacts: {
+          statusCode: 200,
+          agentResponse: {
+            success: true,
+            result: {
+              exit_code: 0,
+              stdout: 'alice-learning-vm:app-opened\nprocess_id=123\nwindow_handle=456',
+              stderr: '',
+            },
+          },
+        },
+      },
+      evidenceRefs: [{
+        id: 'stdout-ref',
+        kind: 'stdout',
+        label: 'stdout',
+        path: 'data/evidence/exec/stdout.txt',
+      }],
+    });
+
+    expect(validationResult.passed).toBe(true);
+    expect(validationResult.commandResult.exitCode).toBe(0);
+    expect(validationResult.commandResult.stdout).toContain('window_handle=456');
+  });
+
+  it('uses visual agent success as exit code for actions that do not return a process exit code', () => {
+    const step = {
+      ...executableStep,
+      completionCriteria: { type: 'exit_code', expected: 0 },
+      expectedEvidence: {
+        kind: 'complete',
+        required: ['stdout'],
+      },
+    };
+    const validationResult = validateRunnerCompletionCriteria({
+      step,
+      executionResult: {
+        ok: true,
+        stdout: '',
+        stderr: '',
+        artifacts: {
+          statusCode: 200,
+          agentResponse: {
+            success: true,
+            result: {
+              typed_length: 23,
+              method: 'clipboard_paste',
+            },
+          },
+        },
+      },
+      evidenceRefs: [{
+        id: 'stdout-ref',
+        kind: 'stdout',
+        label: 'stdout',
+        path: 'data/evidence/exec/stdout.txt',
+      }],
+    });
+
+    expect(validationResult.passed).toBe(true);
+    expect(validationResult.commandResult.exitCode).toBe(0);
+    expect(validationResult.commandResult.stdout).toContain('clipboard_paste');
+  });
+
   it('marks evidence refs with physical persistence status for HUD summaries', () => {
     const refs = applyRunnerEvidencePersistenceMetadata([
       createRunnerEvidenceRef({
@@ -897,6 +991,70 @@ describe('autonomous runner planning, dependencies, map and tool', () => {
 
     expect(map.nodes.some((node) => node.id === 'runner-task-task-a' && node.status === 'in_progress')).toBe(true);
     expect(map.edges.some((edge) => edge.label === 'step')).toBe(true);
+  });
+
+  it('compacts autonomous learning tasks in the mind map instead of creating one module per step', () => {
+    const learningTask = {
+      ...createReadyTask({
+        id: 'learning-gap-field-1',
+        title: 'Aprender campo de texto',
+        status: 'done',
+        metadata: {
+          createdBy: 'autonomous_learning_loop',
+          gapId: 'gap-text-field-interaction',
+          capability: 'field.interaction',
+          learningScenario: 'field_interaction',
+        },
+        steps: [
+          { ...executableStep, id: 'prepare', title: 'Preparar', status: 'done' },
+          { ...executableStep, id: 'try-field', title: 'Testar campo', status: 'done' },
+        ],
+      }),
+    };
+
+    const firstMap = syncMindMapWithRunnerTask(createStarterMindMap(), learningTask);
+    const secondMap = syncMindMapWithRunnerTask(firstMap, {
+      ...learningTask,
+      id: 'learning-gap-field-2',
+      title: 'Revalidar campo de texto',
+      evidenceRefs: ['evidence-latest'],
+    });
+    const compactNodes = secondMap.nodes.filter((node) =>
+      node.id === 'runner-compact-autonomous-learning-loop-field-interaction',
+    );
+
+    expect(firstMap.nodes.some((node) => node.id.startsWith('runner-step-learning-gap-field-1'))).toBe(false);
+    expect(compactNodes).toHaveLength(1);
+    expect(compactNodes[0].data.latestTaskId).toBe('learning-gap-field-2');
+    expect(compactNodes[0].data.syncMode).toBe('compact_runner_task');
+    expect(secondMap.edges.some((edge) => edge.label === 'aprendizado')).toBe(true);
+  });
+
+  it('replaces legacy detailed nodes for the same autonomous task with the compact summary', () => {
+    const learningTask = createReadyTask({
+      id: 'learning-gap-app-launch-safe-1',
+      title: 'Aprender app launch',
+      status: 'done',
+      metadata: {
+        createdBy: 'autonomous_learning_loop',
+        gapId: 'gap-app-launch-safe',
+        capability: 'app.launch',
+      },
+      steps: [
+        { ...executableStep, id: 'prepare', title: 'Preparar', status: 'done' },
+        { ...executableStep, id: 'launch', title: 'Abrir app', status: 'done' },
+      ],
+    });
+    const legacyDetailedMap = syncMindMapWithRunnerTask(createStarterMindMap(), learningTask, {
+      compactAutonomousTasks: false,
+    });
+
+    const compactedMap = syncMindMapWithRunnerTask(legacyDetailedMap, learningTask);
+
+    expect(legacyDetailedMap.nodes.some((node) => node.id === 'runner-task-learning-gap-app-launch-safe-1')).toBe(true);
+    expect(compactedMap.nodes.some((node) => node.id === 'runner-task-learning-gap-app-launch-safe-1')).toBe(false);
+    expect(compactedMap.nodes.some((node) => node.id.startsWith('runner-step-learning-gap-app-launch-safe-1'))).toBe(false);
+    expect(compactedMap.nodes.some((node) => node.id === 'runner-compact-autonomous-learning-loop-app-launch')).toBe(true);
   });
 
   it('enqueues and enables runner through the local tool executor', () => {

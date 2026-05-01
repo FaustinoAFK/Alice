@@ -24,6 +24,7 @@ import {
   updateAutonomousRunnerTask,
 } from './autonomousRunnerState';
 import { normalizeAutonomousLearningPolicy } from './autonomousLearningPolicy';
+import { normalizeAutonomousLearningGoal } from './autonomousLearningGoals';
 import {
   normalizeProcedureReuseIndex,
   rebuildProcedureReuseIndex,
@@ -37,9 +38,9 @@ export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
 export const MAX_TOOL_FACTS = 50;
 export const MAX_PROCEDURES = 30;
-export const MAX_AUTONOMOUS_LEARNING_GAPS = 40;
-export const MAX_AUTONOMOUS_LEARNING_EXPERIMENTS = 60;
-export const MAX_AUTONOMOUS_LEARNING_AUDITS = 120;
+export const MAX_AUTONOMOUS_LEARNING_GAPS = 500;
+export const MAX_AUTONOMOUS_LEARNING_EXPERIMENTS = 1000;
+export const MAX_AUTONOMOUS_LEARNING_AUDITS = 1000;
 
 const DEFAULT_ASSISTANT_NAME = 'Alice';
 const DEFAULT_PERSONA_STYLE = 'playful_confident';
@@ -327,6 +328,7 @@ export const createEmptyAutonomousLearningMemoryState = () => ({
   lastStartupRunAt: '',
   lastScanAt: '',
   lastExperimentAt: '',
+  learningGoals: [],
   knownGaps: [],
   recentExperiments: [],
   procedureCandidates: [],
@@ -361,6 +363,9 @@ export const normalizeAutonomousLearningMemoryState = (state = {}) => {
     lastStartupRunAt: normalizeText(source.lastStartupRunAt),
     lastScanAt: normalizeText(source.lastScanAt),
     lastExperimentAt: normalizeText(source.lastExperimentAt),
+    learningGoals: boundedObjects(source.learningGoals, 20)
+      .map((goal) => normalizeAutonomousLearningGoal(goal))
+      .filter(Boolean),
     knownGaps: boundedObjects(source.knownGaps, MAX_AUTONOMOUS_LEARNING_GAPS),
     recentExperiments: boundedObjects(source.recentExperiments, MAX_AUTONOMOUS_LEARNING_EXPERIMENTS),
     procedureCandidates: boundedObjects(source.procedureCandidates, 60),

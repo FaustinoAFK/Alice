@@ -4,10 +4,10 @@ export const AUTONOMOUS_OPTIMIZER_CREATED_BY = 'autonomous_procedure_optimizer';
 
 export const DEFAULT_AUTONOMOUS_LEARNING_POLICY = {
   enabled: true,
-  maxExperimentsPerStartup: 1,
-  maxExperimentsPerHour: 3,
-  maxPromotionsPerRun: 2,
-  allowedEnvironments: ['local_workspace_fallback', 'real_vm'],
+  maxExperimentsPerStartup: 1000,
+  maxExperimentsPerHour: 1000,
+  maxPromotionsPerRun: 20,
+  allowedEnvironments: ['real_vm'],
   allowedScriptTypes: ['node', 'python', 'powershell'],
   blockedActions: [
     'delete_real_files',
@@ -32,7 +32,7 @@ export const DEFAULT_AUTONOMOUS_LEARNING_POLICY = {
   guardedReuseThreshold: 0.72,
   activeReuseThreshold: 0.6,
   maxLoopIterations: 1,
-  maxTasksCreatedPerRun: 2,
+  maxTasksCreatedPerRun: 1000,
   riskThresholds: {
     maxAutomaticRisk: 'low',
     maxScriptRisk: 'low',

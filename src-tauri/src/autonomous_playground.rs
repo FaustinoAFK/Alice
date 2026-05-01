@@ -88,12 +88,13 @@ fn collect_files_recursive(
     for entry in fs::read_dir(current)
         .map_err(|error| format!("Falha ao listar arquivos do workspace local fallback: {error}"))?
     {
-        let entry = entry
-            .map_err(|error| format!("Falha ao ler entrada do workspace local fallback: {error}"))?;
+        let entry = entry.map_err(|error| {
+            format!("Falha ao ler entrada do workspace local fallback: {error}")
+        })?;
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("Falha ao ler tipo de arquivo do workspace local fallback: {error}"))?;
+        let file_type = entry.file_type().map_err(|error| {
+            format!("Falha ao ler tipo de arquivo do workspace local fallback: {error}")
+        })?;
 
         if file_type.is_dir() {
             collect_files_recursive(root, base, &path, files)?;
@@ -360,8 +361,7 @@ fn clear_task_cancel_request(task_id: &str) {
     }
 }
 
-#[tauri::command]
-pub fn run_local_workspace_playground_task(
+fn run_local_workspace_playground_task_blocking(
     app: tauri::AppHandle,
     request: WorkspaceCommandRequest,
 ) -> Result<NativeCommandResult, String> {
@@ -526,6 +526,18 @@ pub fn run_local_workspace_playground_task(
     })
 }
 
+#[tauri::command]
+pub async fn run_local_workspace_playground_task(
+    app: tauri::AppHandle,
+    request: WorkspaceCommandRequest,
+) -> Result<NativeCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_local_workspace_playground_task_blocking(app, request)
+    })
+    .await
+    .map_err(|error| format!("Falha ao aguardar workspace local fallback: {error}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,10 +559,8 @@ mod tests {
 
     #[test]
     fn collect_workspace_files_includes_root_and_dir_relative_paths() {
-        let root = std::env::temp_dir().join(format!(
-            "alice-workspace-files-test-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("alice-workspace-files-test-{}", std::process::id()));
         let input_dir = root.join("input");
         let output_dir = root.join("output");
         let logs_dir = root.join("logs");

@@ -12,6 +12,18 @@ const toProcedureId = (capability = '', fallback = '') => {
 const procedureMatches = (procedure = {}, procedureId = '') =>
   normalizeText(procedure.procedureId) === normalizeText(procedureId);
 
+const inferTaskEnvironments = (task = {}) => {
+  const environments = new Set(
+    normalizeArray(task.steps)
+      .map((step) => normalizeText(step.action?.environment))
+      .filter(Boolean),
+  );
+  if (task.requiresRealVm) {
+    environments.add('real_vm');
+  }
+  return [...environments];
+};
+
 export const createProcedureCandidateFromValidation = ({
   validation = {},
   gap = {},
@@ -20,6 +32,10 @@ export const createProcedureCandidateFromValidation = ({
 } = {}) => {
   const capability = normalizeText(validation.capability || gap.capability || task.metadata?.capability || 'learned.capability');
   const procedureId = toProcedureId(capability, validation.taskId || task.id);
+  const environments = inferTaskEnvironments(task);
+  const primaryEnvironment = environments.includes('real_vm')
+    ? 'real_vm'
+    : environments[0] || 'unknown';
   const evidenceRefs = normalizeArray(validation.evidenceRefs).map((ref) => ({
     id: ref.id,
     executionId: ref.executionId,
@@ -44,6 +60,8 @@ export const createProcedureCandidateFromValidation = ({
       status: 'candidate',
       confidence: Math.max(0.55, Number(validation.confidence || 0.55)),
       source: 'autonomous_learning_loop',
+      environment: primaryEnvironment,
+      environments,
       evidenceRefs,
       validation: {
         reason: validation.reason,
@@ -67,6 +85,8 @@ export const createProcedureCandidateFromValidation = ({
       status: 'guarded',
       confidence: Math.max(0.55, Number(validation.confidence || 0.55)),
       source: 'autonomous_learning_loop',
+      environment: primaryEnvironment,
+      environments,
       capabilities: [capability],
       evidenceRefs,
       usageCount: 0,
@@ -109,6 +129,12 @@ export const promoteLearningValidation = ({
         status: duplicate.status === 'active' ? 'active' : 'guarded',
         confidence: Math.min(1, Math.max(Number(duplicate.confidence || 0), guardedProcedure.confidence) + 0.04),
         evidenceRefs: [...normalizeArray(duplicate.evidenceRefs), ...guardedProcedure.evidenceRefs].slice(-12),
+        environment: guardedProcedure.environment || duplicate.environment,
+        environments: [...new Set([
+          ...normalizeArray(duplicate.environments),
+          ...normalizeArray(guardedProcedure.environments),
+          guardedProcedure.environment,
+        ].filter(Boolean))],
         successCount: Number(duplicate.successCount || 0) + 1,
         updatedAt: now,
       }

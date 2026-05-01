@@ -360,6 +360,9 @@ export const buildDebugHudSnapshot = ({
     lastStartupRunAt: autonomousLearningMemoryState?.lastStartupRunAt || '-',
     lastScanAt: autonomousLearningMemoryState?.lastScanAt || '-',
     lastExperimentAt: autonomousLearningMemoryState?.lastExperimentAt || '-',
+    goals: formatAutonomousList(autonomousLearningMemoryState?.learningGoals, (goal) =>
+      `${goal.goalId || '-'} | ${goal.status || '-'} | stages=${goal.stages?.length || 0} | ${goal.description || '-'}`,
+    ),
     gaps: formatAutonomousList(autonomousLearningMemoryState?.knownGaps, (gap) =>
       `${gap.gapId || '-'} | ${gap.priority || '-'} | ${gap.riskLevel || '-'} | ${gap.description || '-'}`,
     ),

@@ -823,8 +823,7 @@ fn collect_guest_output(
     }
 }
 
-#[tauri::command]
-pub fn run_local_vm_guest_task(
+fn run_local_vm_guest_task_blocking(
     request: LocalVmGuestCommandRequest,
 ) -> Result<NativeCommandResult, String> {
     let state = read_provider_state();
@@ -878,6 +877,15 @@ pub fn run_local_vm_guest_task(
             })),
         }),
     }
+}
+
+#[tauri::command]
+pub async fn run_local_vm_guest_task(
+    request: LocalVmGuestCommandRequest,
+) -> Result<NativeCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_local_vm_guest_task_blocking(request))
+        .await
+        .map_err(|error| format!("Falha ao aguardar comando guest da VM local: {error}"))?
 }
 
 fn run_hyper_v_smoke_test(
@@ -1086,7 +1094,7 @@ mod tests {
         std::env::remove_var("ALICE_LOCAL_VM_PROVIDER");
         std::env::remove_var("ALICE_LOCAL_VM_NAME");
 
-        let result = run_local_vm_guest_task(LocalVmGuestCommandRequest {
+        let result = run_local_vm_guest_task_blocking(LocalVmGuestCommandRequest {
             task_id: "task-1".to_string(),
             command: "python".to_string(),
             args: Some(vec!["--version".to_string()]),

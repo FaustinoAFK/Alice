@@ -58,6 +58,28 @@ describe('alice memory persistence diagnostics', () => {
   });
 });
 
+describe('autonomous learning memory', () => {
+  it('preserves user-defined learning goals during pruning', () => {
+    const memory = pruneAliceMemory({
+      ...createEmptyAliceMemory(),
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        learningGoals: [
+          {
+            goalId: 'learning-goal-browser-search',
+            description: 'Aprender a pesquisar no navegador',
+            status: 'open',
+            stages: [{ stageId: 'stage-1', type: 'browser_search' }],
+          },
+        ],
+      },
+    });
+
+    expect(memory.autonomousLearning.learningGoals).toHaveLength(1);
+    expect(memory.autonomousLearning.learningGoals[0].stages[0].type).toBe('browser_search');
+  });
+});
+
 describe('extractImportantFacts', () => {
   it('extracts only durable user preferences, projects, tasks and recent summary', () => {
     const facts = extractImportantFacts(

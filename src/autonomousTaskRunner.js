@@ -673,7 +673,7 @@ export const runAutonomousTaskRunnerTick = async ({
     };
   }
 
-  nextRunner = recoverAutonomousTasksOnStartup(nextRunner, { now, nowMs });
+  nextRunner = recoverAutonomousTasksOnStartup(nextRunner, { now, nowMs, auditContext: 'tick' });
   if (nextRunner.runnerState === RUNNER_STATES.PAUSED) {
     return {
       ok: true,

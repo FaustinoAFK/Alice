@@ -1,8 +1,19 @@
+import { useState } from 'react';
 import { DefinitionList } from '../components/DefinitionList';
 
 export function AutonomousLearningHudPage({ debugHud, onAutonomousLearningAction }) {
   const learning = debugHud.learningLoop || {};
   const enabled = Boolean(learning.enabled);
+  const [goalText, setGoalText] = useState('');
+  const submitGoal = (event) => {
+    event.preventDefault();
+    const goal = goalText.trim();
+    if (!goal) {
+      return;
+    }
+    onAutonomousLearningAction?.('add-goal', { goal });
+    setGoalText('');
+  };
 
   return (
     <section className="hud-page" aria-label="Aprendizado autonomo">
@@ -45,7 +56,30 @@ export function AutonomousLearningHudPage({ debugHud, onAutonomousLearningAction
         </button>
       </section>
 
+      <form className="learning-goal-form" onSubmit={submitGoal} aria-label="Novo objetivo de aprendizado">
+        <label htmlFor="learning-goal-input">O que a Alice deve aprender?</label>
+        <div className="learning-goal-form__row">
+          <textarea
+            id="learning-goal-input"
+            value={goalText}
+            onChange={(event) => setGoalText(event.target.value)}
+            placeholder="Ex.: aprender a pesquisar documentação, abrir o navegador, validar a página e resumir o conteúdo"
+            rows={3}
+          />
+          <button type="submit" disabled={!goalText.trim()}>
+            Criar objetivo
+          </button>
+        </div>
+      </form>
+
       <div className="debug-hud__grid">
+        <section className="debug-hud__section debug-hud__section--wide">
+          <details open>
+            <summary>Objetivos definidos pelo usuario</summary>
+            <pre>{learning.goals || '-'}</pre>
+          </details>
+        </section>
+
         <section className="debug-hud__section debug-hud__section--wide">
           <details open>
             <summary>Lacunas detectadas</summary>

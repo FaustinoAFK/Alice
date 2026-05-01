@@ -32,6 +32,11 @@ import { runAutonomousTaskRunnerTick } from '../autonomousTaskRunner';
 import { createProcedureCandidate } from '../autonomousLearning/learning';
 import { scanAutonomousCapabilityGaps } from '../autonomousCapabilityScanner';
 import {
+  createAutonomousLearningGoalFromText,
+  upsertAutonomousLearningGoal,
+} from '../autonomousLearningGoals';
+import {
+  clearAutonomousLearnedData,
   clearAutonomousLearningTestData,
   runAutonomousLearningLoop,
 } from '../autonomousLearningLoop';
@@ -56,6 +61,7 @@ const READ_ONLY_COMMANDS = new Set([
 
 const AUTONOMOUS_LEARNING_READ_ONLY = new Set([
   'print-state',
+  'print-goals',
   'print-gaps',
   'print-experiments',
   'print-procedure',
@@ -116,6 +122,45 @@ const toIso = (value = Date.now()) => new Date(value).toISOString();
 const normalizePositiveInteger = (value, fallback) => {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
+};
+
+const parseNonNegativeIntegerFlag = (flags = {}, key = '', fallback = 0) => {
+  if (flags[key] === undefined) {
+    return fallback;
+  }
+  const value = Number(flags[key]);
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`Flag --${key} deve ser um inteiro nao negativo.`);
+  }
+  return Math.trunc(value);
+};
+
+const parseBooleanFlag = (flags = {}, key = '', fallback = false) => {
+  if (flags[key] === undefined) {
+    return fallback;
+  }
+  const value = normalizeText(flags[key]).toLowerCase();
+  if (['true', '1', 'yes', 'sim', 'on'].includes(value)) {
+    return true;
+  }
+  if (['false', '0', 'no', 'nao', 'não', 'off'].includes(value)) {
+    return false;
+  }
+  throw new Error(`Flag --${key} deve ser true ou false.`);
+};
+
+const parseStringListFlag = (flags = {}, key = '', fallback = []) => {
+  if (flags[key] === undefined) {
+    return fallback;
+  }
+  const values = String(flags[key] || '')
+    .split(',')
+    .map(normalizeText)
+    .filter(Boolean);
+  if (values.length === 0) {
+    throw new Error(`Flag --${key} deve conter ao menos um valor.`);
+  }
+  return values;
 };
 
 const toSafeIdPart = (value) =>
@@ -1040,6 +1085,8 @@ export const printAutonomousLearningState = (memory) => {
     lastStartupRunAt: learning.lastStartupRunAt,
     lastScanAt: learning.lastScanAt,
     lastExperimentAt: learning.lastExperimentAt,
+    policy: learning.policy,
+    learningGoals: learning.learningGoals,
     knownGaps: learning.knownGaps,
     recentExperiments: learning.recentExperiments,
     procedureCandidates: learning.procedureCandidates,
@@ -1103,6 +1150,106 @@ export const scanAutonomousLearningHarness = (memory, { now = toIso() } = {}) =>
   return {
     memory: updateAutonomousLearningMemoryState(memory, nextLearning, { now }),
     gaps: scan.gaps,
+  };
+};
+
+export const addAutonomousLearningGoalHarness = (memory, goalText = '', { now = toIso() } = {}) => {
+  const learning = getAutonomousLearningMemoryState(memory);
+  const result = createAutonomousLearningGoalFromText(goalText, {
+    now,
+    source: 'harness',
+  });
+  if (!result.ok) {
+    throw new Error(`Objetivo de aprendizado recusado: ${result.reason}`);
+  }
+  const nextLearning = upsertAutonomousLearningGoal({
+    ...learning,
+    stats: {
+      ...learning.stats,
+      goalsCreated: Number(learning.stats?.goalsCreated || 0) + 1,
+    },
+    auditLog: [
+      ...learning.auditLog,
+      {
+        id: `learning-goal-added-${timestampId(now)}`,
+        timestamp: now,
+        type: 'learning_goal_added',
+        summary: result.goal.broad
+          ? `Harness registrou objetivo amplo com ${result.goal.stages.length} etapas.`
+          : 'Harness registrou objetivo de aprendizado.',
+        reason: result.reason,
+        metadata: {
+          goalId: result.goal.goalId,
+          stages: result.goal.stages.map((stage) => stage.type),
+        },
+      },
+    ].slice(-120),
+  }, result.goal);
+
+  return {
+    memory: updateAutonomousLearningMemoryState(memory, nextLearning, { now }),
+    goalId: result.goal.goalId,
+    goal: result.goal,
+  };
+};
+
+export const setAutonomousLearningPolicyHarness = (memory, flags = {}, { now = toIso() } = {}) => {
+  const learning = getAutonomousLearningMemoryState(memory);
+  const currentPolicy = learning.policy || {};
+  const nextPolicy = {
+    ...currentPolicy,
+    maxExperimentsPerStartup: parseNonNegativeIntegerFlag(
+      flags,
+      'max-experiments-per-startup',
+      currentPolicy.maxExperimentsPerStartup,
+    ),
+    maxExperimentsPerHour: parseNonNegativeIntegerFlag(
+      flags,
+      'max-experiments-per-hour',
+      currentPolicy.maxExperimentsPerHour,
+    ),
+    maxTasksCreatedPerRun: parseNonNegativeIntegerFlag(
+      flags,
+      'max-tasks-created-per-run',
+      currentPolicy.maxTasksCreatedPerRun,
+    ),
+    maxPromotionsPerRun: parseNonNegativeIntegerFlag(
+      flags,
+      'max-promotions-per-run',
+      currentPolicy.maxPromotionsPerRun,
+    ),
+    allowedEnvironments: parseStringListFlag(
+      flags,
+      'allowed-environments',
+      currentPolicy.allowedEnvironments,
+    ),
+    dryRunDefault: parseBooleanFlag(flags, 'dry-run-default', Boolean(currentPolicy.dryRunDefault)),
+  };
+  const nextLearning = {
+    ...learning,
+    policy: nextPolicy,
+    auditLog: [
+      ...learning.auditLog,
+      {
+        id: `learning-policy-updated-${timestampId(now)}`,
+        timestamp: now,
+        type: 'learning_policy_updated',
+        summary: 'Policy de aprendizado autonomo atualizada pelo harness.',
+        reason: 'harness_set_policy',
+        metadata: {
+          maxExperimentsPerStartup: nextPolicy.maxExperimentsPerStartup,
+          maxExperimentsPerHour: nextPolicy.maxExperimentsPerHour,
+          maxTasksCreatedPerRun: nextPolicy.maxTasksCreatedPerRun,
+          maxPromotionsPerRun: nextPolicy.maxPromotionsPerRun,
+          allowedEnvironments: nextPolicy.allowedEnvironments,
+          dryRunDefault: nextPolicy.dryRunDefault,
+        },
+      },
+    ].slice(-120),
+  };
+  return {
+    memory: updateAutonomousLearningMemoryState(memory, nextLearning, { now }),
+    policy: nextPolicy,
   };
 };
 
@@ -1348,8 +1495,18 @@ const applyHarnessCommand = async (memory, command, positional, flags, context) 
       if (subcommand === 'scan') {
         return scanAutonomousLearningHarness(memory, { now });
       }
+      if (subcommand === 'add-goal') {
+        return addAutonomousLearningGoalHarness(memory, positional.slice(1).join(' '), { now });
+      }
       if (subcommand === 'seed-gap') {
         return seedAutonomousLearningGap(memory, positional[1] || 'browser-search', { now });
+      }
+      if (subcommand === 'set-policy') {
+        const result = setAutonomousLearningPolicyHarness(memory, flags, { now });
+        return {
+          memory: result.memory,
+          results: [{ policy: result.policy }],
+        };
       }
       if (subcommand === 'run-once' || subcommand === 'dry-run') {
         const result = await runAutonomousLearningLoop({
@@ -1396,6 +1553,12 @@ const applyHarnessCommand = async (memory, command, positional, flags, context) 
       }
       if (subcommand === 'clear-test-learning') {
         return clearAutonomousLearningTestData(memory, { now });
+      }
+      if (subcommand === 'clear-learned') {
+        return clearAutonomousLearnedData(memory, {
+          now,
+          disableLearning: Boolean(flags.disable),
+        });
       }
       if (AUTONOMOUS_LEARNING_READ_ONLY.has(subcommand)) {
         return { memory };
@@ -1507,6 +1670,9 @@ const buildReadOnlyOutput = (memory, command, positional, flags, context) => {
     if (subcommand === 'print-gaps') {
       return learning.knownGaps;
     }
+    if (subcommand === 'print-goals') {
+      return learning.learningGoals;
+    }
     if (subcommand === 'print-experiments') {
       return learning.recentExperiments;
     }
@@ -1616,7 +1782,10 @@ export const runHarnessCommand = async (argv = [], {
         backupPath,
         taskIds: result.taskIds || [],
         removedTaskIds: result.removedTaskIds || [],
+        removedLearning: result.removedLearning || null,
         candidateId: result.candidateId || '',
+        goalId: result.goalId || '',
+        goal: result.goal || null,
         gapId: result.gapId || '',
         compaction: result.compaction || null,
         gaps: result.gaps || [],

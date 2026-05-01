@@ -59,7 +59,12 @@ import { runAutonomousTaskRunnerTick } from './autonomousTaskRunner';
 import {
   clearAutonomousLearningTestData,
   runAutonomousLearningLoop,
+  shouldRunAutonomousLearningAfterRunnerTick,
 } from './autonomousLearningLoop';
+import {
+  createAutonomousLearningGoalFromText,
+  upsertAutonomousLearningGoal,
+} from './autonomousLearningGoals';
 import { recoverAutonomousTasksOnStartup } from './autonomousRunnerLease';
 import { syncMindMapWithRunnerTask } from './autonomousRunnerMindMap';
 import { syncMindMapWithExecution } from './mindMapExecutionSync';
@@ -278,6 +283,7 @@ function App() {
   const runnerTimerRef = useRef(null);
   const runnerTickRunningRef = useRef(false);
   const autonomousLearningStartupLoopRef = useRef(false);
+  const autonomousLearningLoopRunningRef = useRef(false);
   const tauriRuntimeAvailableRef = useRef(false);
   const runnerDiagnosticsRef = useRef({
     tickScheduled: false,
@@ -506,10 +512,14 @@ function App() {
     if (startup && autonomousLearningStartupLoopRef.current) {
       return null;
     }
+    if (autonomousLearningLoopRunningRef.current) {
+      return null;
+    }
     if (startup) {
       autonomousLearningStartupLoopRef.current = true;
     }
 
+    autonomousLearningLoopRunningRef.current = true;
     try {
       const result = await runAutonomousLearningLoop({
         memory: aliceMemoryRef.current,
@@ -539,6 +549,8 @@ function App() {
         ].slice(-120),
       }));
       return null;
+    } finally {
+      autonomousLearningLoopRunningRef.current = false;
     }
   };
 
@@ -1028,6 +1040,43 @@ function App() {
 
   const handleAutonomousLearningAction = (operation, payload = {}) => {
     const now = new Date().toISOString();
+    if (operation === 'add-goal') {
+      const goalResult = createAutonomousLearningGoalFromText(payload.goal || payload.text || '', {
+        now,
+        source: 'hud',
+      });
+      if (!goalResult.ok) {
+        return;
+      }
+      const currentLearning = getAutonomousLearningMemoryState(aliceMemoryRef.current);
+      const nextLearning = upsertAutonomousLearningGoal({
+        ...currentLearning,
+        stats: {
+          ...(currentLearning.stats || {}),
+          goalsCreated: Number(currentLearning.stats?.goalsCreated || 0) + 1,
+        },
+        auditLog: [
+          ...(currentLearning.auditLog || []),
+          {
+            id: `learning-goal-added-${Date.parse(now)}`,
+            timestamp: now,
+            type: 'learning_goal_added',
+            summary: goalResult.goal.broad
+              ? `Objetivo amplo registrado com ${goalResult.goal.stages.length} etapas.`
+              : 'Objetivo de aprendizado registrado.',
+            reason: goalResult.reason,
+            metadata: {
+              goalId: goalResult.goal.goalId,
+              stages: goalResult.goal.stages.map((stage) => stage.type),
+            },
+          },
+        ].slice(-120),
+      }, goalResult.goal);
+      commitAliceMemory(updateAutonomousLearningMemoryState(aliceMemoryRef.current, nextLearning, { now }));
+      void runStartupAutonomousLearningLoop({ startup: false, dryRun: payload.dryRun ?? null });
+      return;
+    }
+
     if (operation === 'enable' || operation === 'disable') {
       const currentLearning = getAutonomousLearningMemoryState(aliceMemoryRef.current);
       commitAliceMemory(updateAutonomousLearningMemoryState(aliceMemoryRef.current, {
@@ -1501,6 +1550,7 @@ function App() {
 
       runnerTickRunningRef.current = true;
       let nextDelayMs = 5000;
+      let learningFollowUpNeeded = false;
       try {
         commitRunnerDiagnostic({
           type: 'runner_tick_started',
@@ -1540,6 +1590,7 @@ function App() {
           if (result.task) {
             syncMindMapFromRunnerTask(result.task);
           }
+          learningFollowUpNeeded = shouldRunAutonomousLearningAfterRunnerTick({ result });
           if (result.evidencePersistence?.ok === false) {
             updatePersistenceDiagnostics({
               lastRunnerEvidenceError:
@@ -1553,9 +1604,35 @@ function App() {
           scheduleAliceMemorySave();
           nextDelayMs = result.nextIntervalMs || nextDelayMs;
         }
+      } catch (tickError) {
+        const message = String(tickError?.message || tickError || 'Falha no tick do Runner.');
+        nextDelayMs = 10000;
+        if (!disposed) {
+          commitRunnerDiagnostic({
+            type: 'runner_tick_failed',
+            summary: 'Tick do Runner falhou antes de concluir.',
+            reason: 'runner_tick_failed',
+            metadata: {
+              message,
+              nextIntervalMs: nextDelayMs,
+              ...createRunnerDiagnosticSnapshot(aliceMemoryRef.current),
+            },
+          });
+          updatePersistenceDiagnostics({
+            lastError: message,
+          });
+        }
       } finally {
         runnerTickRunningRef.current = false;
         if (!disposed) {
+          if (learningFollowUpNeeded) {
+            void runStartupAutonomousLearningLoop({ startup: false })
+              .then((learningResult) => {
+                if (learningResult?.createdTasks?.length) {
+                  setRunnerLoopWakeVersion((current) => current + 1);
+                }
+              });
+          }
           scheduleRunnerTick(nextDelayMs);
         }
       }

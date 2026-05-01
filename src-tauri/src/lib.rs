@@ -2090,7 +2090,9 @@ fn normalize_runner_evidence_file_names(files: Option<Vec<String>>) -> Result<Ve
             || file == ".."
             || !RUNNER_EVIDENCE_FILE_NAMES.contains(&file)
         {
-            return Err(format!("Arquivo de evidencia do Runner nao permitido: {raw_file}"));
+            return Err(format!(
+                "Arquivo de evidencia do Runner nao permitido: {raw_file}"
+            ));
         }
         if !normalized.iter().any(|existing| existing == file) {
             normalized.push(file.to_string());
@@ -2218,13 +2220,15 @@ fn save_runner_evidence(
     fs::write(&stderr_path, bounded_runner_evidence_text(request.stderr))
         .map_err(|error| format!("Falha ao salvar stderr do Runner: {error}"))?;
 
-    let validation_json = serde_json::to_string_pretty(&request.validation.unwrap_or_else(|| json!({})))
-        .map_err(|error| format!("Falha ao serializar validacao do Runner: {error}"))?;
+    let validation_json =
+        serde_json::to_string_pretty(&request.validation.unwrap_or_else(|| json!({})))
+            .map_err(|error| format!("Falha ao serializar validacao do Runner: {error}"))?;
     fs::write(&validation_path, validation_json)
         .map_err(|error| format!("Falha ao salvar validacao do Runner: {error}"))?;
 
-    let metadata_json = serde_json::to_string_pretty(&request.metadata.unwrap_or_else(|| json!({})))
-        .map_err(|error| format!("Falha ao serializar metadata do Runner: {error}"))?;
+    let metadata_json =
+        serde_json::to_string_pretty(&request.metadata.unwrap_or_else(|| json!({})))
+            .map_err(|error| format!("Falha ao serializar metadata do Runner: {error}"))?;
     fs::write(&metadata_path, metadata_json)
         .map_err(|error| format!("Falha ao salvar metadata do Runner: {error}"))?;
 
@@ -2639,10 +2643,10 @@ mod tests {
 
     #[test]
     fn normalize_runner_evidence_file_names_rejects_path_traversal() {
-        assert!(normalize_runner_evidence_file_names(Some(vec![
-            "../metadata.json".to_string()
-        ]))
-        .is_err());
+        assert!(
+            normalize_runner_evidence_file_names(Some(vec!["../metadata.json".to_string()]))
+                .is_err()
+        );
         assert!(normalize_runner_evidence_file_names(Some(vec![
             "metadata.json".to_string(),
             "stdout.txt".to_string(),
@@ -2700,7 +2704,10 @@ mod tests {
             &base_dir,
             RunnerEvidenceVerifyRequest {
                 execution_id: execution_id.to_string(),
-                files: Some(vec!["metadata.json".to_string(), "validation.json".to_string()]),
+                files: Some(vec![
+                    "metadata.json".to_string(),
+                    "validation.json".to_string(),
+                ]),
             },
         )
         .unwrap();

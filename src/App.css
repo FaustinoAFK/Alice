@@ -774,6 +774,50 @@
   word-break: break-word;
 }
 
+.learning-goal-form {
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  display: grid;
+  gap: 10px;
+}
+
+.learning-goal-form label {
+  color: var(--hud-muted);
+  font-size: 11px;
+  font-weight: 850;
+  text-transform: uppercase;
+}
+
+.learning-goal-form__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: stretch;
+}
+
+.learning-goal-form textarea {
+  min-width: 0;
+  width: 100%;
+  resize: vertical;
+  border: 1px solid var(--hud-border);
+  border-radius: 8px;
+  padding: 10px;
+  color: var(--hud-heading);
+  background: rgba(0, 0, 0, 0.22);
+  font: inherit;
+  line-height: 1.35;
+}
+
+.learning-goal-form textarea::placeholder {
+  color: var(--hud-muted);
+}
+
+.learning-goal-form button {
+  min-width: 128px;
+}
+
 .debug-hud__grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1415,6 +1459,14 @@
 
   .runner-task {
     grid-template-columns: 1fr;
+  }
+
+  .learning-goal-form__row {
+    grid-template-columns: 1fr;
+  }
+
+  .learning-goal-form button {
+    width: 100%;
   }
 
   .runner-task__actions {

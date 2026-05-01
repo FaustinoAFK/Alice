@@ -1,4 +1,6 @@
 import { getExperimentStrategiesForGap } from './autonomousExperimentStrategies';
+import { createGapsFromLearningGoals } from './autonomousLearningGoals';
+import { normalizeAutonomousLearningPolicy } from './autonomousLearningPolicy';
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
@@ -61,7 +63,22 @@ const FOUNDATION_CAPABILITY_GAPS = [
   },
 ];
 
-const hasTrustedProcedureForCapability = (procedures = [], capability = {}) =>
+const procedureSupportsPolicyEnvironment = (procedure = {}, policy = {}) => {
+  const normalizedPolicy = normalizeAutonomousLearningPolicy(policy);
+  const environments = new Set([
+    normalizeText(procedure.environment),
+    ...normalizeArray(procedure.environments).map(normalizeText),
+  ].filter(Boolean));
+  if (normalizedPolicy.allowedEnvironments.includes('real_vm') &&
+      !normalizedPolicy.allowedEnvironments.includes('local_workspace_fallback') &&
+      !normalizedPolicy.allowedEnvironments.includes('local_workspace') &&
+      !normalizedPolicy.allowedEnvironments.includes('workspace')) {
+    return environments.has('real_vm');
+  }
+  return true;
+};
+
+const hasTrustedProcedureForCapability = (procedures = [], capability = {}, policy = {}) =>
   procedures.some((procedure) => {
     const haystack = normalizeLower([
       procedure.procedureId,
@@ -73,6 +90,7 @@ const hasTrustedProcedureForCapability = (procedures = [], capability = {}) =>
     return (
       ['active', 'guarded', 'validated'].includes(procedure.status || '') &&
       Number(procedure.confidence || 0) >= 0.6 &&
+      procedureSupportsPolicyEnvironment(procedure, policy) &&
       normalizeArray([capability.capability, ...(capability.keywords || [])])
         .some((keyword) => haystack.includes(normalizeLower(keyword)))
     );
@@ -99,6 +117,11 @@ const recentRunnerFailures = (runner = {}) =>
     .slice(-8);
 
 const existingGapIds = (state = {}) => new Set(normalizeArray(state.knownGaps).map((gap) => gap.gapId));
+const runnerAlreadyHasTaskForGap = (runner = {}, gapId = '') =>
+  Object.values(runner.tasksById || {}).some((task) =>
+    task.metadata?.gapId === gapId &&
+    ['planned', 'ready', 'running', 'waiting_retry', 'blocked', 'done'].includes(task.status),
+  );
 
 const createGap = (gap, { policy = {} } = {}) => ({
   gapId: gap.gapId,
@@ -125,10 +148,11 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
     ...normalizeArray(memory.autonomousLearning?.procedureCandidates),
   ];
   const knownGapSet = existingGapIds(memory.autonomousLearning);
-  const gaps = [];
+  const gaps = createGapsFromLearningGoals(memory.autonomousLearning?.learningGoals, { policy, now })
+    .filter((gap) => !runnerAlreadyHasTaskForGap(memory.autonomousRunner, gap.gapId));
 
   FOUNDATION_CAPABILITY_GAPS.forEach((capability) => {
-    if (hasTrustedProcedureForCapability(procedures, capability)) {
+    if (hasTrustedProcedureForCapability(procedures, capability, policy)) {
       return;
     }
     gaps.push(createGap({
@@ -168,11 +192,15 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
 
   recentRunnerFailures(memory.autonomousRunner).slice(0, 3).forEach((event) => {
     const task = memory.autonomousRunner?.tasksById?.[event.taskId];
-    if (!task) {
+    if (!task || task.status === 'done') {
+      return;
+    }
+    const gapId = `gap-runner-failure-${normalizeLower(event.taskId).replace(/[^a-z0-9]+/g, '-')}`;
+    if (runnerAlreadyHasTaskForGap(memory.autonomousRunner, gapId)) {
       return;
     }
     gaps.push(createGap({
-      gapId: `gap-runner-failure-${normalizeLower(event.taskId).replace(/[^a-z0-9]+/g, '-')}`,
+      gapId,
       type: 'runner_failure',
       capability: 'runner.recovery',
       description: `Falha recente do Runner precisa de aprendizado: ${task.title || event.taskId}.`,
@@ -187,7 +215,7 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
   const dedupedGaps = [];
   const seenGapIds = new Set();
   gaps.forEach((gap) => {
-    if (seenGapIds.has(gap.gapId)) {
+    if (seenGapIds.has(gap.gapId) || runnerAlreadyHasTaskForGap(memory.autonomousRunner, gap.gapId)) {
       return;
     }
     seenGapIds.add(gap.gapId);
@@ -197,6 +225,6 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
   return {
     ok: true,
     scannedAt: now,
-    gaps: dedupedGaps.slice(0, 12),
+    gaps: dedupedGaps,
   };
 };

@@ -304,12 +304,7 @@ fn vbox_keyboard_put_string(
 ) -> Result<(bool, String, String, Option<i32>), String> {
     validate_ready(state)?;
     let mut command = Command::new(&state.vboxmanage_path);
-    command.args([
-        "controlvm",
-        &state.vm_name,
-        "keyboardputstring",
-        text,
-    ]);
+    command.args(["controlvm", &state.vm_name, "keyboardputstring", text]);
     run_command_capture(command, timeout_ms)
 }
 
@@ -328,17 +323,13 @@ fn run_type_text_with_host_fallback(
     correlation_id: &str,
     timeout_ms: u64,
 ) -> Result<(Value, String, String, Option<i32>, bool), String> {
-    let (mut agent_response, mut stdout, mut stderr, mut status_code, _transport) = run_agent_request(
-        state,
-        build_agent_request(
-            "type_text",
-            json!({"text": text}),
-            task_id,
-            correlation_id,
-        ),
-        timeout_ms,
-        true,
-    )?;
+    let (mut agent_response, mut stdout, mut stderr, mut status_code, _transport) =
+        run_agent_request(
+            state,
+            build_agent_request("type_text", json!({"text": text}), task_id, correlation_id),
+            timeout_ms,
+            true,
+        )?;
     let success = agent_response
         .get("success")
         .and_then(Value::as_bool)
@@ -523,11 +514,17 @@ fn resident_agent_enabled() -> bool {
 }
 
 fn resident_agent_host_port() -> u16 {
-    env_u16("ALICE_VM_GUEST_AGENT_HOST_PORT", DEFAULT_RESIDENT_AGENT_PORT)
+    env_u16(
+        "ALICE_VM_GUEST_AGENT_HOST_PORT",
+        DEFAULT_RESIDENT_AGENT_PORT,
+    )
 }
 
 fn resident_agent_guest_port() -> u16 {
-    env_u16("ALICE_VM_GUEST_AGENT_GUEST_PORT", DEFAULT_RESIDENT_AGENT_PORT)
+    env_u16(
+        "ALICE_VM_GUEST_AGENT_GUEST_PORT",
+        DEFAULT_RESIDENT_AGENT_PORT,
+    )
 }
 
 fn resident_agent_token() -> String {
@@ -566,11 +563,7 @@ fn configure_resident_agent_port_forward(
     ]);
     let _ = run_command_capture(delete, timeout_ms);
 
-    let rule = build_nat_port_forward_rule(
-        RESIDENT_AGENT_NAT_RULE_NAME,
-        host_port,
-        guest_port,
-    );
+    let rule = build_nat_port_forward_rule(RESIDENT_AGENT_NAT_RULE_NAME, host_port, guest_port);
     let mut add = Command::new(&state.vboxmanage_path);
     add.args(["controlvm", &state.vm_name, "natpf1", &rule]);
     let (ok, _stdout, stderr, _status_code) = run_command_capture(add, timeout_ms)?;
@@ -766,7 +759,13 @@ fn run_agent_request(
             "guestcontrol_run".to_string(),
         ));
     }
-    Ok((parsed, stdout, stderr, status_code, "guestcontrol_run".to_string()))
+    Ok((
+        parsed,
+        stdout,
+        stderr,
+        status_code,
+        "guestcontrol_run".to_string(),
+    ))
 }
 
 #[tauri::command]
@@ -915,8 +914,7 @@ pub fn start_vm_guest_agent_resident(
     }
 }
 
-#[tauri::command]
-pub fn run_vm_guest_agent_action(
+fn run_vm_guest_agent_action_blocking(
     request: VmGuestAgentActionRequest,
 ) -> Result<NativeCommandResult, String> {
     let state = read_state();
@@ -932,12 +930,7 @@ pub fn run_vm_guest_agent_action(
     let correlation_id = request.correlation_id.unwrap_or_else(|| task_id.clone());
     let action = request.action.trim().to_string();
     let parameters = request.parameters.unwrap_or_else(|| json!({}));
-    let agent_request = build_agent_request(
-        &action,
-        parameters.clone(),
-        &task_id,
-        &correlation_id,
-    );
+    let agent_request = build_agent_request(&action, parameters.clone(), &task_id, &correlation_id);
     let (mut agent_response, mut stdout, mut stderr, mut status_code, mut transport) =
         run_agent_request(&state, agent_request, timeout_ms, true)?;
     let mut success = agent_response
@@ -1025,11 +1018,20 @@ pub fn run_vm_guest_agent_action(
 }
 
 #[tauri::command]
+pub async fn run_vm_guest_agent_action(
+    request: VmGuestAgentActionRequest,
+) -> Result<NativeCommandResult, String> {
+    tauri::async_runtime::spawn_blocking(move || run_vm_guest_agent_action_blocking(request))
+        .await
+        .map_err(|error| format!("Falha ao aguardar acao visual da VM: {error}"))?
+}
+
+#[tauri::command]
 pub fn capture_vm_guest_screen(
     request: Option<VmVisualTimeoutRequest>,
 ) -> Result<NativeCommandResult, String> {
     let timeout_ms = request.and_then(|request| request.timeout_ms);
-    run_vm_guest_agent_action(VmGuestAgentActionRequest {
+    run_vm_guest_agent_action_blocking(VmGuestAgentActionRequest {
         action: "capture_screen".to_string(),
         parameters: Some(json!({})),
         timeout_ms,
