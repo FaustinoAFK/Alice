@@ -1,5 +1,0 @@
-     Running BeforeDevCommand (`npm run dev -- --host 127.0.0.1 --port 5174 --strictPort`)
-     Running DevCommand (`cargo  run --no-default-features --color always --`)
-        Info Watching C:\projetos\alice-virtual\src-tauri for changes...
-[1m[92m    Finished[0m `dev` profile [unoptimized + debuginfo] target(s) in 1.12s
-[1m[92m     Running[0m `target\debug\alice-desktop.exe`
