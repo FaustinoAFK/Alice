@@ -215,4 +215,30 @@ describe('buildDebugHudSnapshot', () => {
       aliceText: 'Vou abrir.',
     });
   });
+
+  it('caps long runner lists so the HUD stays responsive', () => {
+    const tasksById = Object.fromEntries(Array.from({ length: 120 }, (_, index) => [
+      `task-${index}`,
+      {
+        id: `task-${index}`,
+        title: `Task ${index}`,
+        status: 'done',
+        priority: 'medium',
+        queueRank: index,
+      },
+    ]));
+    const snapshot = buildDebugHudSnapshot({
+      autonomousRunnerState: {
+        enabled: true,
+        queue: Object.keys(tasksById),
+        tasksById,
+        audits: [],
+        evidenceRefs: [],
+      },
+    });
+
+    expect(snapshot.runner.tasks).toContain('item(ns) ocultos');
+    expect(snapshot.runner.tasks).not.toContain('task-0 |');
+    expect(snapshot.runner.tasks).toContain('task-119 |');
+  });
 });

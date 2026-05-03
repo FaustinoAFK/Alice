@@ -82,6 +82,13 @@ export function AutonomousLearningHudPage({ debugHud, onAutonomousLearningAction
 
         <section className="debug-hud__section debug-hud__section--wide">
           <details open>
+            <summary>Alvos observados na tela</summary>
+            <pre>{learning.observedTargets || '-'}</pre>
+          </details>
+        </section>
+
+        <section className="debug-hud__section debug-hud__section--wide">
+          <details open>
             <summary>Lacunas detectadas</summary>
             <pre>{learning.gaps || '-'}</pre>
           </details>

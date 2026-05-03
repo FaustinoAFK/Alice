@@ -38,10 +38,22 @@ const buildProps = (overrides = {}) => ({
 });
 
 describe('AliceHud lazy loading', () => {
+  it('renders the knowledge tab with a suspense fallback instead of loading the page eagerly', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'knowledge' })} />);
+
+    expect(html).toContain('Carregando conhecimento');
+  });
+
   it('renders the mind map tab with a suspense fallback instead of breaking navigation', () => {
     const html = renderToString(<AliceHud {...buildProps()} />);
 
     expect(html).toContain('Carregando mapa mental');
+  });
+
+  it('renders the learning tab with a suspense fallback instead of eagerly loading the page', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'learning' })} />);
+
+    expect(html).toContain('Carregando aprendizado autonomo');
   });
 
   it('renders the runner tab with a suspense fallback instead of loading the audit page eagerly', () => {

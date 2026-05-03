@@ -1,6 +1,7 @@
 import { getExperimentStrategiesForGap } from './autonomousExperimentStrategies';
 import { createGapsFromLearningGoals } from './autonomousLearningGoals';
 import { normalizeAutonomousLearningPolicy } from './autonomousLearningPolicy';
+import { createContextualLearningGapForTask } from './autonomousTaskContext';
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
@@ -44,6 +45,33 @@ const FOUNDATION_CAPABILITY_GAPS = [
     keywords: ['app.launch', 'abrir aplicativo', 'process_started', 'janela'],
   },
   {
+    gapId: 'gap-file-explorer-safe',
+    type: 'file_management',
+    capability: 'file.explorer.open',
+    description: 'Alice nao tem procedimento confiavel para abrir o Explorador de Arquivos em pasta controlada na VM.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_file_explorer',
+    keywords: ['file.explorer.open', 'explorador', 'explorer', 'arquivo', 'pasta'],
+  },
+  {
+    gapId: 'gap-file-management-safe',
+    type: 'file_management',
+    capability: 'file.folder.create',
+    description: 'Alice nao tem procedimento confiavel para criar pasta e arquivo temporarios em ambiente controlado.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_file_management',
+    keywords: ['file.folder.create', 'criar pasta', 'organizar arquivos', 'file_exists'],
+  },
+  {
+    gapId: 'gap-app-install-safe-probe',
+    type: 'app_install',
+    capability: 'app.install.safe_probe',
+    description: 'Alice nao tem procedimento confiavel para localizar pacote instalavel com seguranca na VM.',
+    priority: 'medium',
+    evidenceKey: 'procedural_memory_missing_safe_installer_probe',
+    keywords: ['app.install.safe_probe', 'instalar', 'winget', 'package_search_result'],
+  },
+  {
     gapId: 'gap-text-field-interaction',
     type: 'field_interaction',
     capability: 'field.interaction',
@@ -78,6 +106,20 @@ const procedureSupportsPolicyEnvironment = (procedure = {}, policy = {}) => {
   return true;
 };
 
+const isAutonomousLearnedProcedure = (procedure = {}) =>
+  ['autonomous_learning_loop', 'autonomous_procedure_reuse', 'autonomous_procedure_optimizer']
+    .includes(normalizeText(procedure.source)) ||
+  normalizeText(procedure.validation?.validationKind) === 'controlled_experiment';
+
+const procedureHasSubstantiveValidation = (procedure = {}) =>
+  procedure.validation?.substantive === true ||
+  procedure.reuseValidation?.substantive === true ||
+  procedure.metadata?.substantiveValidation === true ||
+  procedure.substantiveValidation === true;
+
+const procedureCanSuppressGap = (procedure = {}) =>
+  !isAutonomousLearnedProcedure(procedure) || procedureHasSubstantiveValidation(procedure);
+
 const hasTrustedProcedureForCapability = (procedures = [], capability = {}, policy = {}) =>
   procedures.some((procedure) => {
     const haystack = normalizeLower([
@@ -91,6 +133,7 @@ const hasTrustedProcedureForCapability = (procedures = [], capability = {}, poli
       ['active', 'guarded', 'validated'].includes(procedure.status || '') &&
       Number(procedure.confidence || 0) >= 0.6 &&
       procedureSupportsPolicyEnvironment(procedure, policy) &&
+      procedureCanSuppressGap(procedure) &&
       normalizeArray([capability.capability, ...(capability.keywords || [])])
         .some((keyword) => haystack.includes(normalizeLower(keyword)))
     );
@@ -135,6 +178,7 @@ const createGap = (gap, { policy = {} } = {}) => ({
   status: gap.status || 'open',
   firstSeenAt: gap.firstSeenAt || new Date().toISOString(),
   lastSeenAt: gap.lastSeenAt || new Date().toISOString(),
+  metadata: gap.metadata && typeof gap.metadata === 'object' ? gap.metadata : {},
 });
 
 export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = new Date().toISOString() } = {}) => {
@@ -193,6 +237,22 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
   recentRunnerFailures(memory.autonomousRunner).slice(0, 3).forEach((event) => {
     const task = memory.autonomousRunner?.tasksById?.[event.taskId];
     if (!task || task.status === 'done') {
+      return;
+    }
+    const contextualGap = createContextualLearningGapForTask(task, { memory, now });
+    if (contextualGap && !runnerAlreadyHasTaskForGap(memory.autonomousRunner, contextualGap.gapId)) {
+      gaps.push(createGap({
+        ...contextualGap,
+        evidence: [
+          ...(contextualGap.evidence || []),
+          event.reason || 'runner_failure',
+          event.summary || '',
+        ],
+        firstSeenAt: knownGapSet.has(contextualGap.gapId)
+          ? memory.autonomousLearning?.knownGaps?.find((gap) => gap.gapId === contextualGap.gapId)?.firstSeenAt || now
+          : now,
+        lastSeenAt: now,
+      }, { policy }));
       return;
     }
     const gapId = `gap-runner-failure-${normalizeLower(event.taskId).replace(/[^a-z0-9]+/g, '-')}`;

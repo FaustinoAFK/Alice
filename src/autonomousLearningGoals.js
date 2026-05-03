@@ -4,6 +4,7 @@ const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ')
 const stripDiacritics = (value) => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 const normalizeLower = (value) => stripDiacritics(normalizeText(value)).toLowerCase();
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
+const MAX_LEARNING_GOALS = 500;
 
 const toSafeIdPart = (value) =>
   normalizeLower(value).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'objetivo';
@@ -24,6 +25,30 @@ const stageTemplates = {
     description: 'Aprender a identificar e focar uma janela segura aberta na VM.',
     priority: 'high',
     keywords: ['janela', 'foco', 'alternar', 'ativar janela'],
+  },
+  file_explorer: {
+    type: 'file_management',
+    capability: 'file.explorer.open',
+    title: 'Abrir Explorador de Arquivos',
+    description: 'Aprender a abrir o Explorador de Arquivos em uma pasta temporaria controlada na VM e validar a janela.',
+    priority: 'high',
+    keywords: ['explorador', 'explorer', 'arquivo', 'arquivos', 'pasta', 'pastas', 'diretorio', 'diretorios'],
+  },
+  file_management: {
+    type: 'file_management',
+    capability: 'file.folder.create',
+    title: 'Criar e organizar arquivos controlados',
+    description: 'Aprender a criar pasta e arquivo temporarios na VM, abrir no Explorador e validar existencia.',
+    priority: 'high',
+    keywords: ['criar pasta', 'criar pastas', 'organizar arquivo', 'organizar arquivos', 'salvar arquivo', 'mover arquivo'],
+  },
+  app_install: {
+    type: 'app_install',
+    capability: 'app.install.safe_probe',
+    title: 'Validar fluxo seguro de instalacao',
+    description: 'Aprender a localizar um pacote de aplicativo por ferramenta segura na VM antes de qualquer instalacao real.',
+    priority: 'medium',
+    keywords: ['instalar', 'instalacao', 'baixar', 'download', 'programas', 'aplicativos', 'installer', 'winget'],
   },
   text_input: {
     type: 'text_input',
@@ -119,6 +144,9 @@ const defaultStageOrder = ['browser_search', 'page_validation', 'page_read'];
 const broadComputerStageOrder = [
   'app_launch',
   'window_focus',
+  'file_explorer',
+  'file_management',
+  'app_install',
   'text_input',
   'keyboard_shortcuts',
   'clipboard_text',
@@ -136,6 +164,22 @@ const addUnique = (items, value) => {
   if (!items.includes(value)) {
     items.push(value);
   }
+};
+
+const buildObservedTargetContext = (goal = {}) => {
+  const label = normalizeText(goal.metadata?.observedTargetLabel);
+  const kind = normalizeText(goal.metadata?.observedTargetKind);
+  if (!label) {
+    return null;
+  }
+  return {
+    target: label,
+    observedTargets: [{
+      targetId: normalizeText(goal.metadata?.observedTargetId),
+      kind: kind || 'application',
+      label,
+    }],
+  };
 };
 
 const stageOrderForGoal = (text = '') => {
@@ -165,6 +209,12 @@ const stageOrderForGoal = (text = '') => {
   }
   if (/\b(app|aplicativo|programa|janela)\b/i.test(lower)) {
     addUnique(stages, 'app_launch');
+  }
+  if (/\b(explorador|explorer|arquivo|arquivos|pasta|pastas|diretorio|organizar)\b/i.test(lower)) {
+    ['file_explorer', 'file_management'].forEach((stageType) => addUnique(stages, stageType));
+  }
+  if (/\b(instalar|instalacao|baixar|download|programa|programas|aplicativo|aplicativos|winget)\b/i.test(lower)) {
+    addUnique(stages, 'app_install');
   }
 
   if (stages.length === 0) {
@@ -347,6 +397,14 @@ export const createGapsFromLearningGoals = (learningGoals = [], { policy = {}, n
           lastSeenAt: now,
           learningGoalId: goal.goalId,
           learningGoalStageId: stage.stageId,
+          metadata: {
+            learningGoalId: goal.goalId,
+            learningGoalStageId: stage.stageId,
+            observedTargetId: normalizeText(goal.metadata?.observedTargetId),
+            observedTargetKind: normalizeText(goal.metadata?.observedTargetKind),
+            observedTargetLabel: normalizeText(goal.metadata?.observedTargetLabel),
+            context: buildObservedTargetContext(goal),
+          },
         };
         return {
           ...gap,
@@ -364,6 +422,6 @@ export const upsertAutonomousLearningGoal = (learningState = {}, goal = {}) => {
     learningGoals: [
       ...goals.filter((item) => item.goalId !== normalizedGoal?.goalId),
       normalizedGoal,
-    ].filter(Boolean).slice(-20),
+    ].filter(Boolean).slice(-MAX_LEARNING_GOALS),
   };
 };

@@ -15,7 +15,6 @@ import {
   mergeImportantFacts,
   mergeMindMapFromGoal,
   mergeValidatedProcedures,
-  pruneAliceMemory,
   saveAliceMemory,
   updateAutonomousLearningMemoryState,
   updateAutonomousRunnerState,
@@ -65,6 +64,7 @@ import {
   createAutonomousLearningGoalFromText,
   upsertAutonomousLearningGoal,
 } from './autonomousLearningGoals';
+import { registerObservedLearningTargets } from './autonomousObservedLearning';
 import { recoverAutonomousTasksOnStartup } from './autonomousRunnerLease';
 import { syncMindMapWithRunnerTask } from './autonomousRunnerMindMap';
 import { syncMindMapWithExecution } from './mindMapExecutionSync';
@@ -75,6 +75,10 @@ import {
   createRunnerDiagnosticSnapshot,
   createTauriRuntimeMetadata,
 } from './runnerAppDiagnostics';
+import {
+  flushAliceMemoryToRuntime,
+  loadAliceMemoryFromRuntime as loadAliceMemoryFromRuntimeBoundary,
+} from './aliceMemoryPersistence';
 import './App.css';
 
 const stopStream = (stream) => {
@@ -450,25 +454,27 @@ function App() {
 
   const flushAliceMemory = async () => {
     clearAliceMemorySaveTimer();
-
-    if (!canUseTauriRuntime() || !memoryHydratedRef.current) {
-      updatePersistenceDiagnostics();
-      return aliceMemoryRef.current;
-    }
-
-    try {
-      aliceMemoryRef.current = await saveAliceMemory(aliceMemoryRef.current);
-      updatePersistenceDiagnostics({
-        lastMemorySaveAt: new Date().toISOString(),
-        lastMemorySaveError: '',
-      });
-      return aliceMemoryRef.current;
-    } catch (saveError) {
-      updatePersistenceDiagnostics({
-        lastMemorySaveError: String(saveError?.message || saveError || 'Falha ao salvar memoria.'),
-      });
-      throw saveError;
-    }
+    aliceMemoryRef.current = await flushAliceMemoryToRuntime({
+      memory: aliceMemoryRef.current,
+      canUseTauriRuntime: canUseTauriRuntime(),
+      memoryHydrated: memoryHydratedRef.current,
+      saveMemory: saveAliceMemory,
+      onSkipped: () => {
+        updatePersistenceDiagnostics();
+      },
+      onSaved: () => {
+        updatePersistenceDiagnostics({
+          lastMemorySaveAt: new Date().toISOString(),
+          lastMemorySaveError: '',
+        });
+      },
+      onSaveError: (saveError) => {
+        updatePersistenceDiagnostics({
+          lastMemorySaveError: String(saveError?.message || saveError || 'Falha ao salvar memoria.'),
+        });
+      },
+    });
+    return aliceMemoryRef.current;
   };
 
   const scheduleAliceMemorySave = () => {
@@ -554,14 +560,35 @@ function App() {
     }
   };
 
+  const registerObservedLearningFromContext = ({
+    source = 'runtime_observation',
+    screen = {},
+    knowledge = knowledgeStateRef.current,
+  } = {}) => {
+    if (!memoryHydratedRef.current) {
+      return null;
+    }
+    const result = registerObservedLearningTargets(aliceMemoryRef.current, {
+      source,
+      screen,
+      knowledgeState: knowledge,
+      now: new Date().toISOString(),
+    });
+    if (!result.changed) {
+      return result;
+    }
+    commitAliceMemory(result.memory);
+    if (result.createdGoals.length > 0) {
+      void runStartupAutonomousLearningLoop({ startup: false });
+    }
+    return result;
+  };
+
   const loadAliceMemoryFromRuntime = async () => {
     try {
-      const json = await invoke('load_alice_memory_json');
+      const memory = await loadAliceMemoryFromRuntimeBoundary({ invokeFn: invoke });
       tauriRuntimeAvailableRef.current = true;
-      if (!json) {
-        return createEmptyAliceMemory();
-      }
-      return pruneAliceMemory(JSON.parse(json));
+      return memory;
     } catch (loadError) {
       tauriRuntimeAvailableRef.current = false;
       throw loadError;
@@ -631,10 +658,12 @@ function App() {
     });
 
   const updateKnowledgeState = (patch) => {
-    setKnowledgeState((current) => {
-      const nextState = mergeKnowledgeState(current, patch);
-      knowledgeStateRef.current = nextState;
-      return nextState;
+    const nextState = mergeKnowledgeState(knowledgeStateRef.current, patch);
+    knowledgeStateRef.current = nextState;
+    setKnowledgeState(nextState);
+    registerObservedLearningFromContext({
+      source: 'web_context_observed',
+      knowledge: nextState,
     });
   };
 
@@ -1341,7 +1370,21 @@ function App() {
 
       screenStreamRef.current = screenStream;
       voiceStreamRef.current = voiceStream;
-      noteDiagnostic({ type: 'screen-started' });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      const screenSettings = screenTrack?.getSettings?.() || {};
+      noteDiagnostic({
+        type: 'screen-started',
+        label: screenTrack?.label || '',
+        displaySurface: screenSettings.displaySurface || '',
+      });
+      registerObservedLearningFromContext({
+        source: 'screen_capture_started',
+        screen: {
+          label: screenTrack?.label || '',
+          displaySurface: screenSettings.displaySurface || '',
+          logicalSurface: screenSettings.logicalSurface,
+        },
+      });
       noteDiagnostic({ type: 'microphone-started' });
       videoRef.current.srcObject = screenStream;
       await videoRef.current.play();

@@ -25,6 +25,7 @@ import { validateLearningExperimentTask } from './autonomousLearningValidator';
 import { promoteLearningValidation } from './autonomousProcedurePromoter';
 import { resolveProcedureReuseForGap } from './autonomousProcedureReuseEngine';
 import { planProcedureOptimizationTasks } from './autonomousProcedureOptimizer';
+import { createProcedureVariantVersion } from './autonomousProcedureVersioning';
 import { normalizeProcedureReuseIndex, rebuildProcedureReuseIndex } from './autonomousReuseIndex';
 import {
   RUNNER_STEP_STATUSES,
@@ -129,6 +130,9 @@ const terminalUnprocessedLearningTasks = (runner = {}, learningState = {}) =>
 const terminalUnprocessedReuseTasks = (runner = {}, learningState = {}) =>
   terminalUnprocessedTasksByCreatedBy(runner, learningState, AUTONOMOUS_REUSE_CREATED_BY);
 
+const terminalUnprocessedOptimizationTasks = (runner = {}, learningState = {}) =>
+  terminalUnprocessedTasksByCreatedBy(runner, learningState, AUTONOMOUS_OPTIMIZER_CREATED_BY);
+
 const recentlyRejectedGapIds = (learningState = {}, { nowMs = Date.now(), windowMs = 3600000 } = {}) =>
   new Set(
     normalizeArray(learningState.recentExperiments)
@@ -186,7 +190,7 @@ const withRealVmEnvironment = (procedure = {}, validation = {}, now = new Date()
 
 const reinforceProcedureFromReuse = ({ memory, task = {}, validation = {}, now } = {}) => {
   const procedureId = normalizeText(task.metadata?.procedureId || task.procedureId);
-  if (!procedureId || !validation.ok) {
+  if (!procedureId || !validation.ok || task.metadata?.substantiveValidation !== true) {
     return memory;
   }
   const updateList = (items = []) =>
@@ -338,6 +342,150 @@ const processCompletedLearningTasks = async ({
       },
     });
     nextMemory = updateAutonomousLearningMemoryState(nextMemory, learningState, { now });
+  }
+
+  const optimizationTasks = terminalUnprocessedOptimizationTasks(runner, learningState)
+    .slice(0, learningState.policy.maxPromotionsPerRun || 2);
+  for (const task of optimizationTasks) {
+    const validation = await validateLearningExperimentTask({
+      runner,
+      task,
+      verifyRunnerEvidence: buildVerificationAdapter(verifyRunnerEvidence),
+      now,
+    });
+    const currentOptimizationState = getAutonomousOptimizationMemoryState(nextMemory);
+    const candidate = normalizeArray(currentOptimizationState.candidates)
+      .find((item) => item.taskId === task.id || item.variantId === task.metadata?.variantId);
+    const procedures = [
+      ...normalizeArray(nextMemory.proceduralMemory?.procedures),
+      ...normalizeArray(learningState.promotedProcedures),
+    ];
+    const procedure = procedures.find((item) =>
+      normalizeText(item.procedureId) === normalizeText(task.metadata?.procedureId || candidate?.procedureId));
+    const variant = candidate?.variant || {
+      variantId: task.metadata?.variantId || '',
+      title: task.title,
+      steps: normalizeArray(task.metadata?.variantSteps),
+    };
+    let nextOptimizationState = getAutonomousOptimizationMemoryState(nextMemory);
+    const benchmarkRecord = {
+      benchmarkId: `benchmark-${task.id}`,
+      taskId: task.id,
+      procedureId: task.metadata?.procedureId || candidate?.procedureId || '',
+      variantId: task.metadata?.variantId || candidate?.variantId || '',
+      status: validation.ok ? 'validated' : 'rejected',
+      reason: validation.reason,
+      benchmark: candidate?.benchmark || variant.benchmark || {},
+      evidenceRefs: normalizeArray(validation.evidenceRefs).map((ref) => ref.id || ref.path),
+      createdAt: now,
+    };
+
+    if (validation.ok && procedure && variant.variantId) {
+      const promotedVariant = createProcedureVariantVersion({
+        procedure,
+        variant: {
+          ...variant,
+          version: variant.version || 'v2_guarded',
+          confidence: Math.max(Number(procedure.confidence || 0), Number(variant.confidence || 0), validation.confidence || 0.62),
+          evidenceRefs: [
+            ...normalizeArray(procedure.evidenceRefs),
+            ...normalizeArray(validation.evidenceRefs),
+          ].slice(-12),
+          validation: {
+            substantive: false,
+            validationKind: 'optimization_benchmark',
+            evidenceVerified: true,
+          },
+        },
+        status: 'guarded',
+        now,
+      });
+      nextOptimizationState = {
+        ...nextOptimizationState,
+        recentBenchmarks: [...normalizeArray(nextOptimizationState.recentBenchmarks), benchmarkRecord].slice(-40),
+        promotedVariants: [...normalizeArray(nextOptimizationState.promotedVariants), promotedVariant].slice(-40),
+        candidates: normalizeArray(nextOptimizationState.candidates)
+          .map((item) => item.taskId === task.id ? { ...item, status: 'validated', validatedAt: now } : item)
+          .slice(-40),
+        stats: {
+          ...(nextOptimizationState.stats || {}),
+          variantsPromoted: Number(nextOptimizationState.stats?.variantsPromoted || 0) + 1,
+        },
+      };
+      learningState = getAutonomousLearningMemoryState(nextMemory);
+      learningState = appendLearningAudit({
+        ...learningState,
+        procedureCandidates: [
+          ...normalizeArray(learningState.procedureCandidates),
+          {
+            candidateId: `optimization-${promotedVariant.procedureId}-${promotedVariant.version}`,
+            procedureId: promotedVariant.procedureId,
+            variantId: variant.variantId,
+            title: promotedVariant.title || variant.title || procedure.title,
+            status: 'guarded',
+            confidence: promotedVariant.confidence,
+            source: AUTONOMOUS_OPTIMIZER_CREATED_BY,
+            evidenceRefs: benchmarkRecord.evidenceRefs,
+            createdAt: now,
+          },
+        ].slice(-60),
+      }, {
+        timestamp: now,
+        type: 'procedure_optimization_validated',
+        summary: 'Variante de procedimento validada como guarded.',
+        reason: validation.reason,
+        metadata: { taskId: task.id, procedureId: promotedVariant.procedureId, variantId: variant.variantId },
+      });
+    } else {
+      nextOptimizationState = {
+        ...nextOptimizationState,
+        recentBenchmarks: [...normalizeArray(nextOptimizationState.recentBenchmarks), benchmarkRecord].slice(-40),
+        rejectedVariants: [
+          ...normalizeArray(nextOptimizationState.rejectedVariants),
+          {
+            procedureId: benchmarkRecord.procedureId,
+            variantId: benchmarkRecord.variantId,
+            taskId: task.id,
+            reason: validation.reason,
+            rejectedAt: now,
+          },
+        ].slice(-40),
+        candidates: normalizeArray(nextOptimizationState.candidates)
+          .map((item) => item.taskId === task.id ? { ...item, status: 'rejected', reason: validation.reason, rejectedAt: now } : item)
+          .slice(-40),
+        stats: {
+          ...(nextOptimizationState.stats || {}),
+          variantsRejected: Number(nextOptimizationState.stats?.variantsRejected || 0) + 1,
+        },
+      };
+      learningState = appendLearningAudit(getAutonomousLearningMemoryState(nextMemory), {
+        timestamp: now,
+        type: 'procedure_optimization_rejected',
+        summary: 'Variante de procedimento recusada pela validacao.',
+        reason: validation.reason,
+        metadata: { taskId: task.id, procedureId: benchmarkRecord.procedureId, variantId: benchmarkRecord.variantId },
+      });
+    }
+
+    nextMemory = updateAutonomousOptimizationMemoryState(nextMemory, nextOptimizationState, { now });
+    nextMemory = updateAutonomousLearningMemoryState(nextMemory, {
+      ...learningState,
+      recentExperiments: [
+        ...normalizeArray(learningState.recentExperiments),
+        {
+          experimentId: `experiment-${task.id}`,
+          taskId: task.id,
+          createdBy: AUTONOMOUS_OPTIMIZER_CREATED_BY,
+          procedureId: benchmarkRecord.procedureId,
+          variantId: benchmarkRecord.variantId,
+          status: validation.ok ? 'validated' : 'rejected',
+          reason: validation.reason,
+          evidenceRefs: benchmarkRecord.evidenceRefs,
+          updatedAt: now,
+        },
+      ].slice(-60),
+    }, { now });
+    learningState = getAutonomousLearningMemoryState(nextMemory);
   }
 
   return {
@@ -539,24 +687,28 @@ export const runAutonomousLearningLoop = async ({
     }
 
     if (policy.allowProcedureOptimization && createdTasks.length < policy.maxTasksCreatedPerRun) {
-      const optimizationState = getAutonomousOptimizationMemoryState(nextMemory);
       const plannedOptimizations = planProcedureOptimizationTasks({
-        procedures: nextMemory.proceduralMemory?.procedures || [],
+        procedures: [
+          ...normalizeArray(nextMemory.proceduralMemory?.procedures),
+          ...normalizeArray(getAutonomousLearningMemoryState(nextMemory).promotedProcedures),
+        ],
         existingTasks: Object.values(getAutonomousRunnerState(nextMemory).tasksById),
-        optimizationState,
+        optimizationState: getAutonomousOptimizationMemoryState(nextMemory),
         now,
       }).slice(0, policy.maxTasksCreatedPerRun - createdTasks.length);
       plannedOptimizations.forEach(({ task, procedure, variant, benchmark }) => {
         nextMemory = enqueueTaskWithAudit(nextMemory, task, { now, auditType: 'procedure_optimization_task_created' });
         createdTasks.push(task);
+        const currentOptimizationState = getAutonomousOptimizationMemoryState(nextMemory);
         const nextOptimization = {
-          ...optimizationState,
+          ...currentOptimizationState,
           lastOptimizationRunAt: now,
           candidates: [
-            ...normalizeArray(optimizationState.candidates),
+            ...normalizeArray(currentOptimizationState.candidates),
             {
               procedureId: procedure.procedureId,
               variantId: variant.variantId,
+              variant,
               benchmark,
               taskId: task.id,
               status: 'task_created',
@@ -564,8 +716,8 @@ export const runAutonomousLearningLoop = async ({
             },
           ].slice(-40),
           stats: {
-            ...(optimizationState.stats || {}),
-            tasksCreated: Number(optimizationState.stats?.tasksCreated || 0) + 1,
+            ...(currentOptimizationState.stats || {}),
+            tasksCreated: Number(currentOptimizationState.stats?.tasksCreated || 0) + 1,
           },
         };
         nextMemory = updateAutonomousOptimizationMemoryState(nextMemory, nextOptimization, { now });
@@ -677,7 +829,11 @@ export const clearAutonomousLearningTestData = (memory, { now = new Date().toISO
 
 export const clearAutonomousLearnedData = (
   memory,
-  { now = new Date().toISOString(), disableLearning = false } = {},
+  {
+    now = new Date().toISOString(),
+    disableLearning = false,
+    preserveGoals = false,
+  } = {},
 ) => {
   const cleared = clearAutonomousLearningTestData(memory, { now });
   const normalizedMemory = pruneAliceMemory(cleared.memory);
@@ -702,6 +858,7 @@ export const clearAutonomousLearnedData = (
     ...emptyLearning,
     enabled: !disableLearning && learning.enabled,
     policy: nextPolicy,
+    learningGoals: preserveGoals ? normalizeArray(learning.learningGoals) : emptyLearning.learningGoals,
     auditLog: [
       {
         id: `learning-cleared-${String(Date.parse(now) || Date.now())}`,
@@ -717,6 +874,7 @@ export const clearAutonomousLearnedData = (
           removedProceduralMemoryProcedures: removedProcedures,
           removedOptimizationCandidates: optimization.candidates.length,
           removedRecentBenchmarks: optimization.recentBenchmarks.length,
+          preservedLearningGoals: preserveGoals ? normalizeArray(learning.learningGoals).length : 0,
           disabled: disableLearning,
         },
       },
@@ -761,6 +919,7 @@ export const clearAutonomousLearnedData = (
       proceduralMemoryProcedures: removedProcedures,
       optimizationCandidates: optimization.candidates.length,
       recentBenchmarks: optimization.recentBenchmarks.length,
+      preservedLearningGoals: preserveGoals ? normalizeArray(learning.learningGoals).length : 0,
       disabled: disableLearning,
     },
   };

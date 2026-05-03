@@ -16,6 +16,7 @@ import {
   createAutonomousLearningTaskForGap,
   createAutonomousOptimizationTask,
   createAutonomousReuseTask,
+  createControlledLearningText,
 } from './autonomousLearningPlanner';
 import {
   clearAutonomousLearnedData,
@@ -51,6 +52,26 @@ const appLaunchGap = {
   type: 'app_launch',
   capability: 'app.launch',
   description: 'Alice nao tem procedimento confiavel para abrir um aplicativo seguro em ambiente controlado e validar que iniciou.',
+  priority: 'medium',
+  evidence: ['test'],
+  riskLevel: 'low',
+};
+
+const fileManagementGap = {
+  gapId: 'gap-file-management-safe',
+  type: 'file_management',
+  capability: 'file.folder.create',
+  description: 'Alice nao tem procedimento confiavel para abrir o Explorer, criar pasta e organizar arquivos em ambiente controlado.',
+  priority: 'high',
+  evidence: ['test'],
+  riskLevel: 'low',
+};
+
+const appInstallGap = {
+  gapId: 'gap-app-install-safe',
+  type: 'app_install',
+  capability: 'app.install.safe_probe',
+  description: 'Alice nao tem procedimento confiavel para localizar pacote instalavel com seguranca na VM.',
   priority: 'medium',
   evidence: ['test'],
   riskLevel: 'low',
@@ -213,6 +234,9 @@ describe('autonomous learning loop governance', () => {
     expect(goalResult.goal.stages.map((stage) => stage.stageKey)).toEqual([
       'app_launch',
       'window_focus',
+      'file_explorer',
+      'file_management',
+      'app_install',
       'text_input',
       'keyboard_shortcuts',
       'clipboard_text',
@@ -240,6 +264,9 @@ describe('autonomous learning loop governance', () => {
     expect(getAutonomousLearningMemoryState(memory).learningGoals[0].stages.map((stage) => stage.stageKey)).toEqual([
       'app_launch',
       'window_focus',
+      'file_explorer',
+      'file_management',
+      'app_install',
       'text_input',
       'keyboard_shortcuts',
       'clipboard_text',
@@ -252,6 +279,20 @@ describe('autonomous learning loop governance', () => {
       'page_read',
       'page_summary',
     ]);
+  });
+
+  it('splits file organization and install requests into Explorer and installer learning stages', () => {
+    const goalResult = createAutonomousLearningGoalFromText(
+      'saber criar pastas, organizar arquivos, instalar programas',
+      { now: '2026-04-30T10:00:00.000Z' },
+    );
+
+    expect(goalResult.ok).toBe(true);
+    expect(goalResult.goal.stages.map((stage) => stage.stageKey)).toEqual(expect.arrayContaining([
+      'file_explorer',
+      'file_management',
+      'app_install',
+    ]));
   });
 
   it('does not create duplicate scanner gaps for learning goal stages already represented by Runner tasks', () => {
@@ -336,6 +377,7 @@ describe('autonomous learning loop governance', () => {
             status: 'guarded',
             confidence: 0.9,
             capabilities: ['runner.recovery'],
+            reuseValidation: { substantive: true },
             evidenceRefs: [{ id: 'evidence-1' }],
           },
         ],
@@ -475,6 +517,9 @@ describe('autonomous learning loop governance', () => {
     expect(planned.ok).toBe(true);
     expect(planned.task.metadata.createdBy).toBe('autonomous_learning_loop');
     expect(planned.task.metadata.learningScenario).toBe('browser_search');
+    expect(planned.task.metadata.requiresSubstantiveValidation).toBe(true);
+    expect(planned.task.metadata.substantiveValidation).toBe(true);
+    expect(planned.task.metadata.requiredValidationSignals).toContain('controlled_outcome_marker');
     expect(planned.task.steps.length).toBeGreaterThanOrEqual(3);
     expect(planned.task.maxAttempts).toBeGreaterThanOrEqual(planned.task.steps.length);
     expect(planned.task.metadata.limits.maxAttempts).toBe(planned.task.maxAttempts);
@@ -495,6 +540,46 @@ describe('autonomous learning loop governance', () => {
     const registerStep = planned.task.steps.find((step) => step.id === 'register-learning-candidate');
     expect(registerStep.action.kind).toBe('visual');
     expect(registerStep.action.visualAction).toBe('run_command');
+    const validationStep = planned.task.steps.find((step) => step.id === 'validate-learning-outcome');
+    expect(validationStep).toBeTruthy();
+    expect(validationStep.action.requestedResources.autonomousLearning.phase).toBe('substantive_validation');
+    expect(validationStep.action.parameters.args.join(' ')).toContain('alice-learning-vm:browser-search-validated');
+    expect(validationStep.action.parameters.args.join(' ')).toContain('browser_search_text_not_observed');
+  });
+
+  it('planner uses controlled but different text for repeated writing experiments', () => {
+    const first = createAutonomousLearningTaskForGap(browserGap, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const second = createAutonomousLearningTaskForGap(browserGap, {
+      now: '2026-04-30T10:00:01.000Z',
+    });
+    const firstTypedText = first.task.steps
+      .find((step) => step.action?.visualAction === 'type_text')
+      ?.action?.parameters?.text;
+    const secondTypedText = second.task.steps
+      .find((step) => step.action?.visualAction === 'type_text')
+      ?.action?.parameters?.text;
+
+    expect(firstTypedText).toMatch(/^alice query [a-z0-9]+$/);
+    expect(secondTypedText).toMatch(/^alice query [a-z0-9]+$/);
+    expect(firstTypedText).not.toBe(secondTypedText);
+  });
+
+  it('controlled learning text is deterministic for the same task context', () => {
+    const input = {
+      gap: browserGap,
+      strategy: { strategyId: 'ctrl_l_address_bar' },
+      actionIndex: 1,
+      now: '2026-04-30T10:00:00.000Z',
+      purpose: 'query',
+    };
+
+    expect(createControlledLearningText(input)).toBe(createControlledLearningText(input));
+    expect(createControlledLearningText(input)).not.toBe(createControlledLearningText({
+      ...input,
+      now: '2026-04-30T10:00:01.000Z',
+    }));
   });
 
   it('planner validates app launch through the resident visual agent and process window checks', () => {
@@ -518,6 +603,27 @@ describe('autonomous learning loop governance', () => {
     });
   });
 
+  it('planner creates real VM file Explorer and safe installer discovery tasks', () => {
+    const fileTask = createAutonomousLearningTaskForGap(fileManagementGap, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const installTask = createAutonomousLearningTaskForGap(appInstallGap, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const fileScript = JSON.stringify(fileTask.task.steps.map((step) => step.action?.parameters || {}));
+    const installScript = JSON.stringify(installTask.task.steps.map((step) => step.action?.parameters || {}));
+
+    expect(fileTask.ok).toBe(true);
+    expect(fileScript).toContain('explorer.exe');
+    expect(fileScript).toContain('AliceLearningFiles');
+    expect(fileScript).toContain('alice-learning-vm:file-managed');
+    expect(installTask.ok).toBe(true);
+    expect(installScript).toContain('winget');
+    expect(installScript).toContain('search');
+    expect(installScript).toContain('install_attempt=search_only_no_install');
+    expect(installScript).toContain('alice-learning-vm:installer-checked');
+  });
+
   it('planner creates real VM field interaction and page validation tasks in VM-only mode', () => {
     const fieldTask = createAutonomousLearningTaskForGap(fieldInteractionGap, {
       now: '2026-04-30T10:00:00.000Z',
@@ -530,11 +636,99 @@ describe('autonomous learning loop governance', () => {
     expect(fieldTask.task.requiresRealVm).toBe(true);
     expect(fieldTask.task.steps.some((step) =>
       JSON.stringify(step.action?.parameters || {}).includes('alice-learning-vm:field-interacted'))).toBe(true);
+    expect(fieldTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes('alice field '))).toBe(true);
 
     expect(pageTask.ok).toBe(true);
     expect(pageTask.task.requiresRealVm).toBe(true);
     expect(pageTask.task.steps.some((step) =>
       JSON.stringify(step.action?.parameters || {}).includes('alice-learning-vm:page-validated'))).toBe(true);
+  });
+
+  it('planner validates text input in a controlled UI instead of blindly typing into unknown focus', () => {
+    const textTask = createAutonomousLearningTaskForGap({
+      gapId: 'gap-text-input-focused-field',
+      type: 'text_input',
+      capability: 'text.input',
+      description: 'Alice nao tem procedimento confiavel para digitar texto em campo focado.',
+      priority: 'high',
+      riskLevel: 'low',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+
+    expect(textTask.ok).toBe(true);
+    expect(textTask.task.steps.some((step) => step.action?.visualAction === 'type_text')).toBe(false);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes('alice-learning-vm:field-interacted'))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes('field_window_not_detected'))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      step.id === 'validate-learning-outcome' &&
+      step.action?.requestedResources?.autonomousLearning?.substantiveValidation === true)).toBe(true);
+  });
+
+  it('planner adapts controlled text interaction to the app context when a known target is present', () => {
+    const vscodeTask = createAutonomousLearningTaskForGap({
+      gapId: 'gap-context-vscode-text-input',
+      type: 'text_input',
+      capability: 'text.input',
+      description: 'Aprender a digitar em um editor de codigo.',
+      priority: 'high',
+      riskLevel: 'low',
+      metadata: {
+        context: {
+          target: 'Visual Studio Code',
+          observedTargets: [{ kind: 'application', label: 'VS Code' }],
+        },
+      },
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const payload = JSON.stringify(vscodeTask.task.steps.map((step) => ({
+      title: step.title,
+      parameters: step.action?.parameters,
+      metadata: step.action?.requestedResources?.autonomousLearning,
+    })));
+
+    expect(vscodeTask.ok).toBe(true);
+    expect(vscodeTask.task.metadata.controlledTarget).toMatchObject({
+      profileId: 'vscode',
+      kind: 'code_editor',
+    });
+    expect(payload).toContain('target_app_not_available:vscode');
+    expect(payload).toContain('vscode_controlled_file_mismatch');
+    expect(payload).toContain('target_profile=vscode');
+  });
+
+  it('planner uses the browser as the controlled target for browser-like text contexts', () => {
+    const browserTextTask = createAutonomousLearningTaskForGap({
+      gapId: 'gap-context-browser-field',
+      type: 'text_input',
+      capability: 'text.input',
+      description: 'Aprender a digitar em campo de navegador.',
+      priority: 'high',
+      riskLevel: 'low',
+      metadata: {
+        context: {
+          target: 'Microsoft Edge',
+          observedTargets: [{ kind: 'application', label: 'Edge browser' }],
+        },
+      },
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const payload = JSON.stringify(browserTextTask.task.steps.map((step) => ({
+      title: step.title,
+      parameters: step.action?.parameters,
+      metadata: step.action?.requestedResources?.autonomousLearning,
+    })));
+
+    expect(browserTextTask.ok).toBe(true);
+    expect(browserTextTask.task.metadata.controlledTarget.profileId).toBe('browser');
+    expect(payload).toContain('target_profile=browser');
+    expect(payload).toContain('browser_search_text_not_observed');
+    expect(payload).not.toContain('target_profile=notepad');
   });
 
   it('reuse and optimization tasks also require the real VM', () => {
@@ -604,6 +798,42 @@ describe('autonomous learning loop governance', () => {
     expect(withEvidenceNoVerify.reason).toBe('verify_runner_evidence_required');
   });
 
+  it('validator refuses promoted learning when substantive validation step is missing', async () => {
+    const planned = createAutonomousLearningTaskForGap(browserGap, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const taskWithoutSubstantiveStep = {
+      ...planned.task,
+      status: RUNNER_TASK_STATUSES.DONE,
+      evidenceRefs: [completeEvidenceRef],
+      steps: planned.task.steps
+        .filter((step) => step.id !== 'validate-learning-outcome')
+        .map((step) => ({
+          ...step,
+          status: 'done',
+          result: {
+            validation: {
+              passed: true,
+              evidencePersistence: { ok: true },
+            },
+          },
+          evidenceRefs: [completeEvidenceRef],
+        })),
+    };
+
+    const validation = await validateLearningExperimentTask({
+      runner: {
+        tasksById: { [taskWithoutSubstantiveStep.id]: taskWithoutSubstantiveStep },
+        evidenceRefs: [completeEvidenceRef],
+      },
+      task: taskWithoutSubstantiveStep,
+      verifyRunnerEvidence: async () => ({ ok: true, artifacts: { status: 'ok' } }),
+    });
+
+    expect(validation.ok).toBe(false);
+    expect(validation.reason).toBe('learning_requires_substantive_validation');
+  });
+
   it('promoter creates candidate and guarded procedure, never active directly', () => {
     const task = {
       id: 'task-1',
@@ -624,6 +854,8 @@ describe('autonomous learning loop governance', () => {
         reason: 'learning_experiment_validated',
         capability: browserGap.capability,
         confidence: 0.64,
+        substantive: true,
+        validationKind: 'controlled_outcome',
         evidenceRefs: [completeEvidenceRef],
       },
       now: '2026-04-30T10:00:00.000Z',
@@ -634,6 +866,8 @@ describe('autonomous learning loop governance', () => {
     expect(promotion.procedure.status).toBe('guarded');
     expect(promotion.procedure.status).not.toBe('active');
     expect(promotion.procedure.environment).toBe('unknown');
+    expect(promotion.procedure.validation.substantive).toBe(true);
+    expect(promotion.procedure.validation.validationKind).toBe('controlled_outcome');
   });
 
   it('processes completed learning tasks that only had a task_created experiment record', async () => {
@@ -862,6 +1096,7 @@ describe('autonomous learning loop governance', () => {
             status: 'active',
             confidence: 0.88,
             capabilities: ['browser.search'],
+            reuseValidation: { substantive: true },
             evidenceRefs: [completeEvidenceRef],
           },
         ],
@@ -880,7 +1115,38 @@ describe('autonomous learning loop governance', () => {
     expect(reuse.task.metadata.createdBy).toBe('autonomous_procedure_reuse');
   });
 
-  it('validated reuse reinforces procedure as real VM capability', async () => {
+  it('reuse engine refuses procedures without substantive reuse validation', () => {
+    const memory = {
+      ...createEmptyAliceMemory(),
+      proceduralMemory: {
+        procedures: [
+          {
+            procedureId: 'procedure_browser_search_address_bar',
+            title: 'Pesquisar no navegador pela barra de endereco',
+            summary: 'Usa Ctrl+L, digita a consulta, Enter e valida carregamento.',
+            steps: ['Ctrl+L', 'Digitar consulta', 'Enter', 'Validar pagina'],
+            status: 'active',
+            confidence: 0.88,
+            capabilities: ['browser.search'],
+            evidenceRefs: [completeEvidenceRef],
+          },
+        ],
+      },
+    };
+
+    const reuse = resolveProcedureReuseForGap({
+      gap: browserGap,
+      memory,
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:00:00.000Z',
+    });
+
+    expect(reuse.ok).toBe(false);
+    expect(reuse.reason).toBe('procedure_missing_substantive_reuse_validation');
+    expect(reuse.task).toBeNull();
+  });
+
+  it('generic reuse marker is rejected and does not reinforce procedure confidence', async () => {
     const reuseTask = createAutonomousReuseTask({
       gap: browserGap,
       match: {
@@ -893,6 +1159,8 @@ describe('autonomous learning loop governance', () => {
       },
       now: '2026-04-30T10:00:00.000Z',
     });
+    expect(reuseTask.metadata.substantiveValidation).toBe(false);
+    expect(reuseTask.metadata.validationKind).toBe('infrastructure_marker');
     const doneReuseTask = {
       ...reuseTask,
       status: RUNNER_TASK_STATUSES.DONE,
@@ -950,9 +1218,289 @@ describe('autonomous learning loop governance', () => {
     const procedure = result.memory.proceduralMemory.procedures
       .find((item) => item.procedureId === 'procedure_browser_search_address_bar');
 
-    expect(procedure.environment).toBe('real_vm');
-    expect(procedure.environments).toContain('real_vm');
-    expect(result.gaps.some((gap) => gap.gapId === browserGap.gapId)).toBe(false);
+    expect(procedure.environment).toBe('local_workspace_fallback');
+    expect(procedure.environments).toEqual(['local_workspace_fallback']);
+    expect(procedure.confidence).toBe(0.7);
+    expect(result.memory.autonomousLearning.recentExperiments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+      status: 'rejected',
+      reason: 'procedure_reuse_requires_substantive_validation',
+      }),
+    ]));
+  });
+
+  it('scanner does not hide capability gaps behind non-substantive autonomous procedures', () => {
+    const memory = {
+      ...createEmptyAliceMemory(),
+      proceduralMemory: {
+        procedures: [{
+          procedureId: 'procedure_browser_search_address_bar',
+          title: 'Pesquisar no navegador',
+          status: 'guarded',
+          confidence: 1,
+          source: 'autonomous_learning_loop',
+          validation: {
+            substantive: false,
+            validationKind: 'controlled_experiment',
+          },
+          reuseValidation: {
+            substantive: false,
+            reason: 'reuse_requires_context_specific_validation',
+          },
+          environment: 'real_vm',
+          environments: ['real_vm'],
+          capabilities: ['browser.search'],
+        }],
+      },
+    };
+
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:02:00.000Z',
+    });
+
+    expect(scan.gaps.some((gap) => gap.gapId === browserGap.gapId)).toBe(true);
+  });
+
+  it('scanner creates context-aware repair gaps from failed Runner tasks', () => {
+    const memory = createEmptyAliceMemory();
+    memory.autonomousLearning.observedTargets = [{
+      targetId: 'observed-application-installer',
+      kind: 'application',
+      label: 'Instalador Seguro',
+      seenCount: 2,
+      lastSeenAt: '2026-04-30T10:00:00.000Z',
+    }];
+    memory.autonomousRunner = {
+      ...memory.autonomousRunner,
+      tasksById: {
+        'task-install': {
+          id: 'task-install',
+          title: 'Instalar aplicativo de teste',
+          status: 'failed',
+          reason: 'package_manager_unavailable',
+          riskLevel: 'low',
+          metadata: { capability: 'app.install.safe_probe' },
+          steps: [{
+            id: 'step-winget',
+            status: 'failed',
+            reason: 'winget_search_failed',
+          }],
+        },
+      },
+      audits: [{
+        type: 'runner_transition',
+        taskId: 'task-install',
+        afterState: 'failed',
+        reason: 'package_manager_unavailable',
+        summary: 'winget nao respondeu',
+      }],
+    };
+
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:01:00.000Z',
+    });
+    const contextualGap = scan.gaps.find((gap) => gap.gapId === 'gap-context-repair-task-install');
+
+    expect(contextualGap).toBeTruthy();
+    expect(contextualGap.type).toBe('app_install');
+    expect(contextualGap.description).toContain('Instalador Seguro');
+    expect(contextualGap.metadata.context.failureSignals.join(' ')).toContain('winget_search_failed');
+  });
+
+  it('contextual repair gaps do not inherit an unrelated recently observed target', () => {
+    const memory = createEmptyAliceMemory();
+    memory.autonomousLearning.observedTargets = [{
+      targetId: 'observed-web-app-random-site',
+      kind: 'web_app',
+      label: 'random.example',
+      seenCount: 4,
+      lastSeenAt: '2026-04-30T10:00:00.000Z',
+    }];
+    memory.autonomousRunner = {
+      ...memory.autonomousRunner,
+      tasksById: {
+        'task-no-target': {
+          id: 'task-no-target',
+          title: 'Preencher campo controlado',
+          status: 'failed',
+          metadata: {
+            capability: 'field.interaction',
+          },
+          steps: [{
+            id: 'step-1',
+            status: 'failed',
+            reason: 'field_not_found',
+          }],
+        },
+      },
+      audits: [{
+        taskId: 'task-no-target',
+        type: 'task_failed',
+        reason: 'field_not_found',
+        summary: 'Falha ao preencher campo',
+        timestamp: '2026-04-30T10:01:00.000Z',
+      }],
+    };
+
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:01:00.000Z',
+    });
+    const contextualGap = scan.gaps.find((gap) => gap.gapId === 'gap-context-repair-task-no-target');
+
+    expect(contextualGap).toBeTruthy();
+    expect(contextualGap.description).not.toContain('random.example');
+    expect(contextualGap.metadata.context.target).toBe('');
+    expect(contextualGap.metadata.context.observedTargets).toEqual([]);
+  });
+
+  it('completed optimization tasks become guarded variants instead of being forgotten', async () => {
+    const procedure = {
+      procedureId: 'procedure_browser_search_address_bar',
+      title: 'Pesquisar no navegador',
+      status: 'guarded',
+      version: 'v1',
+      confidence: 0.8,
+      capabilities: ['browser.search'],
+      steps: ['clicar barra', 'digitar consulta', 'enter', 'validar pagina'],
+      evidenceRefs: [completeEvidenceRef],
+    };
+    const variant = {
+      variantId: 'procedure_browser_search_address_bar-v2-ctrl-l',
+      title: 'Usar Ctrl+L',
+      steps: ['Ctrl+L', 'digitar consulta', 'enter', 'validar pagina'],
+      benchmark: { equallyReliableOrBetter: true, fasterOrSimpler: true },
+    };
+    const task = createAutonomousOptimizationTask({
+      procedure,
+      variant,
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const doneTask = {
+      ...task,
+      status: RUNNER_TASK_STATUSES.DONE,
+      evidenceRefs: [completeEvidenceRef],
+      steps: task.steps.map((step) => ({
+        ...step,
+        status: 'done',
+        result: {
+          validation: {
+            passed: true,
+            evidencePersistence: { ok: true },
+          },
+        },
+        evidenceRefs: [completeEvidenceRef],
+      })),
+    };
+    let memory = {
+      ...createEmptyAliceMemory(),
+      proceduralMemory: { procedures: [procedure] },
+    };
+    memory = enqueueAutonomousRunnerMemoryTask(memory, doneTask, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    memory = updateAutonomousLearningMemoryState(memory, {
+      ...memory.autonomousLearning,
+      policy: {
+        ...memory.autonomousLearning.policy,
+        maxExperimentsPerHour: 0,
+      },
+      recentExperiments: [{
+        experimentId: `experiment-${doneTask.id}`,
+        taskId: doneTask.id,
+        createdBy: 'autonomous_procedure_optimizer',
+        status: 'task_created',
+        createdAt: '2026-04-30T10:00:00.000Z',
+      }],
+    }, { now: '2026-04-30T10:00:00.000Z' });
+    memory.autonomousOptimization = {
+      ...memory.autonomousOptimization,
+      candidates: [{
+        procedureId: procedure.procedureId,
+        variantId: variant.variantId,
+        variant,
+        benchmark: variant.benchmark,
+        taskId: doneTask.id,
+        status: 'task_created',
+        createdAt: '2026-04-30T10:00:00.000Z',
+      }],
+    };
+
+    const result = await runAutonomousLearningLoop({
+      memory,
+      memoryHydrated: true,
+      verifyRunnerEvidence: async () => ({ ok: true, artifacts: { status: 'ok' } }),
+      nowMs: Date.parse('2026-04-30T10:01:00.000Z'),
+    });
+
+    expect(result.createdTasks).toEqual([]);
+    expect(result.memory.autonomousOptimization.promotedVariants[0]).toMatchObject({
+      procedureId: procedure.procedureId,
+      status: 'guarded',
+      previousVersion: 'v1',
+      fallbackVersion: 'v1',
+    });
+    expect(result.memory.autonomousLearning.procedureCandidates[0]).toMatchObject({
+      source: 'autonomous_procedure_optimizer',
+      variantId: variant.variantId,
+      status: 'guarded',
+    });
+    expect(result.memory.autonomousLearning.recentExperiments).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        taskId: doneTask.id,
+        createdBy: 'autonomous_procedure_optimizer',
+        status: 'validated',
+      }),
+    ]));
+  });
+
+  it('stores every optimization candidate created in the same run', async () => {
+    const memory = updateAutonomousLearningMemoryState(createEmptyAliceMemory(), (learning) => ({
+      ...learning,
+      policy: {
+        ...learning.policy,
+        maxExperimentsPerStartup: 1,
+        maxTasksCreatedPerRun: 6,
+      },
+    }), { now: '2026-04-30T09:59:00.000Z' });
+    memory.proceduralMemory.procedures = [
+      {
+        procedureId: 'procedure-browser-search-1',
+        title: 'Pesquisar no navegador 1',
+        status: 'guarded',
+        version: 'v1',
+        confidence: 0.8,
+        capabilities: ['browser.search'],
+        steps: ['clicar barra', 'digitar consulta', 'pressionar enter', 'validar pagina', 'aguardar'],
+      },
+      {
+        procedureId: 'procedure-browser-search-2',
+        title: 'Pesquisar no navegador 2',
+        status: 'guarded',
+        version: 'v1',
+        confidence: 0.82,
+        capabilities: ['browser.search'],
+        steps: ['clicar barra', 'digitar consulta', 'pressionar enter', 'validar pagina', 'aguardar'],
+      },
+    ];
+
+    const result = await runAutonomousLearningLoop({
+      memory,
+      memoryHydrated: true,
+      nowMs: Date.parse('2026-04-30T10:00:00.000Z'),
+    });
+
+    const optimizationTasks = result.createdTasks.filter((task) =>
+      task.metadata?.createdBy === 'autonomous_procedure_optimizer');
+
+    expect(optimizationTasks).toHaveLength(2);
+    expect(result.memory.autonomousOptimization.candidates).toHaveLength(2);
+    expect(result.memory.autonomousOptimization.stats.tasksCreated).toBe(2);
+    expect(result.memory.autonomousOptimization.candidates.map((candidate) => candidate.taskId)).toEqual(
+      expect.arrayContaining(optimizationTasks.map((task) => task.id)),
+    );
   });
 
   it('clear-test-learning removes only autonomous learning tasks', () => {
@@ -1052,6 +1600,59 @@ describe('autonomous learning loop governance', () => {
     });
   });
 
+  it('clear learned data can preserve user learning goals for reexecution', () => {
+    const learnedProcedure = {
+      procedureId: 'procedure_browser_search',
+      title: 'Pesquisar no navegador',
+      source: 'autonomous_learning_loop',
+      status: 'guarded',
+      confidence: 0.8,
+      capabilities: ['browser.search'],
+    };
+    const task = createAutonomousLearningTaskForGap(browserGap, {
+      now: '2026-04-30T10:00:00.000Z',
+    }).task;
+    let memory = {
+      ...createEmptyAliceMemory(),
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        learningGoals: [{
+          goalId: 'goal-1',
+          title: 'Aprender operacoes basicas',
+          description: 'Aprender operacoes basicas',
+          status: 'open',
+        }],
+        procedureCandidates: [{ candidateId: 'candidate-browser', procedureId: 'procedure_browser_search' }],
+        promotedProcedures: [learnedProcedure],
+      },
+      proceduralMemory: {
+        procedures: [learnedProcedure],
+      },
+    };
+    memory = enqueueAutonomousRunnerMemoryTask(memory, task, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+
+    const cleared = clearAutonomousLearnedData(memory, {
+      now: '2026-04-30T10:01:00.000Z',
+      preserveGoals: true,
+    });
+
+    expect(cleared.memory.autonomousLearning.learningGoals).toHaveLength(1);
+    expect(cleared.memory.autonomousLearning.learningGoals[0]).toMatchObject({
+      goalId: 'goal-1',
+      title: 'Aprender operacoes basicas',
+      status: 'open',
+    });
+    expect(cleared.memory.autonomousLearning.procedureCandidates).toEqual([]);
+    expect(cleared.memory.autonomousLearning.promotedProcedures).toEqual([]);
+    expect(cleared.memory.proceduralMemory.procedures).toEqual([]);
+    expect(getAutonomousRunnerState(cleared.memory).tasksById[task.id]).toBeUndefined();
+    expect(cleared.removedLearning).toMatchObject({
+      preservedLearningGoals: 1,
+    });
+  });
+
   it('procedure versioning keeps old version as fallback', () => {
     const next = createProcedureVariantVersion({
       procedure: {
@@ -1094,7 +1695,7 @@ describe('autonomous learning loop governance', () => {
     expect(result.createdTasks[0].metadata.createdBy).toBe('autonomous_learning_loop');
   });
 
-  it('default learning policy does not impose the old two-task queue cap', async () => {
+  it('default learning policy keeps learning open but batches startup task creation', async () => {
     const result = await runAutonomousLearningLoop({
       memory: createEmptyAliceMemory(),
       memoryHydrated: true,
@@ -1103,6 +1704,7 @@ describe('autonomous learning loop governance', () => {
 
     expect(result.started).toBe(true);
     expect(result.createdTasks.length).toBeGreaterThan(2);
+    expect(result.createdTasks.length).toBeLessThanOrEqual(6);
   });
 
   it('records an idle audit instead of tasks_enqueued when no tasks are created', async () => {
@@ -1115,6 +1717,9 @@ describe('autonomous learning loop governance', () => {
         ['procedure_text_input', 'text.input'],
         ['procedure_page_validate', 'page.validate'],
         ['procedure_app_launch', 'app.launch'],
+        ['procedure_file_explorer', 'file.explorer.open'],
+        ['procedure_file_management', 'file.folder.create'],
+        ['procedure_app_install_probe', 'app.install.safe_probe'],
         ['procedure_field_interaction', 'field.interaction'],
         ['procedure_page_read', 'page.read'],
       ].map(([procedureId, capability]) => ({

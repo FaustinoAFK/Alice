@@ -4,9 +4,9 @@ export const AUTONOMOUS_OPTIMIZER_CREATED_BY = 'autonomous_procedure_optimizer';
 
 export const DEFAULT_AUTONOMOUS_LEARNING_POLICY = {
   enabled: true,
-  maxExperimentsPerStartup: 1000,
-  maxExperimentsPerHour: 1000,
-  maxPromotionsPerRun: 20,
+  maxExperimentsPerStartup: 6,
+  maxExperimentsPerHour: 24,
+  maxPromotionsPerRun: 4,
   allowedEnvironments: ['real_vm'],
   allowedScriptTypes: ['node', 'python', 'powershell'],
   blockedActions: [
@@ -28,11 +28,12 @@ export const DEFAULT_AUTONOMOUS_LEARNING_POLICY = {
   allowProcedureOptimization: true,
   dryRunDefault: false,
   minEvidenceConfidence: 0.6,
+  promotionRequiresSubstantiveValidation: true,
   minReuseConfidence: 0.62,
   guardedReuseThreshold: 0.72,
   activeReuseThreshold: 0.6,
   maxLoopIterations: 1,
-  maxTasksCreatedPerRun: 1000,
+  maxTasksCreatedPerRun: 6,
   riskThresholds: {
     maxAutomaticRisk: 'low',
     maxScriptRisk: 'low',
@@ -91,6 +92,8 @@ export const normalizeAutonomousLearningPolicy = (policy = {}) => {
     minReuseConfidence: Math.min(1, Math.max(0, Number(source.minReuseConfidence ?? defaults.minReuseConfidence))),
     guardedReuseThreshold: Math.min(1, Math.max(0, Number(source.guardedReuseThreshold ?? defaults.guardedReuseThreshold))),
     activeReuseThreshold: Math.min(1, Math.max(0, Number(source.activeReuseThreshold ?? defaults.activeReuseThreshold))),
+    promotionRequiresSubstantiveValidation:
+      source.promotionRequiresSubstantiveValidation !== false,
     maxLoopIterations: Math.max(1, normalizePositiveInteger(source.maxLoopIterations, defaults.maxLoopIterations)),
     maxTasksCreatedPerRun: Math.max(1, normalizePositiveInteger(source.maxTasksCreatedPerRun, defaults.maxTasksCreatedPerRun)),
     riskThresholds: {

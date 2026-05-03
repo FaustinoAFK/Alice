@@ -426,6 +426,46 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     expect(JSON.parse(goals.outputText)[0].goalId).toBe(output.goalId);
   });
 
+  it('CLI autonomous-learning clear-invalid-observed removes false screen targets', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    saveHarnessMemory({
+      ...createEmptyAliceMemory(),
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        observedTargets: [
+          {
+            targetId: 'observed-application-0-0',
+            kind: 'application',
+            label: '0:0',
+            goalId: 'goal-invalid',
+          },
+        ],
+        learningGoals: [
+          {
+            goalId: 'goal-invalid',
+            title: 'Alvo falso',
+            description: 'Aprender alvo falso',
+            metadata: { observedTargetId: 'observed-application-0-0' },
+          },
+        ],
+      },
+    }, { memoryPath });
+
+    const result = await runHarnessCommand([
+      'autonomous-learning',
+      'clear-invalid-observed',
+      '--memory-path',
+      memoryPath,
+    ], { outputJson: true });
+    const output = JSON.parse(result.outputText);
+    const loaded = loadHarnessMemory({ memoryPath }).memory;
+
+    expect(output.removedTaskIds).toEqual([]);
+    expect(loaded.autonomousLearning.observedTargets).toEqual([]);
+    expect(loaded.autonomousLearning.learningGoals).toEqual([]);
+    expect(loaded.autonomousLearning.auditLog[0].type).toBe('observed_learning_cleanup');
+  });
+
   it('CLI autonomous-learning clear-learned removes learned procedures and can disable learning', async () => {
     const memoryPath = path.join(tempDir, 'alice-memory.json');
     saveHarnessMemory({
@@ -452,6 +492,7 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
       },
       autonomousLearning: {
         ...createEmptyAliceMemory().autonomousLearning,
+        learningGoals: [{ goalId: 'goal-1', title: 'Aprender navegador', status: 'open' }],
         procedureCandidates: [{ candidateId: 'candidate-1', procedureId: 'procedure_browser_search' }],
         promotedProcedures: [{
           procedureId: 'procedure_browser_search',
@@ -472,6 +513,7 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
       'autonomous-learning',
       'clear-learned',
       '--disable',
+      '--preserve-goals',
       '--memory-path',
       memoryPath,
     ], { outputJson: true });
@@ -488,6 +530,12 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     expect(loaded.autonomousLearning.enabled).toBe(false);
     expect(loaded.autonomousLearning.procedureCandidates).toEqual([]);
     expect(loaded.autonomousLearning.promotedProcedures).toEqual([]);
+    expect(loaded.autonomousLearning.learningGoals).toHaveLength(1);
+    expect(loaded.autonomousLearning.learningGoals[0]).toMatchObject({
+      goalId: 'goal-1',
+      title: 'Aprender navegador',
+      status: 'open',
+    });
     expect(loaded.proceduralMemory.procedures.map((procedure) => procedure.procedureId))
       .toEqual(['procedure_user_kept']);
   });

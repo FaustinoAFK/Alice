@@ -10,6 +10,8 @@ from input_controller import click, hotkey, move_mouse, press_key, type_text
 from screen_capture import capture_screen
 from visual_context import active_window_title, build_visual_context
 
+_BACKGROUND_RUNNERS = {}
+
 
 def _tasks_root():
     root = os.environ.get("ALICE_GUEST_TASKS_DIR") or os.path.join(os.environ.get("TEMP", "C:\\Temp"), "alice-guest-agent", "tasks")
@@ -38,6 +40,26 @@ def _status_path(background_task_id):
     return os.path.join(_tasks_root(), background_task_id, "status.json")
 
 
+def _cleanup_background_runner(background_task_id, status=None):
+    runner = _BACKGROUND_RUNNERS.get(background_task_id)
+    if not runner:
+        return
+    runner.poll()
+    if status in {"completed", "failed", "timeout", "cancelled"} or runner.returncode is not None:
+        _BACKGROUND_RUNNERS.pop(background_task_id, None)
+
+
+def _spawn_background_runner(argv, background_task_id):
+    process = subprocess.Popen(
+        argv,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+    )
+    _BACKGROUND_RUNNERS[background_task_id] = process
+    return process.pid
+
+
 def start_background_command(parameters):
     command = parameters.get("command")
     args = parameters.get("args") or []
@@ -64,13 +86,11 @@ def start_background_command(parameters):
     }
     with open(_status_path(background_task_id), "w", encoding="utf-8") as handle:
         json.dump(status, handle, ensure_ascii=False, separators=(",", ":"))
-    process = subprocess.Popen(
+    runner_pid = _spawn_background_runner(
         [sys.executable, runner, task_dir, command, json.dumps(args), str(timeout_seconds)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        close_fds=True,
+        background_task_id,
     )
-    status["runner_pid"] = process.pid
+    status["runner_pid"] = runner_pid
     return status
 
 
@@ -83,6 +103,7 @@ def get_background_command_status(parameters):
         raise ValueError(f"background_task_not_found: {background_task_id}")
     with open(path, "r", encoding="utf-8", errors="replace") as handle:
         status = json.load(handle)
+    _cleanup_background_runner(background_task_id, status.get("status"))
     stdout_path = status.get("stdout_path") or os.path.join(os.path.dirname(path), "stdout.log")
     stderr_path = status.get("stderr_path") or os.path.join(os.path.dirname(path), "stderr.log")
     return {
@@ -106,6 +127,7 @@ def cancel_background_command(parameters):
     }
     with open(_status_path(status["background_task_id"]), "w", encoding="utf-8") as handle:
         json.dump(updated, handle, ensure_ascii=False, separators=(",", ":"))
+    _cleanup_background_runner(status["background_task_id"], updated["status"])
     return updated
 
 

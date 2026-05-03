@@ -3,6 +3,10 @@ import {
   RUNNER_TASK_STATUSES,
   normalizeAutonomousRunnerState,
 } from './autonomousRunnerState';
+import {
+  AUTONOMOUS_LEARNING_CREATED_BY,
+  AUTONOMOUS_REUSE_CREATED_BY,
+} from './autonomousLearningPolicy';
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
@@ -33,6 +37,33 @@ const stepValidationPassed = (step = {}) =>
   step.status === RUNNER_STEP_STATUSES.DONE &&
   step.result?.validation?.passed === true &&
   step.result?.validation?.evidencePersistence?.ok === true;
+
+const isProcedureReuseTask = (task = {}) =>
+  task.metadata?.createdBy === AUTONOMOUS_REUSE_CREATED_BY ||
+  task.metadata?.learningScenario === 'procedure_reuse';
+
+const hasSubstantiveReuseValidation = (task = {}) =>
+  task.metadata?.substantiveValidation === true &&
+  task.metadata?.validationKind !== 'infrastructure_marker';
+
+const isAutonomousLearningTask = (task = {}) =>
+  task.metadata?.createdBy === AUTONOMOUS_LEARNING_CREATED_BY ||
+  task.metadata?.learningScenario === 'capability_gap' ||
+  normalizeText(task.metadata?.createdBy) === 'autonomous_learning_loop';
+
+const hasSubstantiveLearningValidation = (task = {}) => {
+  if (task.metadata?.requiresSubstantiveValidation !== true) {
+    return true;
+  }
+  if (task.metadata?.substantiveValidation !== true) {
+    return false;
+  }
+  return normalizeArray(task.steps).some((step) =>
+    step.status === RUNNER_STEP_STATUSES.DONE &&
+    step.action?.requestedResources?.autonomousLearning?.phase === 'substantive_validation' &&
+    step.result?.validation?.passed === true &&
+    step.result?.validation?.evidencePersistence?.ok === true);
+};
 
 const groupRefsByExecutionId = (refs = []) =>
   normalizeArray(refs).reduce((groups, ref) => {
@@ -121,6 +152,28 @@ export const validateLearningExperimentTask = async ({
       checkedAt: now,
     };
   }
+  if (isProcedureReuseTask(targetTask) && !hasSubstantiveReuseValidation(targetTask)) {
+    return {
+      ok: false,
+      status: 'failed',
+      reason: 'procedure_reuse_requires_substantive_validation',
+      taskId: targetTask.id,
+      procedureId: targetTask.metadata?.procedureId || targetTask.procedureId || '',
+      validationKind: targetTask.metadata?.validationKind || 'unknown',
+      checkedAt: now,
+    };
+  }
+  if (isAutonomousLearningTask(targetTask) && !hasSubstantiveLearningValidation(targetTask)) {
+    return {
+      ok: false,
+      status: 'failed',
+      reason: 'learning_requires_substantive_validation',
+      taskId: targetTask.id,
+      gapId: targetTask.metadata?.gapId || '',
+      validationKind: targetTask.metadata?.validationKind || 'unknown',
+      checkedAt: now,
+    };
+  }
   const refs = normalizeArray(targetTask.evidenceRefs)
     .map((refIdOrRef) => (typeof refIdOrRef === 'string'
       ? normalizedRunner.evidenceRefs.find((ref) => ref.id === refIdOrRef || ref.path === refIdOrRef)
@@ -194,6 +247,8 @@ export const validateLearningExperimentTask = async ({
     evidenceRefs,
     evidenceVerification,
     confidence: 0.62,
+    substantive: targetTask.metadata?.substantiveValidation === true,
+    validationKind: targetTask.metadata?.validationKind || 'controlled_experiment',
     checkedAt: now,
   };
 };

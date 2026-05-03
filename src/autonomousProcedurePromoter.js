@@ -24,6 +24,11 @@ const inferTaskEnvironments = (task = {}) => {
   return [...environments];
 };
 
+const validationIsSubstantive = (validation = {}, task = {}) =>
+  validation.substantive === true ||
+  task.metadata?.substantiveValidation === true ||
+  task.metadata?.requiresSubstantiveValidation === true;
+
 export const createProcedureCandidateFromValidation = ({
   validation = {},
   gap = {},
@@ -66,6 +71,12 @@ export const createProcedureCandidateFromValidation = ({
       validation: {
         reason: validation.reason,
         checkedAt: validation.checkedAt || now,
+        substantive: validationIsSubstantive(validation, task),
+        validationKind: validation.validationKind || task.metadata?.validationKind || 'controlled_experiment',
+      },
+      reuseValidation: {
+        substantive: false,
+        reason: 'reuse_requires_context_specific_validation',
       },
       usageCount: 0,
       successCount: 1,
@@ -89,6 +100,16 @@ export const createProcedureCandidateFromValidation = ({
       environments,
       capabilities: [capability],
       evidenceRefs,
+      validation: {
+        reason: validation.reason,
+        checkedAt: validation.checkedAt || now,
+        substantive: validationIsSubstantive(validation, task),
+        validationKind: validation.validationKind || task.metadata?.validationKind || 'controlled_experiment',
+      },
+      reuseValidation: {
+        substantive: false,
+        reason: 'reuse_requires_context_specific_validation',
+      },
       usageCount: 0,
       successCount: 1,
       failureCount: 0,
@@ -135,6 +156,16 @@ export const promoteLearningValidation = ({
           ...normalizeArray(guardedProcedure.environments),
           guardedProcedure.environment,
         ].filter(Boolean))],
+        validation: {
+          ...(duplicate.validation || {}),
+          substantive: duplicate.validation?.substantive === true,
+          validationKind: duplicate.validation?.validationKind || 'controlled_experiment',
+        },
+        reuseValidation: {
+          ...(duplicate.reuseValidation || {}),
+          substantive: duplicate.reuseValidation?.substantive === true,
+          reason: duplicate.reuseValidation?.reason || 'reuse_requires_context_specific_validation',
+        },
         successCount: Number(duplicate.successCount || 0) + 1,
         updatedAt: now,
       }

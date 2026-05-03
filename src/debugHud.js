@@ -109,10 +109,25 @@ const buildKnowledgeDisplay = (knowledge) => {
   };
 };
 
-const formatAutonomousList = (items = [], formatter = (item) => item) =>
-  Array.isArray(items) && items.length > 0
-    ? items.map(formatter).filter(Boolean).join('\n')
-    : '-';
+const formatAutonomousList = (items = [], formatter = (item) => item, { limit = 80, from = 'end' } = {}) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return '-';
+  }
+
+  const normalizedLimit = Math.max(1, Number(limit || 80));
+  const omitted = Math.max(0, items.length - normalizedLimit);
+  const visibleItems = omitted > 0
+    ? from === 'start'
+      ? items.slice(0, normalizedLimit)
+      : items.slice(-normalizedLimit)
+    : items;
+  const lines = visibleItems.map(formatter).filter(Boolean);
+
+  return [
+    omitted > 0 ? `... ${omitted} item(ns) ocultos para manter o HUD responsivo ...` : '',
+    ...lines,
+  ].filter(Boolean).join('\n') || '-';
+};
 
 const buildAutonomousDisplay = (autonomous) => ({
   active: autonomous.active ? 'ativo' : 'inativo',
@@ -362,6 +377,9 @@ export const buildDebugHudSnapshot = ({
     lastExperimentAt: autonomousLearningMemoryState?.lastExperimentAt || '-',
     goals: formatAutonomousList(autonomousLearningMemoryState?.learningGoals, (goal) =>
       `${goal.goalId || '-'} | ${goal.status || '-'} | stages=${goal.stages?.length || 0} | ${goal.description || '-'}`,
+    ),
+    observedTargets: formatAutonomousList(autonomousLearningMemoryState?.observedTargets, (target) =>
+      `${target.targetId || '-'} | ${target.kind || '-'} | seen=${target.seenCount ?? 0} | ${target.status || '-'} | ${target.label || '-'}`,
     ),
     gaps: formatAutonomousList(autonomousLearningMemoryState?.knownGaps, (gap) =>
       `${gap.gapId || '-'} | ${gap.priority || '-'} | ${gap.riskLevel || '-'} | ${gap.description || '-'}`,

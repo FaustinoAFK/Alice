@@ -50,14 +50,19 @@
 }
 
 .hud-layout {
+  position: relative;
+  z-index: 1;
   min-height: 100vh;
   display: grid;
   grid-template-columns: 300px minmax(0, 1fr);
   gap: 16px;
   padding: 16px;
+  pointer-events: auto;
 }
 
 .hud-sidebar {
+  position: relative;
+  z-index: 2;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -300,6 +305,8 @@
 }
 
 .hud-main {
+  position: relative;
+  z-index: 2;
   min-width: 0;
   max-height: calc(100vh - 32px);
   overflow: auto;
@@ -315,6 +322,8 @@
 }
 
 .app-topbar {
+  position: relative;
+  z-index: 3;
   min-height: 132px;
   display: flex;
   align-items: center;

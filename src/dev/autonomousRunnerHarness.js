@@ -40,6 +40,7 @@ import {
   clearAutonomousLearningTestData,
   runAutonomousLearningLoop,
 } from '../autonomousLearningLoop';
+import { clearInvalidObservedLearningTargets } from '../autonomousObservedLearning';
 import { createAutonomousReuseTask } from '../autonomousLearningPlanner';
 import { resolveProcedureReuseForGap } from '../autonomousProcedureReuseEngine';
 import { matchProceduresForNeed } from '../autonomousProcedureMatcher';
@@ -1554,10 +1555,14 @@ const applyHarnessCommand = async (memory, command, positional, flags, context) 
       if (subcommand === 'clear-test-learning') {
         return clearAutonomousLearningTestData(memory, { now });
       }
+      if (subcommand === 'clear-invalid-observed') {
+        return clearInvalidObservedLearningTargets(memory, { now, reason: 'harness_clear_invalid_observed' });
+      }
       if (subcommand === 'clear-learned') {
         return clearAutonomousLearnedData(memory, {
           now,
           disableLearning: Boolean(flags.disable),
+          preserveGoals: Boolean(flags['preserve-goals']),
         });
       }
       if (AUTONOMOUS_LEARNING_READ_ONLY.has(subcommand)) {

@@ -38,6 +38,7 @@ export const MAX_ACTIVE_PROJECTS = 10;
 export const MAX_ACTIVE_TASKS = 20;
 export const MAX_TOOL_FACTS = 50;
 export const MAX_PROCEDURES = 30;
+export const MAX_AUTONOMOUS_LEARNING_GOALS = 500;
 export const MAX_AUTONOMOUS_LEARNING_GAPS = 500;
 export const MAX_AUTONOMOUS_LEARNING_EXPERIMENTS = 1000;
 export const MAX_AUTONOMOUS_LEARNING_AUDITS = 1000;
@@ -329,6 +330,7 @@ export const createEmptyAutonomousLearningMemoryState = () => ({
   lastScanAt: '',
   lastExperimentAt: '',
   learningGoals: [],
+  observedTargets: [],
   knownGaps: [],
   recentExperiments: [],
   procedureCandidates: [],
@@ -363,9 +365,10 @@ export const normalizeAutonomousLearningMemoryState = (state = {}) => {
     lastStartupRunAt: normalizeText(source.lastStartupRunAt),
     lastScanAt: normalizeText(source.lastScanAt),
     lastExperimentAt: normalizeText(source.lastExperimentAt),
-    learningGoals: boundedObjects(source.learningGoals, 20)
+    learningGoals: boundedObjects(source.learningGoals, MAX_AUTONOMOUS_LEARNING_GOALS)
       .map((goal) => normalizeAutonomousLearningGoal(goal))
       .filter(Boolean),
+    observedTargets: boundedObjects(source.observedTargets, 500),
     knownGaps: boundedObjects(source.knownGaps, MAX_AUTONOMOUS_LEARNING_GAPS),
     recentExperiments: boundedObjects(source.recentExperiments, MAX_AUTONOMOUS_LEARNING_EXPERIMENTS),
     procedureCandidates: boundedObjects(source.procedureCandidates, 60),
