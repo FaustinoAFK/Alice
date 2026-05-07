@@ -1,10 +1,9 @@
 import { ALICE_SYSTEM_INSTRUCTION } from './prompts/aliceSystemInstruction';
-import { ALICE_LIVE_TOOLS } from './tools/aliceLiveTools';
 
 export const ALICE_LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025';
 
 export { ALICE_SYSTEM_INSTRUCTION } from './prompts/aliceSystemInstruction';
-export { ALICE_LIVE_TOOLS } from './tools/aliceLiveTools';
+export const ALICE_LIVE_TOOLS = [];
 
 export const createAliceLiveSetup = (options = {}) => {
   const normalizedOptions = typeof options === 'string' ? { model: options } : options;
