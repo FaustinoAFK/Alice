@@ -5,6 +5,37 @@ import {
   ALICE_SYSTEM_INSTRUCTION,
   createAliceLiveSetup,
 } from './alice';
+import { ALICE_SYSTEM_INSTRUCTION as MODULE_SYSTEM_INSTRUCTION } from './prompts/aliceSystemInstruction';
+import { ALICE_LIVE_TOOLS as MODULE_LIVE_TOOLS } from './tools/aliceLiveTools';
+
+const EXPECTED_TOOL_NAMES = [
+  'get_navigation_context',
+  'inspect_current_page',
+  'search_same_domain',
+  'search_web',
+  'fetch_web_page',
+  'update_mind_map',
+  'get_autonomous_learning_status',
+  'manage_autonomous_runner',
+  'diagnose_local_vm_setup',
+  'run_local_vm_smoke_test',
+  'install_vm_guest_agent',
+  'diagnose_vm_guest_agent',
+  'start_vm_guest_agent_resident',
+  'capture_vm_guest_screen',
+  'run_vm_guest_agent_action',
+  'run_vm_visual_smoke_test',
+  'run_vm_operational_task',
+  'plan_autonomous_task',
+  'create_host_change_snapshot',
+  'record_host_file_checkpoint',
+  'create_self_improvement_proposal',
+  'approve_self_improvement_proposal',
+  'record_validated_learning',
+  'record_research_finding',
+  'inspect_project_context',
+  'report_unexpected_risk',
+];
 
 describe('createAliceLiveSetup', () => {
   it('builds the live session setup for Alice voice and video conversation', () => {
@@ -13,39 +44,14 @@ describe('createAliceLiveSetup', () => {
     expect(ALICE_LIVE_MODEL).toBe('gemini-2.5-flash-native-audio-preview-12-2025');
     expect(setup.model).toBe(`models/${ALICE_LIVE_MODEL}`);
     expect(setup.generationConfig.responseModalities).toEqual(['AUDIO']);
+    expect(setup.generationConfig.temperature).toBe(0.7);
     expect(setup.generationConfig.mediaResolution).toBe('MEDIA_RESOLUTION_MEDIUM');
     expect(setup.systemInstruction.parts[0].text).toBe(ALICE_SYSTEM_INSTRUCTION);
+    expect(setup.realtimeInputConfig.turnCoverage).toBe('TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO');
     expect(setup.contextWindowCompression).toEqual({ slidingWindow: {} });
     expect(setup.inputAudioTranscription).toEqual({});
     expect(setup.outputAudioTranscription).toEqual({});
-    expect(setup.tools[0].functionDeclarations.map((tool) => tool.name)).toEqual([
-      'get_navigation_context',
-      'inspect_current_page',
-      'search_same_domain',
-      'search_web',
-      'fetch_web_page',
-      'update_mind_map',
-      'get_autonomous_learning_status',
-      'manage_autonomous_runner',
-      'diagnose_local_vm_setup',
-      'run_local_vm_smoke_test',
-      'install_vm_guest_agent',
-      'diagnose_vm_guest_agent',
-      'start_vm_guest_agent_resident',
-      'capture_vm_guest_screen',
-      'run_vm_guest_agent_action',
-      'run_vm_visual_smoke_test',
-      'run_vm_operational_task',
-      'plan_autonomous_task',
-      'create_host_change_snapshot',
-      'record_host_file_checkpoint',
-      'create_self_improvement_proposal',
-      'approve_self_improvement_proposal',
-      'record_validated_learning',
-      'record_research_finding',
-      'inspect_project_context',
-      'report_unexpected_risk',
-    ]);
+    expect(setup.tools[0].functionDeclarations.map((tool) => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
     expect(setup).not.toHaveProperty('proactivity');
     expect(setup).not.toHaveProperty('sessionResumption');
     expect(setup).not.toHaveProperty('prefixTurns');
@@ -88,7 +94,14 @@ describe('createAliceLiveSetup', () => {
 });
 
 describe('ALICE_SYSTEM_INSTRUCTION', () => {
+  it('is re-exported from the prompt module without changing the facade contract', () => {
+    expect(ALICE_SYSTEM_INSTRUCTION).toBe(MODULE_SYSTEM_INSTRUCTION);
+    expect(typeof ALICE_SYSTEM_INSTRUCTION).toBe('string');
+    expect(ALICE_SYSTEM_INSTRUCTION.trim().length).toBeGreaterThan(0);
+  });
+
   it('defines Alice as playful confident with contextual web research tools', () => {
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Voce e Alice');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('playful_confident');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('personalidade propria');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('presenca forte');
@@ -107,11 +120,21 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('update_mind_map');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Nao faca resumo por iniciativa propria');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('responda diretamente a pergunta');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Pedido explicito do usuario tem prioridade maxima');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('VM playground real depende de provedor local configurado');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Workspace local fallback usa copias e nao e VM real');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('run_vm_operational_task antes de pesquisar');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('manage_autonomous_runner');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('snapshot, diff, validacao e rollback');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Auto-melhoria da Alice deve virar proposta');
+  });
+});
+
+describe('ALICE_LIVE_TOOLS', () => {
+  it('is re-exported from the tools module with function declarations in the same order', () => {
+    expect(ALICE_LIVE_TOOLS).toBe(MODULE_LIVE_TOOLS);
+    expect(Array.isArray(ALICE_LIVE_TOOLS)).toBe(true);
+    expect(ALICE_LIVE_TOOLS[0]).toHaveProperty('functionDeclarations');
+    expect(ALICE_LIVE_TOOLS[0].functionDeclarations.map((tool) => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
   });
 });

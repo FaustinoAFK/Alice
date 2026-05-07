@@ -423,3 +423,7 @@ Ao final de cada ciclo, responder com:
 ## Proximo passo recomendado
 
 Fase 1 deve continuar com uma mudanca de baixo risco: criar `src/prompts/` e `src/tools/` como fronteiras documentadas ou extrair o system instruction/tool declarations de `src/alice.js` com teste de equivalencia. A opcao mais segura e criar primeiro READMEs de fronteira e, no ciclo seguinte, mover constantes mantendo `alice.js` como facade.
+
+## Historico de execucao
+
+- Fase 1.1: separar `src/alice.js` em `src/prompts/aliceSystemInstruction.js` e `src/tools/aliceLiveTools.js`, mantendo `src/alice.js` como facade publica e adicionando testes de equivalencia estrutural.
