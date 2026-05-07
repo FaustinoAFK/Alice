@@ -2,24 +2,23 @@
 
 ## Estado atual do projeto
 
-A Alice esta em Fase 1 de organizacao arquitetural incremental. `src/alice.js` ja foi reduzido para facade publica de modelo, prompt, tools e `createAliceLiveSetup`, enquanto prompt e tools foram movidos para modulos dedicados. A ultima mudanca adicionou apenas metadados de dominio das Live tools para preparar futura modularizacao sem alterar runtime.
+A Alice esta em Fase 1 de organizacao arquitetural incremental. `src/alice.js` continua como facade publica; o prompt e as Live tools continuam separados em modulos dedicados; os dominios das tools continuam como metadados de apoio. A ultima alteracao adicionou um contrato JSON estavel para proteger os schemas completos das Live tools antes de qualquer futura separacao por dominio.
 
 ## Ultima alteracao realizada
 
-Foi executada a Fase 1.2: criacao de `src/tools/aliceLiveToolDomains.js` com agrupamento de nomes de tools por dominio e helpers puros para achatar os dominios e criar indice tool -> dominio. Os testes em `src/alice.test.js` foram ampliados para garantir que os dominios cobrem todas as tools, nao duplicam nomes, preservam a ordem oficial e continuam batendo com `ALICE_LIVE_TOOLS`. O plano em `docs/plano-melhoria-alice.md` foi atualizado com o historico da Fase 1.2.
+Foi executada a Fase 1.3. Foi criado um fixture JSON em `src/tools/__fixtures__/aliceLiveTools.contract.json` contendo exatamente `ALICE_LIVE_TOOLS[0].functionDeclarations` serializado com `JSON.stringify(..., null, 2)`. Tambem foi criado `src/tools/aliceLiveTools.contract.test.js`, que valida shape top-level, campos obrigatorios, unicidade de nomes, ordem oficial via dominios, pertencimento exato a um dominio e igualdade completa contra o fixture.
 
 ## Objetivo da alteracao
 
-Reduzir risco antes de uma futura separacao real das tools por dominio. A mudanca cria um contrato testavel de dominio e ordem, mas nao altera schemas, nomes, prompt, modelo Gemini, setup Gemini Live, Runner, VM, memoria, rollback ou Tauri.
+Proteger os schemas completos das Live tools contra mudancas acidentais antes de mover qualquer declaration para arquivos separados por dominio. A mudanca cria uma trava de contrato auditavel sem alterar runtime, prompt, modelo Gemini, schemas reais, nomes, ordem, descriptions, parameters ou required.
 
 ## Arquivos criados
 
-- `src/tools/aliceLiveToolDomains.js`
-- `docs/AI_HANDOFF.md`
+- `src/tools/__fixtures__/aliceLiveTools.contract.json`
+- `src/tools/aliceLiveTools.contract.test.js`
 
 ## Arquivos alterados
 
-- `src/alice.test.js`
 - `docs/plano-melhoria-alice.md`
 - `docs/AI_HANDOFF.md`
 
@@ -27,13 +26,13 @@ Reduzir risco antes de uma futura separacao real das tools por dominio. A mudanc
 
 - `src/App.jsx`
   - alterado: nao
-  - motivo: preservado fora do escopo da Fase 1.2.
+  - motivo: fora do escopo da Fase 1.3.
   - risco: nenhum risco novo introduzido.
 
 - `src/alice.js`
-  - alterado: nao nesta rodada
-  - motivo: ja estava como facade desde a Fase 1.1; nao foi necessario tocar.
-  - risco: baixo; continua dependendo dos exports extraidos em `src/prompts/aliceSystemInstruction.js` e `src/tools/aliceLiveTools.js`.
+  - alterado: nao
+  - motivo: facade publica preservada sem mudancas nesta rodada.
+  - risco: nenhum risco novo introduzido.
 
 - `src/aliceMemory.js`
   - alterado: nao
@@ -57,7 +56,7 @@ Reduzir risco antes de uma futura separacao real das tools por dominio. A mudanc
 
 - `src-tauri/src/lib.rs`
   - alterado: nao
-  - motivo: comandos Tauri/Rust fora do escopo.
+  - motivo: Rust/Tauri fora do escopo.
   - risco: nenhum risco novo introduzido.
 
 - `src-tauri/src/local_vm.rs`
@@ -82,14 +81,14 @@ Reduzir risco antes de uma futura separacao real das tools por dominio. A mudanc
 - `ALICE_SYSTEM_INSTRUCTION` continua exportado: sim.
 - `ALICE_LIVE_TOOLS` continua exportado: sim.
 - `createAliceLiveSetup` continua exportado: sim.
-- Ordem das tools foi preservada: sim, validada por teste.
-- Schemas das tools foram preservados: sim; `src/tools/aliceLiveTools.js` nao foi alterado nesta rodada.
-- Prompt principal nao mudou semanticamente: sim; prompt nao foi alterado nesta rodada.
-- Runner continua exigindo lease, validacao e evidencia: sim; Runner nao foi alterado.
-- Nenhuma task pode virar done sem evidencia validada: sim; transicoes do Runner nao foram alteradas.
-- Workspace fallback continua separado de VM real: sim; VM/fallback nao foram alterados.
-- Rollback/snapshot nao foi enfraquecido: sim; rollback/snapshot nao foram alterados.
-- Learning automatico nao promove comportamento ativo sem revisao: sim; learning nao foi alterado.
+- Ordem das tools foi preservada: sim, validada contra `flattenAliceLiveToolDomainNames`.
+- Schemas das tools foram preservados: sim, `src/tools/aliceLiveTools.js` nao foi alterado e o fixture bate com `functionDeclarations`.
+- Prompt principal nao mudou semanticamente: sim, prompt nao foi alterado.
+- Runner continua exigindo lease, validacao e evidencia: sim, Runner nao foi alterado.
+- Nenhuma task pode virar done sem evidencia validada: sim, transicoes do Runner nao foram alteradas.
+- Workspace fallback continua separado de VM real: sim, VM/fallback nao foram alterados.
+- Rollback/snapshot nao foi enfraquecido: sim, rollback/snapshot nao foram alterados.
+- Learning automatico nao promove comportamento ativo sem revisao: sim, learning nao foi alterado.
 
 ## Testes executados
 
@@ -97,7 +96,7 @@ Reduzir risco antes de uma futura separacao real das tools por dominio. A mudanc
 npm test
 ```
 
-Resultado: passou. `45` arquivos de teste, `483` testes.
+Resultado: passou. `46` arquivos de teste, `488` testes.
 
 ```powershell
 npm run lint
@@ -116,15 +115,15 @@ cd src-tauri
 cargo test
 ```
 
-Resultado: nao executado nesta rodada da Fase 1.2 porque o escopo nao alterou Rust/Tauri. Ultima execucao anterior nesta sequencia passou com `77` testes.
+Resultado: nao executado nesta rodada porque nenhum arquivo em `src-tauri/` foi alterado.
 
 ## Riscos ainda existentes
 
-- `src/App.jsx` continua grande e acoplado, ainda coordenando UI, Live, memoria, Runner, learning, HUD e timers.
-- `src/aliceMemory.js` continua sendo facade e contrato persistente amplo demais.
+- `src/App.jsx` continua grande e acoplado, coordenando UI, Live, memoria, Runner, learning, HUD e timers.
+- `src/aliceMemory.js` continua sendo contrato persistente amplo demais.
 - `src-tauri/src/lib.rs` continua concentrando comandos nativos sensiveis.
-- Os dominios de tools agora sao metadados testados, mas os schemas ainda permanecem em um unico arquivo grande.
+- Os schemas das Live tools continuam em um unico arquivo grande; agora estao protegidos por fixture, mas ainda nao foram modularizados por dominio.
 
 ## Proximo passo
 
-Executar Fase 1.3: criar contrato/snapshot leve para os schemas das tools antes de qualquer separacao real por arquivos de dominio. Nao mover schemas ainda sem teste de equivalencia forte.
+Executar a proxima etapa da Fase 1 com uma separacao real, pequena e testada de declarations por dominio, provavelmente comecando por um dominio de baixo risco como `web`, mantendo `src/tools/aliceLiveTools.js` exportando o mesmo `ALICE_LIVE_TOOLS` final e usando o contrato JSON para bloquear qualquer mudanca acidental.
