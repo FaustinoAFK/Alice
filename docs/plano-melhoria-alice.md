@@ -427,3 +427,4 @@ Fase 1 deve continuar com uma mudanca de baixo risco: criar `src/prompts/` e `sr
 ## Historico de execucao
 
 - Fase 1.1: separar `src/alice.js` em `src/prompts/aliceSystemInstruction.js` e `src/tools/aliceLiveTools.js`, mantendo `src/alice.js` como facade publica e adicionando testes de equivalencia estrutural.
+- Fase 1.2: adicionar metadados de dominio em `src/tools/aliceLiveToolDomains.js` sem alterar `ALICE_LIVE_TOOLS`, validando cobertura, unicidade e ordem oficial por teste.

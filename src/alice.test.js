@@ -6,6 +6,11 @@ import {
   createAliceLiveSetup,
 } from './alice';
 import { ALICE_SYSTEM_INSTRUCTION as MODULE_SYSTEM_INSTRUCTION } from './prompts/aliceSystemInstruction';
+import {
+  ALICE_LIVE_TOOL_DOMAINS,
+  createAliceLiveToolDomainIndex,
+  flattenAliceLiveToolDomainNames,
+} from './tools/aliceLiveToolDomains';
 import { ALICE_LIVE_TOOLS as MODULE_LIVE_TOOLS } from './tools/aliceLiveTools';
 
 const EXPECTED_TOOL_NAMES = [
@@ -136,5 +141,34 @@ describe('ALICE_LIVE_TOOLS', () => {
     expect(Array.isArray(ALICE_LIVE_TOOLS)).toBe(true);
     expect(ALICE_LIVE_TOOLS[0]).toHaveProperty('functionDeclarations');
     expect(ALICE_LIVE_TOOLS[0].functionDeclarations.map((tool) => tool.name)).toEqual(EXPECTED_TOOL_NAMES);
+  });
+
+  it('keeps tool domain metadata complete, unique, and aligned with the official order', () => {
+    const officialNames = ALICE_LIVE_TOOLS[0].functionDeclarations.map((tool) => tool.name);
+    const domainNames = flattenAliceLiveToolDomainNames();
+    const uniqueDomainNames = new Set(domainNames);
+    const domainIndex = createAliceLiveToolDomainIndex();
+
+    expect(domainNames).toEqual(officialNames);
+    expect(domainNames).toEqual(EXPECTED_TOOL_NAMES);
+    expect(uniqueDomainNames.size).toBe(domainNames.length);
+    expect(Object.keys(domainIndex)).toHaveLength(officialNames.length);
+    officialNames.forEach((toolName) => {
+      expect(domainIndex[toolName]).toEqual(expect.any(String));
+      expect(domainIndex[toolName].length).toBeGreaterThan(0);
+    });
+    ALICE_LIVE_TOOL_DOMAINS.forEach((domain) => {
+      expect(domain.domain).toEqual(expect.any(String));
+      expect(domain.toolNames.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('uses the same tools object in createAliceLiveSetup by default', () => {
+    const setup = createAliceLiveSetup();
+
+    expect(setup.tools).toBe(ALICE_LIVE_TOOLS);
+    expect(setup.tools[0].functionDeclarations.map((tool) => tool.name)).toEqual(
+      flattenAliceLiveToolDomainNames(),
+    );
   });
 });
