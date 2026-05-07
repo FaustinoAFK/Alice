@@ -670,6 +670,9 @@ export const runAutonomousLearningLoop = async ({
       if (createdTasks.length >= policy.maxTasksCreatedPerRun) {
         break;
       }
+      if (gap.status === 'needs_human_review') {
+        continue;
+      }
       if (rejectedGapCooldown.has(gap.gapId)) {
         continue;
       }

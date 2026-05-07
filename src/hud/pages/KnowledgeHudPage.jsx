@@ -99,3 +99,5 @@ export function KnowledgeHudPage({ debugHud }) {
     </section>
   );
 }
+
+export default KnowledgeHudPage;

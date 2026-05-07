@@ -55,6 +55,7 @@ export const RUNNER_REASONS = {
   DRY_RUN_FAILED: 'dry_run_failed',
   COMPLETION_CRITERIA_MISSING: 'completion_criteria_missing',
   EVIDENCE_PERSISTENCE_FAILED: 'evidence_persistence_failed',
+  RUNTIME_INVOKE_UNAVAILABLE: 'runtime_invoke_unavailable',
   RUNNING_REQUIRES_LEASE: 'running_requires_lease',
   DONE_REQUIRES_EXECUTION_VALIDATION_EVIDENCE: 'done_requires_execution_validation_evidence',
 };
@@ -208,6 +209,93 @@ const normalizeTimestamp = (value) => normalizeText(value) || null;
 
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
 
+const LEARNING_OUTCOME_VALIDATED_MARKER = 'alice-learning-vm:learning-outcome-validated';
+const MALFORMED_LEARNING_VALIDATION_SWITCH = 'switch ($capability) {;';
+
+const quotePowerShellString = (value = '') =>
+  `'${String(value).replace(/'/g, "''")}'`;
+
+const parsePowerShellSingleQuotedAssignment = (script = '', variableName = '', fallback = '') => {
+  const escapedName = String(variableName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = String(script).match(new RegExp(`\\$${escapedName}\\s*=\\s*'((?:''|[^'])*)'`));
+  return match ? match[1].replace(/''/g, "'") : fallback;
+};
+
+const buildLearningOutcomeValidationScript = ({
+  capability = 'unknown',
+  targetProcessName = 'notepad',
+  targetProfile = 'notepad',
+} = {}) => [
+  "$ErrorActionPreference = 'Stop'",
+  `$capability = ${quotePowerShellString(capability || 'unknown')}`,
+  `$targetProcessName = ${quotePowerShellString(targetProcessName || 'notepad')}`,
+  '$validated = $false',
+  "if ($capability -eq 'app.launch' -or $capability -eq 'app.window.focus') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_app_window_missing' }; $validated = $true }",
+  "if ($capability -eq 'text.input') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_text_window_missing' }; $validated = $true }",
+  "if ($capability -eq 'field.interaction' -or $capability -eq 'form.fill') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_field_window_missing' }; $validated = $true }",
+  "if ($capability -eq 'file.explorer.open') { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'validated_explorer_folder_missing' }; $validated = $true }",
+  "if ($capability -eq 'file.folder.create') { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (@(Get-ChildItem -LiteralPath $root -Filter note.txt -Recurse -ErrorAction SilentlyContinue).Count)) { throw 'validated_controlled_file_missing' }; $validated = $true }",
+  "if ($capability -eq 'app.install.safe_probe') { if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'validated_package_manager_missing' }; $validated = $true }",
+  "if ($capability -eq 'page.validate') { $path = Join-Path $env:TEMP 'alice-learning-page-validation.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_page_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-validation-ok') { throw 'validated_page_marker_missing' }; $validated = $true }",
+  "if ($capability -eq 'page.read' -or $capability -eq 'page.summary') { $path = Join-Path $env:TEMP 'alice-learning-page-read.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_read_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-read-ok') { throw 'validated_read_marker_missing' }; $validated = $true }",
+  "if ($capability -eq 'search.results.validate') { if (-not (@(Get-Process -Name msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_search_window_missing' }; $validated = $true }",
+  "if (-not $validated) { throw ('unsupported_substantive_validation:' + $capability) }",
+  `Write-Output ${quotePowerShellString(LEARNING_OUTCOME_VALIDATED_MARKER)}`,
+  "Write-Output ('capability=' + $capability)",
+  `Write-Output ${quotePowerShellString(`target_profile=${targetProfile || 'notepad'}`)}`,
+].join('; ');
+
+const repairLearningOutcomeValidationParameters = (parameters = {}, requestedResources = null) => {
+  const args = Array.isArray(parameters.args) ? parameters.args : [];
+  const commandIndex = args.findIndex((arg, index) =>
+    index > 0 &&
+    args[index - 1] === '-Command' &&
+    typeof arg === 'string' &&
+    arg.includes('$capability') &&
+    arg.includes(LEARNING_OUTCOME_VALIDATED_MARKER));
+
+  if (commandIndex === -1) {
+    return parameters;
+  }
+
+  const command = args[commandIndex];
+  const controlledTarget = requestedResources?.autonomousLearning?.controlledTarget || {};
+  const capability = parsePowerShellSingleQuotedAssignment(command, 'capability', 'unknown');
+  const capabilityAlreadyCovered = command.includes(`$capability -eq ${quotePowerShellString(capability)}`);
+  const needsRepair = command.includes(MALFORMED_LEARNING_VALIDATION_SWITCH) ||
+    (command.includes('unsupported_substantive_validation') && !capabilityAlreadyCovered);
+
+  if (!needsRepair) {
+    return parameters;
+  }
+
+  const targetProcessName = parsePowerShellSingleQuotedAssignment(
+    command,
+    'targetProcessName',
+    controlledTarget.processName || 'notepad',
+  );
+  const targetProfile = controlledTarget.profileId || 'notepad';
+
+  const repairedArgs = [...args];
+  repairedArgs[commandIndex] = buildLearningOutcomeValidationScript({
+    capability,
+    targetProcessName,
+    targetProfile,
+  });
+
+  return {
+    ...parameters,
+    args: repairedArgs,
+  };
+};
+
+const normalizeActionParameters = (parameters = {}, requestedResources = null) => {
+  if (!parameters || typeof parameters !== 'object') {
+    return {};
+  }
+  return repairLearningOutcomeValidationParameters(parameters, requestedResources);
+};
+
 const normalizeEnum = (value, validValues, fallback) => {
   const normalized = normalizeText(value);
   return validValues.includes(normalized) ? normalized : fallback;
@@ -331,9 +419,7 @@ const normalizeAction = (action = {}, fallbackCommand = '') => {
     requestedResources: normalizedAction.requestedResources || null,
     hostResources: normalizedAction.hostResources || null,
     visualAction: normalizeText(normalizedAction.visualAction || normalizedAction.action),
-    parameters: normalizedAction.parameters && typeof normalizedAction.parameters === 'object'
-      ? normalizedAction.parameters
-      : {},
+    parameters: normalizeActionParameters(normalizedAction.parameters, normalizedAction.requestedResources),
     environment: normalizeText(normalizedAction.environment),
   };
 };

@@ -29,6 +29,7 @@ import {
   recoverAutonomousTasksOnStartup,
 } from '../autonomousRunnerLease';
 import { runAutonomousTaskRunnerTick } from '../autonomousTaskRunner';
+import { getEligibleRunnerTasks } from '../autonomousRunnerScheduler';
 import { createProcedureCandidate } from '../autonomousLearning/learning';
 import { scanAutonomousCapabilityGaps } from '../autonomousCapabilityScanner';
 import {
@@ -45,6 +46,13 @@ import { createAutonomousReuseTask } from '../autonomousLearningPlanner';
 import { resolveProcedureReuseForGap } from '../autonomousProcedureReuseEngine';
 import { matchProceduresForNeed } from '../autonomousProcedureMatcher';
 import { rebuildProcedureReuseIndex } from '../autonomousReuseIndex';
+import {
+  RUNTIME_HARNESS_CREATED_BY,
+  RUNTIME_TEXT_INPUT_NEGATIVE_SMOKE_SCENARIO,
+  RUNTIME_TEXT_INPUT_SMOKE_SCENARIO,
+  createRuntimeTextInputNegativeSmokeRequest,
+  createRuntimeTextInputSmokeRequest,
+} from './runtimeHarnessBridge';
 
 export const HARNESS_CREATED_BY = 'autonomous_runner_harness';
 export const HARNESS_APP_ID = 'com.faustinoafk.alicevirtual';
@@ -58,6 +66,11 @@ const READ_ONLY_COMMANDS = new Set([
   'list-running',
   'list-test-tasks',
   'verify-safe-state',
+]);
+
+const RUNTIME_REQUEST_COMMANDS = new Set([
+  'request-runtime-text-input-smoke',
+  'request-runtime-text-input-negative-smoke',
 ]);
 
 const AUTONOMOUS_LEARNING_READ_ONLY = new Set([
@@ -79,6 +92,7 @@ const AUTONOMOUS_REUSE_READ_ONLY = new Set([
 
 const SEED_COMMANDS = new Set([
   'seed-smoke',
+  'seed-text-input-smoke',
   'seed-failure',
   'seed-large-task',
   'seed-vm-unavailable',
@@ -261,6 +275,79 @@ export const resolveMemoryPath = ({
   return path.join(configRoot, HARNESS_APP_ID, HARNESS_MEMORY_FILE);
 };
 
+export const resolveRuntimeRequestDir = ({
+  requestDir = '',
+  env = process.env,
+  platform = os.platform(),
+} = {}) => {
+  if (requestDir) {
+    return path.resolve(requestDir);
+  }
+  return path.join(path.dirname(resolveMemoryPath({ env, platform })), 'dev-runtime-requests');
+};
+
+const writeRuntimeHarnessRequest = (request, {
+  requestDir = '',
+  env = process.env,
+} = {}) => {
+  const resolvedDir = resolveRuntimeRequestDir({ requestDir, env });
+  fs.mkdirSync(resolvedDir, { recursive: true });
+  const safeRequestId = toSafeIdPart(request.requestId);
+  const requestPath = path.join(resolvedDir, `${safeRequestId}.json`);
+  fs.writeFileSync(requestPath, `${JSON.stringify({ ...request, requestId: safeRequestId }, null, 2)}\n`, 'utf8');
+  return {
+    request: { ...request, requestId: safeRequestId },
+    requestDir: resolvedDir,
+    requestPath,
+  };
+};
+
+export const requestRuntimeTextInputSmoke = ({
+  now = toIso(),
+  requestDir = '',
+  env = process.env,
+} = {}) => {
+  const request = createRuntimeTextInputSmokeRequest({
+    now,
+    requestId: `runtime-text-input-smoke-${timestampId(now)}`,
+  });
+  const persisted = writeRuntimeHarnessRequest(request, { requestDir, env });
+  return {
+    ok: true,
+    command: 'request-runtime-text-input-smoke',
+    requestId: persisted.request.requestId,
+    requestPath: persisted.requestPath,
+    requestDir: persisted.requestDir,
+    createdBy: RUNTIME_HARNESS_CREATED_BY,
+    testScenario: RUNTIME_TEXT_INPUT_SMOKE_SCENARIO,
+    message: 'Pedido registrado para o runtime Tauri da Alice. O CLI nao executa VM/workspace fora do app.',
+    nextCommand: 'npm run runner:harness -- print-state',
+  };
+};
+
+export const requestRuntimeTextInputNegativeSmoke = ({
+  now = toIso(),
+  requestDir = '',
+  env = process.env,
+} = {}) => {
+  const request = createRuntimeTextInputNegativeSmokeRequest({
+    now,
+    requestId: `runtime-text-input-negative-smoke-${timestampId(now)}`,
+  });
+  const persisted = writeRuntimeHarnessRequest(request, { requestDir, env });
+  return {
+    ok: true,
+    command: 'request-runtime-text-input-negative-smoke',
+    requestId: persisted.request.requestId,
+    requestPath: persisted.requestPath,
+    requestDir: persisted.requestDir,
+    createdBy: RUNTIME_HARNESS_CREATED_BY,
+    testScenario: RUNTIME_TEXT_INPUT_NEGATIVE_SMOKE_SCENARIO,
+    message: 'Pedido negativo registrado para o runtime Tauri da Alice. O CLI nao executa VM/workspace fora do app.',
+    nextCommand: 'npm run runner:harness -- print-state',
+  };
+};
+
 export const loadHarnessMemory = ({ memoryPath = '' } = {}) => {
   const resolvedPath = resolveMemoryPath({ memoryPath, env: process.env });
   if (!fs.existsSync(resolvedPath)) {
@@ -370,6 +457,60 @@ export const seedSmokeTask = (memory, { now = toIso(), enable = true } = {}) => 
   nextMemory = maybeEnableRunner(nextMemory, enable, now);
   const taskId = Object.values(getAutonomousRunnerState(nextMemory).tasksById)
     .filter((task) => isHarnessTask(task) && task.metadata.testScenario === 'smoke')
+    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0]?.id;
+
+  return { memory: nextMemory, taskIds: [taskId].filter(Boolean) };
+};
+
+export const seedTextInputSmokeTask = (memory, { now = toIso(), enable = true } = {}) => {
+  const expectedText = 'alice text input smoke ok';
+  let nextMemory = enqueueAutonomousRunnerMemoryTask(memory, createHarnessTaskInput('text-input-smoke', {
+    title: 'Smoke controlado de input de texto',
+    description: 'Criar arquivo de texto controlado no workspace e validar conteudo sem usar VM real.',
+    priority: 'high',
+    steps: [
+      commandStep({
+        id: 'write-controlled-text-file',
+        title: 'Escrever arquivo de texto controlado',
+        command: 'node',
+        args: [
+          '-e',
+          [
+            "const fs=require('fs')",
+            "const expected='alice text input smoke ok'",
+            "fs.writeFileSync('runner-text-input-smoke.txt', expected, 'utf8')",
+            "console.log('vm_text_input_diagnostics='+JSON.stringify({driver:'vmTextInputDriver',target:'workspace_file',expectedText:expected,actualTextPreview:expected,inputMethod:'workspace_stub',fileExists:true,fileSize:expected.length,saveAttempted:true,fileLastWriteTimeChanged:true,validationPassed:true,failureReason:''}))",
+            "console.log('alice-text-input-smoke-ok')",
+          ].join(';'),
+        ],
+        completionCriteria: {
+          type: 'file_contains',
+          contains: 'alice-text-input-smoke-ok',
+        },
+      }),
+      commandStep({
+        id: 'read-controlled-text-file',
+        title: 'Validar arquivo de texto controlado',
+        command: 'node',
+        args: [
+          '-e',
+          `const fs=require('fs'); const expected=${JSON.stringify(expectedText)}; const actual=fs.readFileSync('runner-text-input-smoke.txt','utf8'); if(actual!==expected){ throw new Error('controlled_text_file_mismatch') }; console.log(actual);`,
+        ],
+        completionCriteria: {
+          type: 'file_contains',
+          contains: expectedText,
+        },
+      }),
+    ],
+    metadata: {
+      controlledText: expectedText,
+      inputMethod: 'workspace_stub',
+    },
+  }, { now }), { now });
+
+  nextMemory = maybeEnableRunner(nextMemory, enable, now);
+  const taskId = Object.values(getAutonomousRunnerState(nextMemory).tasksById)
+    .filter((task) => isHarnessTask(task) && task.metadata.testScenario === 'text-input-smoke')
     .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))[0]?.id;
 
   return { memory: nextMemory, taskIds: [taskId].filter(Boolean) };
@@ -744,6 +885,22 @@ export const tickHarnessRunner = async (memory, {
   nowMs = Date.now(),
   vmStatus = { realVmAvailable: false, fallbackWorkspaceAvailable: true },
 } = {}) => {
+  const initialRunner = getAutonomousRunnerState(memory);
+  const { eligible } = getEligibleRunnerTasks(initialRunner, { nowMs });
+  const runtimeTask = eligible.find((task) =>
+    task.requiresRealVm ||
+    task.allowWorkspaceFallback !== false ||
+    task.steps?.some((step) => ['command', 'visual'].includes(step.action?.kind)));
+  if (runtimeTask) {
+    throw new Error([
+      `Harness CLI nao executa VM/workspace fora do runtime Tauri. Task elegivel: ${runtimeTask.id}.`,
+      'Use a Alice desktop aberta e solicite o smoke com:',
+      'npm run runner:harness -- request-runtime-text-input-smoke',
+      'ou o negativo com:',
+      'npm run runner:harness -- request-runtime-text-input-negative-smoke',
+    ].join(' '));
+  }
+
   let nextMemory = memory;
   const results = [];
 
@@ -1402,11 +1559,11 @@ export const printTask = (memory, taskId) => {
 export const printAudit = (memory, { limit = 30 } = {}) =>
   getAutonomousRunnerState(memory).audits.slice(-Math.max(1, Number(limit || 30)));
 
-export const printEvidence = (memory, { memoryPath = '' } = {}) => {
+export const printEvidence = (memory, { memoryPath = '', taskId = '' } = {}) => {
   const runner = getAutonomousRunnerState(memory);
   const baseDir = path.dirname(resolveMemoryPath({ memoryPath, env: process.env }));
 
-  return runner.evidenceRefs.map((ref) => {
+  return runner.evidenceRefs.filter((ref) => !taskId || ref.taskId === taskId).map((ref) => {
     const resolvedPath = ref.path
       ? path.isAbsolute(ref.path)
         ? path.resolve(ref.path)
@@ -1459,6 +1616,9 @@ const isReadOnlyHarnessCommand = (command, positional = []) => {
   }
   if (command === 'autonomous-reuse') {
     return AUTONOMOUS_REUSE_READ_ONLY.has(positional[0] || 'print-index');
+  }
+  if (RUNTIME_REQUEST_COMMANDS.has(command)) {
+    return true;
   }
   return READ_ONLY_COMMANDS.has(command);
 };
@@ -1623,6 +1783,8 @@ const applyHarnessCommand = async (memory, command, positional, flags, context) 
     }
     case 'seed-smoke':
       return seedSmokeTask(memory, { now, enable });
+    case 'seed-text-input-smoke':
+      return seedTextInputSmokeTask(memory, { now, enable });
     case 'seed-failure':
       return seedFailureTask(memory, { now, enable, maxAttempts: Number(flags['max-attempts'] || 3) });
     case 'seed-large-task':
@@ -1728,7 +1890,7 @@ const buildReadOnlyOutput = (memory, command, positional, flags, context) => {
     return printAudit(memory, { limit: Number(flags.limit || 30) });
   }
   if (command === 'print-evidence') {
-    return printEvidence(memory, { memoryPath: context.memoryPath });
+    return printEvidence(memory, { memoryPath: context.memoryPath, taskId: positional[0] || '' });
   }
   if (command === 'list-running') {
     return listRunningTasks(memory);
@@ -1759,6 +1921,30 @@ export const runHarnessCommand = async (argv = [], {
   outputJson = null,
 } = {}) => {
   const parsed = parseHarnessArgs(argv);
+  if (
+    parsed.command === 'request-runtime-text-input-smoke' ||
+    parsed.command === 'request-runtime-text-input-negative-smoke'
+  ) {
+    const now = parsed.flags.now ? toIso(Date.parse(parsed.flags.now)) : toIso();
+    const requestFn = parsed.command === 'request-runtime-text-input-negative-smoke'
+      ? requestRuntimeTextInputNegativeSmoke
+      : requestRuntimeTextInputSmoke;
+    const output = requestFn({
+      now,
+      requestDir: parsed.flags['request-dir'] || '',
+      env,
+    });
+    return {
+      ok: true,
+      command: parsed.command,
+      memoryPath: '',
+      backupPath: null,
+      output,
+      outputText: (outputJson ?? Boolean(parsed.flags.json))
+        ? JSON.stringify(output, null, 2)
+        : JSON.stringify(output, null, 2),
+    };
+  }
   const memoryPath = resolveMemoryPath({
     memoryPath: parsed.flags['memory-path'] || '',
     env,

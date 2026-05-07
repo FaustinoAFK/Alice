@@ -26,11 +26,13 @@ export const executeAutonomousRunnerStep = async ({
     return {
       ok: false,
       message: 'Runner exige runtime Tauri para executar VM/workspace.',
-      reason: 'invoke_unavailable',
+      reason: RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE,
       stdout: '',
       stderr: '',
       artifacts: {
         executionMode,
+        runtimeRequired: true,
+        runtimeAvailable: false,
         startedAt: now,
         finishedAt: new Date().toISOString(),
       },

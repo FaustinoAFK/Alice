@@ -38,6 +38,21 @@ const buildProps = (overrides = {}) => ({
 });
 
 describe('AliceHud lazy loading', () => {
+  it('all lazy HUD pages expose a default component export', async () => {
+    const modules = await Promise.all([
+      import('./pages/KnowledgeHudPage'),
+      import('./pages/MindMapHudPage'),
+      import('./pages/AutonomyHudPage'),
+      import('./pages/AutonomousLearningHudPage'),
+      import('./pages/AutonomousRunnerHudPage'),
+      import('./pages/DebugHudPage'),
+    ]);
+
+    modules.forEach((module) => {
+      expect(typeof module.default).toBe('function');
+    });
+  });
+
   it('renders the knowledge tab with a suspense fallback instead of loading the page eagerly', () => {
     const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'knowledge' })} />);
 

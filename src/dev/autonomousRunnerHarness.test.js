@@ -25,8 +25,11 @@ import {
   saveHarnessMemory,
   seedFailureTask,
   seedLargeTask,
+  seedTextInputSmokeTask,
   seedSmokeTask,
   seedStaleRunningTask,
+  requestRuntimeTextInputNegativeSmoke,
+  requestRuntimeTextInputSmoke,
   verifySafeState,
   recoverHarnessStartup,
 } from './autonomousRunnerHarness';
@@ -248,6 +251,43 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     expect(snapshot.safety.ok).toBe(true);
   });
 
+  it('print-evidence can filter refs by task id for smoke inspection', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    saveHarnessMemory({
+      ...createEmptyAliceMemory(),
+      autonomousRunner: {
+        ...createEmptyAliceMemory().autonomousRunner,
+        evidenceRefs: [
+          {
+            id: 'evidence-a',
+            taskId: 'task-a',
+            stepId: 'step-a',
+            executionId: 'exec-a',
+            kind: 'metadata',
+            path: 'data/evidence/exec-a/metadata.json',
+          },
+          {
+            id: 'evidence-b',
+            taskId: 'task-b',
+            stepId: 'step-b',
+            executionId: 'exec-b',
+            kind: 'metadata',
+            path: 'data/evidence/exec-b/metadata.json',
+          },
+        ],
+      },
+    }, { memoryPath });
+
+    const result = await runHarnessCommand([
+      'print-evidence',
+      'task-a',
+      '--memory-path',
+      memoryPath,
+    ], { outputJson: true });
+
+    expect(JSON.parse(result.outputText).map((ref) => ref.id)).toEqual(['evidence-a']);
+  });
+
   it('backup is created before mutation when memory file exists', () => {
     const memoryPath = path.join(tempDir, 'alice-memory.json');
     saveHarnessMemory(createEmptyAliceMemory(), { memoryPath });
@@ -394,6 +434,122 @@ describe('autonomous runner dev harness diagnostics and cleanup', () => {
     const loaded = loadHarnessMemory({ memoryPath }).memory;
     expect(Object.values(getAutonomousRunnerState(loaded).tasksById)
       .some((task) => task.metadata?.createdBy === 'autonomous_learning_loop')).toBe(false);
+  });
+
+  it('seed-text-input-smoke creates a controlled text input smoke task without VM dependency', () => {
+    const { memory, taskIds } = seedTextInputSmokeTask(createEmptyAliceMemory(), {
+      now: '2026-04-28T10:00:00.000Z',
+      enable: false,
+    });
+    const task = getAutonomousRunnerState(memory).tasksById[taskIds[0]];
+
+    expect(task.status).toBe(RUNNER_TASK_STATUSES.READY);
+    expect(task.metadata.createdBy).toBe(HARNESS_CREATED_BY);
+    expect(task.metadata.testScenario).toBe('text-input-smoke');
+    expect(task.requiresRealVm).toBe(false);
+    expect(task.allowWorkspaceFallback).toBe(true);
+    expect(task.steps.map((step) => step.completionCriteria.type)).toEqual(['file_contains', 'file_contains']);
+    expect(JSON.stringify(task.steps)).toContain('vm_text_input_diagnostics=');
+    expect(JSON.stringify(task.steps)).toContain('controlled_text_file_mismatch');
+  });
+
+  it('CLI run-until-idle refuses to execute runtime tasks outside Tauri', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    const seeded = seedTextInputSmokeTask(createEmptyAliceMemory(), {
+      now: '2026-04-28T10:00:00.000Z',
+      enable: true,
+    });
+    saveHarnessMemory(seeded.memory, { memoryPath });
+
+    await expect(runHarnessCommand([
+      'run-until-idle',
+      '--memory-path',
+      memoryPath,
+      '--force',
+    ])).rejects.toThrow(/nao executa VM\/workspace fora do runtime Tauri/);
+
+    const task = getAutonomousRunnerState(loadHarnessMemory({ memoryPath }).memory).tasksById[seeded.taskIds[0]];
+    expect(task.status).toBe(RUNNER_TASK_STATUSES.READY);
+    expect(task.reason).toBeNull();
+  });
+
+  it('request-runtime-text-input-smoke writes a runtime request without mutating memory', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    const requestDir = path.join(tempDir, 'runtime-requests');
+    saveHarnessMemory(createEmptyAliceMemory(), { memoryPath });
+    const before = fs.readFileSync(memoryPath, 'utf8');
+
+    const result = await runHarnessCommand([
+      'request-runtime-text-input-smoke',
+      '--request-dir',
+      requestDir,
+      '--now',
+      '2026-05-04T10:00:00.000Z',
+    ], { outputJson: true });
+    const output = JSON.parse(result.outputText);
+    const after = fs.readFileSync(memoryPath, 'utf8');
+
+    expect(after).toBe(before);
+    expect(output.requestId).toBe('runtime-text-input-smoke-1777888800000');
+    expect(output.testScenario).toBe('text-input-driver-v2-real-vm');
+    expect(fs.existsSync(output.requestPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(output.requestPath, 'utf8'))).toMatchObject({
+      requestId: output.requestId,
+      createdBy: 'runtime_harness',
+      testScenario: 'text-input-driver-v2-real-vm',
+    });
+  });
+
+  it('request-runtime-text-input-negative-smoke writes a runtime request without mutating memory', async () => {
+    const memoryPath = path.join(tempDir, 'alice-memory.json');
+    const requestDir = path.join(tempDir, 'runtime-requests');
+    saveHarnessMemory(createEmptyAliceMemory(), { memoryPath });
+    const before = fs.readFileSync(memoryPath, 'utf8');
+
+    const result = await runHarnessCommand([
+      'request-runtime-text-input-negative-smoke',
+      '--request-dir',
+      requestDir,
+      '--now',
+      '2026-05-04T10:00:00.000Z',
+    ], { outputJson: true });
+    const output = JSON.parse(result.outputText);
+    const after = fs.readFileSync(memoryPath, 'utf8');
+
+    expect(after).toBe(before);
+    expect(output.requestId).toBe('runtime-text-input-negative-smoke-1777888800000');
+    expect(output.testScenario).toBe('text-input-driver-v2-negative-real-vm');
+    expect(fs.existsSync(output.requestPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(output.requestPath, 'utf8'))).toMatchObject({
+      requestId: output.requestId,
+      createdBy: 'runtime_harness',
+      testScenario: 'text-input-driver-v2-negative-real-vm',
+    });
+  });
+
+  it('requestRuntimeTextInputSmoke records only a mailbox request for the desktop runtime', () => {
+    const requestDir = path.join(tempDir, 'runtime-requests');
+    const result = requestRuntimeTextInputSmoke({
+      now: '2026-05-04T10:00:00.000Z',
+      requestDir,
+    });
+
+    expect(result.message).toMatch(/runtime Tauri/);
+    expect(fs.existsSync(result.requestPath)).toBe(true);
+    expect(fs.readdirSync(requestDir)).toEqual([`${result.requestId}.json`]);
+  });
+
+  it('requestRuntimeTextInputNegativeSmoke records only a mailbox request for the desktop runtime', () => {
+    const requestDir = path.join(tempDir, 'runtime-requests');
+    const result = requestRuntimeTextInputNegativeSmoke({
+      now: '2026-05-04T10:00:00.000Z',
+      requestDir,
+    });
+
+    expect(result.message).toMatch(/runtime Tauri/);
+    expect(result.testScenario).toBe('text-input-driver-v2-negative-real-vm');
+    expect(fs.existsSync(result.requestPath)).toBe(true);
+    expect(fs.readdirSync(requestDir)).toEqual([`${result.requestId}.json`]);
   });
 
   it('CLI autonomous-learning add-goal stores broad goals with staged gaps', async () => {

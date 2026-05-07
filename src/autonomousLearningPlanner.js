@@ -10,6 +10,7 @@ import {
   createScriptWriteStep,
   synthesizeScriptForGap,
 } from './autonomousScriptSynthesizer';
+import { buildNotepadControlledTextInputScript } from './autonomousLearning/vmTextInputDriver';
 
 const COMPLETE_EVIDENCE = {
   kind: 'complete',
@@ -454,33 +455,12 @@ const browserFieldInteractionScript = ({ text = 'alice browser field ok' } = {})
   "Write-Output ('typed_text=' + $text)",
 ].join('; ');
 
-const notepadFieldInteractionScript = ({ text = 'alice field interaction ok' } = {}) => [
-  `$text = ${quotePowerShellString(text)}`,
-  "$targetProcessName = 'notepad'",
-  `$file = Join-Path $env:TEMP ${quotePowerShellString(`alice-learning-notepad-${stableHash(text)}.txt`)}`,
-  "Set-Content -LiteralPath $file -Value '' -Encoding UTF8",
-  '$beforeIds = @(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)',
-  'Start-Process -FilePath notepad.exe -ArgumentList $file | Out-Null',
-  'Start-Sleep -Milliseconds 800',
-  '$windowProcess = $null',
-  'for ($i = 0; $i -lt 16; $i++) { $processes = @(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue); $windowProcess = $processes | Where-Object { $_.MainWindowHandle -ne 0 -and ($beforeIds -notcontains $_.Id) } | Select-Object -First 1; if (-not $windowProcess) { $windowProcess = $processes | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1 }; if ($windowProcess) { break }; Start-Sleep -Milliseconds 250 }',
-  "if (-not $windowProcess) { throw 'field_window_not_detected' }",
-  '$shell = New-Object -ComObject WScript.Shell',
-  '$activated = $shell.AppActivate([int]$windowProcess.Id)',
-  "if (-not $activated) { throw 'field_window_not_activated' }",
-  'Start-Sleep -Milliseconds 200',
-  'Add-Type -AssemblyName System.Windows.Forms',
-  '[System.Windows.Forms.SendKeys]::SendWait($text)',
-  "[System.Windows.Forms.SendKeys]::SendWait('^s')",
-  'Start-Sleep -Milliseconds 500',
-  '$content = Get-Content -LiteralPath $file -Raw -Encoding UTF8',
-  "if ($content -notmatch [regex]::Escape($text)) { throw 'controlled_text_file_mismatch' }",
-  `Write-Output ${quotePowerShellString(LEARNING_VM_MARKERS.fieldInteracted)}`,
-  "Write-Output 'target_profile=notepad'",
-  "Write-Output ('file_path=' + $file)",
-  "Write-Output ('window_handle=' + $windowProcess.MainWindowHandle)",
-  "Write-Output ('typed_text=' + $text)",
-].join('; ');
+const notepadFieldInteractionScript = ({ text = 'alice field interaction ok' } = {}) =>
+  buildNotepadControlledTextInputScript({
+    text,
+    fileName: `alice-learning-notepad-${stableHash(text)}.txt`,
+    marker: LEARNING_VM_MARKERS.fieldInteracted,
+  });
 
 const vscodeFieldInteractionScript = ({ text = 'alice vscode field ok' } = {}) => [
   `$text = ${quotePowerShellString(text)}`,
@@ -534,7 +514,12 @@ const substantiveValidationScriptForGap = ({ gap = {}, steps = [] } = {}) => {
     .map((step) => step.action?.requestedResources?.autonomousLearning?.controlledText)
     .filter(Boolean);
 
-  if (capability === 'browser.search' || gap.type === 'browser_search') {
+  if (
+    capability === 'browser.search' ||
+    capability === 'search.results.validate' ||
+    gap.type === 'browser_search' ||
+    gap.type === 'search_result_validation'
+  ) {
     return {
       marker: LEARNING_VM_MARKERS.browserSearchValidated,
       script: browserSearchValidationScript({ expectedTexts: controlledTexts }),
@@ -548,17 +533,16 @@ const substantiveValidationScriptForGap = ({ gap = {}, steps = [] } = {}) => {
     script: [
       `$capability = ${quotePowerShellString(capability || 'unknown')}`,
       `$targetProcessName = ${quotePowerShellString(target.processName || 'notepad')}`,
-      "switch ($capability) {",
-      "  'app.launch' { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_app_window_missing' } }",
-      "  'text.input' { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_text_window_missing' } }",
-      "  'field.interaction' { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_field_window_missing' } }",
-      "  'file.explorer.open' { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'validated_explorer_folder_missing' } }",
-      "  'file.folder.create' { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (@(Get-ChildItem -LiteralPath $root -Filter note.txt -Recurse -ErrorAction SilentlyContinue).Count)) { throw 'validated_controlled_file_missing' } }",
-      "  'app.install.safe_probe' { if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'validated_package_manager_missing' } }",
-      "  'page.validate' { $path = Join-Path $env:TEMP 'alice-learning-page-validation.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_page_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-validation-ok') { throw 'validated_page_marker_missing' } }",
-      "  'page.read' { $path = Join-Path $env:TEMP 'alice-learning-page-read.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_read_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-read-ok') { throw 'validated_read_marker_missing' } }",
-      "  default { throw ('unsupported_substantive_validation:' + $capability) }",
-      '}',
+      '$validated = $false',
+      "if ($capability -eq 'app.launch' -or $capability -eq 'app.window.focus') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_app_window_missing' }; $validated = $true }",
+      "if ($capability -eq 'text.input') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_text_window_missing' }; $validated = $true }",
+      "if ($capability -eq 'field.interaction' -or $capability -eq 'form.fill') { if (-not (@(Get-Process -Name $targetProcessName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 }).Count)) { throw 'validated_field_window_missing' }; $validated = $true }",
+      "if ($capability -eq 'file.explorer.open') { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (Test-Path -LiteralPath $root -PathType Container)) { throw 'validated_explorer_folder_missing' }; $validated = $true }",
+      "if ($capability -eq 'file.folder.create') { $root = Join-Path $env:TEMP 'AliceLearningFiles'; if (-not (@(Get-ChildItem -LiteralPath $root -Filter note.txt -Recurse -ErrorAction SilentlyContinue).Count)) { throw 'validated_controlled_file_missing' }; $validated = $true }",
+      "if ($capability -eq 'app.install.safe_probe') { if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'validated_package_manager_missing' }; $validated = $true }",
+      "if ($capability -eq 'page.validate') { $path = Join-Path $env:TEMP 'alice-learning-page-validation.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_page_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-validation-ok') { throw 'validated_page_marker_missing' }; $validated = $true }",
+      "if ($capability -eq 'page.read' -or $capability -eq 'page.summary') { $path = Join-Path $env:TEMP 'alice-learning-page-read.html'; if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'validated_read_file_missing' }; $content = Get-Content -LiteralPath $path -Raw -Encoding UTF8; if ($content -notmatch 'alice-learning-page-read-ok') { throw 'validated_read_marker_missing' }; $validated = $true }",
+      "if (-not $validated) { throw ('unsupported_substantive_validation:' + $capability) }",
       `Write-Output ${quotePowerShellString(LEARNING_VM_MARKERS.outcomeValidated)}`,
       "Write-Output ('capability=' + $capability)",
       `Write-Output ${quotePowerShellString(`target_profile=${target.profileId || 'notepad'}`)}`,
@@ -801,6 +785,9 @@ export const createAutonomousLearningTaskForGap = (gap = {}, {
   now = new Date().toISOString(),
   dryRun = false,
 } = {}) => {
+  if (normalizeText(gap.status) === 'needs_human_review') {
+    return { ok: false, reason: 'learning_gap_needs_human_review', task: null };
+  }
   const normalizedPolicy = normalizeAutonomousLearningPolicy(policy);
   const requiresRealVm = normalizedPolicy.allowedEnvironments.includes('real_vm') &&
     !normalizedPolicy.allowedEnvironments.includes('local_workspace_fallback') &&
@@ -938,6 +925,10 @@ export const createAutonomousLearningTaskForGap = (gap = {}, {
           gapId: gap.gapId,
           capability: gap.capability,
           context: gap.metadata?.context || null,
+          repairDepth: Number(gap.metadata?.repairDepth || 0),
+          parentFailureSignature: gap.metadata?.parentFailureSignature || '',
+          repairFamily: gap.metadata?.repairFamily || '',
+          originalFailedTaskId: gap.metadata?.originalFailedTaskId || '',
           controlledTarget: summarizeControlledUiTarget(controlledTarget),
           scripts: scripts.map((script) => ({
             scriptId: script.scriptId,
@@ -955,6 +946,10 @@ export const createAutonomousLearningTaskForGap = (gap = {}, {
         riskLevel: gap.riskLevel || 'low',
         dryRun,
         strategies: selectedStrategies.map((strategy) => strategy.strategyId),
+        repairDepth: Number(gap.metadata?.repairDepth || 0),
+        parentFailureSignature: gap.metadata?.parentFailureSignature || '',
+        repairFamily: gap.metadata?.repairFamily || '',
+        originalFailedTaskId: gap.metadata?.originalFailedTaskId || '',
         validationKind: requiresRealVm ? 'controlled_outcome' : 'controlled_workspace_contract',
         substantiveValidation: requiresRealVm,
         requiresSubstantiveValidation: requiresRealVm,

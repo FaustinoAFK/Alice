@@ -180,6 +180,9 @@ const withEvidencePersistenceCheck = (validationResult = {}, persistenceResult =
   };
 };
 
+const isRuntimeUnavailableReason = (reason = '') =>
+  reason === RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE || reason === 'invoke_unavailable';
+
 const persistRunnerEvidenceFiles = async ({
   invokeTool,
   executionId,
@@ -420,10 +423,19 @@ const finalizeFailedStep = (runner, taskId, stepId, {
   const task = getLatestTask(runner, taskId);
   const step = getLatestStep(runner, taskId, stepId);
   const nextStepAttempts = Number(step.attempts || 0) + 1;
-  const canRetry = nextStepAttempts < Number(step.maxAttempts || 1) && Number(task.attempts || 0) < Number(task.maxAttempts || 1);
+  const runtimeUnavailable = isRuntimeUnavailableReason(validationResult.reason || executionResult.reason);
+  const canRetry = !runtimeUnavailable &&
+    nextStepAttempts < Number(step.maxAttempts || 1) &&
+    Number(task.attempts || 0) < Number(task.maxAttempts || 1);
   const retryReason = validationResult.reason || RUNNER_REASONS.VALIDATION_FAILED;
-  const reason = canRetry ? retryReason : RUNNER_REASONS.MAX_ATTEMPTS_REACHED;
+  const reason = runtimeUnavailable
+    ? RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE
+    : canRetry
+      ? retryReason
+      : RUNNER_REASONS.MAX_ATTEMPTS_REACHED;
   const nextRunAt = canRetry ? toIso(nowMs + retryDelayMsForAttempt(nextStepAttempts)) : null;
+  const failedStatus = runtimeUnavailable ? RUNNER_TASK_STATUSES.BLOCKED : RUNNER_TASK_STATUSES.FAILED;
+  const waitingOrFailedStatus = canRetry ? RUNNER_TASK_STATUSES.WAITING_RETRY : failedStatus;
 
   let nextRunner = updateAutonomousRunnerStep(runner, taskId, stepId, (currentStep) => ({
     ...currentStep,
@@ -445,13 +457,13 @@ const finalizeFailedStep = (runner, taskId, stepId, {
     nextRunner,
     taskId,
     stepId,
-    canRetry ? 'waiting_retry' : 'failed',
+    canRetry ? RUNNER_TASK_STATUSES.WAITING_RETRY : failedStatus,
     { now, reason, metadata: validationResult },
   );
   nextRunner = stepTransition.runner;
 
   nextRunner = updateAutonomousRunnerTask(nextRunner, taskId, {
-    status: canRetry ? RUNNER_TASK_STATUSES.WAITING_RETRY : RUNNER_TASK_STATUSES.FAILED,
+    status: waitingOrFailedStatus,
     reason,
     nextRunAt,
     evidenceRefs: [...(task.evidenceRefs || []), ...evidenceRefs],
@@ -460,7 +472,7 @@ const finalizeFailedStep = (runner, taskId, stepId, {
       {
         timestamp: now,
         stepId,
-        status: canRetry ? 'waiting_retry' : 'failed',
+        status: waitingOrFailedStatus,
         reason,
         result: {
           ok: Boolean(executionResult.ok),
@@ -476,16 +488,20 @@ const finalizeFailedStep = (runner, taskId, stepId, {
     now,
     audit: {
       type: canRetry ? 'retry' : 'validation',
-      summary: canRetry ? `Retry agendado para ${task.title}.` : `Task falhou: ${task.title}.`,
+      summary: runtimeUnavailable
+        ? `Task bloqueada por runtime indisponivel: ${task.title}.`
+        : canRetry
+          ? `Retry agendado para ${task.title}.`
+          : `Task falhou: ${task.title}.`,
       reason,
       beforeState: RUNNER_TASK_STATUSES.RUNNING,
-      afterState: canRetry ? RUNNER_TASK_STATUSES.WAITING_RETRY : RUNNER_TASK_STATUSES.FAILED,
+      afterState: waitingOrFailedStatus,
       evidenceRefs,
       metadata: { nextRunAt, validation: validationResult.reason },
     },
   });
 
-  return applyRecoveryLoopGuard(nextRunner, taskId, { now });
+  return runtimeUnavailable ? nextRunner : applyRecoveryLoopGuard(nextRunner, taskId, { now });
 };
 
 const processTask = async ({

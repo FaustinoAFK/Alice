@@ -3,6 +3,7 @@ import {
   MAX_RUNNER_EVIDENCE_REFS,
   normalizeAutonomousRunnerState,
 } from './autonomousRunnerState';
+import { parseTextInputDiagnosticsOutput } from './autonomousRunnerTextInputDiagnostics';
 
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 
@@ -32,6 +33,34 @@ const requiredEvidenceIncludes = (step = {}, token = '') =>
   (step.expectedEvidence?.required || [])
     .map((item) => normalizeText(item).toLowerCase())
     .includes(token);
+
+const parseFolderEvidenceFromOutput = (output = '') => {
+  const lines = String(output || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines.reverse()) {
+    if (!line.startsWith('{') || !line.endsWith('}')) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(line);
+      if (parsed && typeof parsed === 'object' && parsed.resolvedFilesystemName && parsed.targetPath) {
+        return parsed;
+      }
+    } catch {
+      // Ignore non-JSON command output.
+    }
+  }
+  return null;
+};
+
+const getEvidenceOutput = (executionResult = {}) => {
+  const agentResult = executionResult.artifacts?.agentResponse?.result || {};
+  return [
+    executionResult.stdout,
+    executionResult.stderr,
+    agentResult.stdout,
+    agentResult.stderr,
+  ].map((value) => String(value || '')).filter(Boolean).join('\n');
+};
 
 export const RUNNER_PHYSICAL_EVIDENCE_STATUS = {
   OK: 'ok',
@@ -81,6 +110,8 @@ export const buildRunnerEvidenceFromExecution = ({
   const kind = step.expectedEvidence?.kind || (step.type === 'visual' ? 'visual' : 'complete');
   const refs = [];
   const includeCompleteTextRefs = kind === 'complete';
+  const textInputDiagnostics = validationResult?.textInputDiagnostics ||
+    parseTextInputDiagnosticsOutput(getEvidenceOutput(executionResult));
 
   refs.push(createRunnerEvidenceRef({
     executionId,
@@ -96,6 +127,9 @@ export const buildRunnerEvidenceFromExecution = ({
       message: truncatePreview(executionResult?.message),
       startedAt,
       finishedAt,
+      folderResolution: step.action?.folderCreate || null,
+      folderExecution: parseFolderEvidenceFromOutput(executionResult?.stdout),
+      textInputDiagnostics,
     },
     createdAt: finishedAt,
   }));
@@ -139,6 +173,9 @@ export const buildRunnerEvidenceFromExecution = ({
       metadata: {
         passed: Boolean(validationResult.passed),
         reason: validationResult.reason || '',
+        folderResolution: step.action?.folderCreate || null,
+        folderValidation: validationResult.folderValidation || null,
+        textInputDiagnostics,
       },
       createdAt: finishedAt,
     }));

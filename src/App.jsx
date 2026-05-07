@@ -60,6 +60,7 @@ import {
   runAutonomousLearningLoop,
   shouldRunAutonomousLearningAfterRunnerTick,
 } from './autonomousLearningLoop';
+import { createLearningPlannerService } from './learningPlanner/learningPlannerService';
 import {
   createAutonomousLearningGoalFromText,
   upsertAutonomousLearningGoal,
@@ -79,6 +80,7 @@ import {
   flushAliceMemoryToRuntime,
   loadAliceMemoryFromRuntime as loadAliceMemoryFromRuntimeBoundary,
 } from './aliceMemoryPersistence';
+import { applyRuntimeHarnessRequests } from './dev/runtimeHarnessBridge';
 import './App.css';
 
 const stopStream = (stream) => {
@@ -1069,6 +1071,44 @@ function App() {
 
   const handleAutonomousLearningAction = (operation, payload = {}) => {
     const now = new Date().toISOString();
+    if (operation === 'create-learning-plan') {
+      const objective = String(payload.objective || payload.goal || payload.text || '').trim();
+      if (!objective) {
+        return null;
+      }
+      const plannerService = createLearningPlannerService();
+      return plannerService.createPlan(aliceMemoryRef.current, objective, {
+        requestedBy: 'hud',
+      }).then((result) => {
+        commitAliceMemory(result.memory);
+        return result;
+      });
+    }
+
+    if (operation === 'cancel-learning-plan') {
+      const result = createLearningPlannerService().cancelActivePlan(aliceMemoryRef.current, { now });
+      commitAliceMemory(result.memory);
+      return result;
+    }
+
+    if (operation === 'mark-learning-plan-review') {
+      const result = createLearningPlannerService().markActivePlanForReview(aliceMemoryRef.current, { now });
+      commitAliceMemory(result.memory);
+      return result;
+    }
+
+    if (operation === 'approve-learning-plan') {
+      const result = createLearningPlannerService().approveActivePlan(aliceMemoryRef.current, { now });
+      commitAliceMemory(result.memory);
+      return result;
+    }
+
+    if (operation === 'reject-learning-plan') {
+      const result = createLearningPlannerService().rejectActivePlan(aliceMemoryRef.current, { now });
+      commitAliceMemory(result.memory);
+      return result;
+    }
+
     if (operation === 'add-goal') {
       const goalResult = createAutonomousLearningGoalFromText(payload.goal || payload.text || '', {
         now,
@@ -1693,6 +1733,86 @@ function App() {
     };
     // Runner loop reads refs so it can survive long executions without resubscribing timers.
   }, [runnerLoopWakeVersion]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    let disposed = false;
+    let timer = null;
+
+    const clearTimer = () => {
+      if (timer) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+
+    const schedulePoll = (delayMs = 3000) => {
+      clearTimer();
+      timer = window.setTimeout(() => {
+        void pollRuntimeHarnessRequests();
+      }, Math.max(1000, Number(delayMs || 3000)));
+    };
+
+    const clearRuntimeRequests = async (requestIds = []) => {
+      await Promise.all(requestIds.map((requestId) =>
+        invoke('clear_dev_runtime_request', { requestId }).catch(() => null)));
+    };
+
+    const pollRuntimeHarnessRequests = async () => {
+      if (disposed) {
+        return;
+      }
+      if (!memoryHydratedRef.current || !canUseTauriRuntime()) {
+        schedulePoll(3000);
+        return;
+      }
+
+      try {
+        const requests = await invoke('load_dev_runtime_requests');
+        if (Array.isArray(requests) && requests.length > 0) {
+          const result = applyRuntimeHarnessRequests(aliceMemoryRef.current, requests, {
+            now: new Date().toISOString(),
+          });
+          const handledRequestIds = [
+            ...result.processedRequestIds,
+            ...result.ignoredRequestIds,
+          ];
+          if (handledRequestIds.length > 0) {
+            commitAliceMemory(result.memory);
+            await clearRuntimeRequests(handledRequestIds);
+            commitRunnerDiagnostic({
+              type: 'runtime_harness_request',
+              summary: 'Pedido dev de runtime processado pelo app.',
+              reason: result.taskIds.length
+                ? 'runtime_harness_text_input_smoke_enqueued'
+                : 'runtime_harness_request_ignored',
+              metadata: {
+                taskIds: result.taskIds,
+                processedRequestIds: result.processedRequestIds,
+                ignoredRequestIds: result.ignoredRequestIds,
+              },
+            });
+            if (result.taskIds.length > 0) {
+              setRunnerLoopWakeVersion((current) => current + 1);
+            }
+          }
+        }
+      } catch (error) {
+        updatePersistenceDiagnostics({
+          lastError: String(error?.message || error || 'Falha ao ler pedidos dev de runtime.'),
+        });
+      } finally {
+        if (!disposed) {
+          schedulePoll(3000);
+        }
+      }
+    };
+
+    schedulePoll(1000);
+    return () => {
+      disposed = true;
+      clearTimer();
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const isBusy = status === 'starting' || status === 'configuring';
   const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';

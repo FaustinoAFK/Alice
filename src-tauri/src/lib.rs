@@ -36,6 +36,7 @@ const RUNNER_EVIDENCE_FILE_NAMES: [&str; 4] = [
     "stderr.txt",
     "validation.json",
 ];
+const DEV_RUNTIME_REQUEST_DIR: &str = "dev-runtime-requests";
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2045,6 +2046,85 @@ fn save_alice_memory_json(app: tauri::AppHandle, json: String) -> Result<(), Str
     write_memory_json_atomic(&resolve_alice_memory_path(&app_data_dir), &json)
 }
 
+fn dev_runtime_request_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(DEV_RUNTIME_REQUEST_DIR)
+}
+
+fn sanitize_dev_runtime_request_id(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "runtime-request".to_string()
+    } else {
+        trimmed.chars().take(96).collect()
+    }
+}
+
+#[tauri::command]
+fn load_dev_runtime_requests(app: tauri::AppHandle) -> Result<Vec<Value>, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    let request_dir = dev_runtime_request_dir(&app_data_dir);
+    if !request_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut requests = Vec::new();
+    for entry in fs::read_dir(&request_dir)
+        .map_err(|error| format!("Falha ao listar pedidos dev de runtime: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("Falha ao ler pedido dev de runtime: {error}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let metadata = fs::metadata(&path)
+            .map_err(|error| format!("Falha ao ler metadata do pedido dev de runtime: {error}"))?;
+        if !metadata.is_file() || metadata.len() > 32_768 {
+            continue;
+        }
+        let raw = fs::read_to_string(&path)
+            .map_err(|error| format!("Falha ao ler arquivo de pedido dev de runtime: {error}"))?;
+        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+            requests.push(value);
+        }
+    }
+
+    Ok(requests)
+}
+
+#[tauri::command]
+fn clear_dev_runtime_request(app: tauri::AppHandle, request_id: String) -> Result<(), String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
+    let request_dir = dev_runtime_request_dir(&app_data_dir);
+    let request_file = request_dir.join(format!(
+        "{}.json",
+        sanitize_dev_runtime_request_id(&request_id)
+    ));
+    if !request_file.starts_with(&request_dir) {
+        return Err("Pedido dev de runtime saiu da pasta permitida.".to_string());
+    }
+    match fs::remove_file(&request_file) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("Falha ao limpar pedido dev de runtime: {error}")),
+    }
+}
+
 fn sanitize_runner_evidence_segment(value: &str) -> String {
     let sanitized: String = value
         .chars()
@@ -2304,6 +2384,8 @@ pub fn run() {
         create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
+        load_dev_runtime_requests,
+        clear_dev_runtime_request,
         save_runner_evidence,
         verify_runner_evidence,
         local_vm::get_local_vm_status,
@@ -2338,6 +2420,8 @@ pub fn run() {
         create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
+        load_dev_runtime_requests,
+        clear_dev_runtime_request,
         save_runner_evidence,
         verify_runner_evidence,
         local_vm::get_local_vm_status,
@@ -2652,6 +2736,15 @@ mod tests {
             "stdout.txt".to_string(),
         ]))
         .is_ok());
+    }
+
+    #[test]
+    fn sanitize_dev_runtime_request_id_rejects_path_segments() {
+        assert_eq!(
+            sanitize_dev_runtime_request_id("../runtime smoke?"),
+            "runtime-smoke"
+        );
+        assert_eq!(sanitize_dev_runtime_request_id(""), "runtime-request");
     }
 
     #[test]

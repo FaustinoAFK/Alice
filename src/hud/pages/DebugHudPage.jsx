@@ -141,3 +141,5 @@ export function DebugHudPage({ debugHud }) {
     </section>
   );
 }
+
+export default DebugHudPage;

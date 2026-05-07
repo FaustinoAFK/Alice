@@ -1,3 +1,5 @@
+import { summarizeLearningPlannerForHud } from './learningPlanner/learningPlannerService';
+
 export const formatDebugValue = (value) => {
   if (value == null) {
     return '-';
@@ -402,6 +404,7 @@ export const buildDebugHudSnapshot = ({
     audits: formatAutonomousList((autonomousLearningMemoryState?.auditLog || []).slice(-16), (event) =>
       `${event.timestamp || '-'} | ${event.type || '-'} | ${event.reason || ''} | ${event.summary || ''}`.trim(),
     ),
+    planner: summarizeLearningPlannerForHud(autonomousLearningMemoryState?.learningPlanner || {}),
   };
   const persistence = {
     memorySizeBytes: Number(persistenceDiagnostics?.sizeBytes || 0),

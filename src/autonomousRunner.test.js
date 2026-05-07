@@ -168,6 +168,117 @@ describe('autonomous runner state', () => {
     expect(runner.tasksById.legacy.status).not.toBe('running');
   });
 
+  it('repairs queued learning outcome validation commands generated with malformed PowerShell switch', () => {
+    const malformedCommand = [
+      "$ErrorActionPreference = 'Stop'",
+      "$capability = 'page.summary'",
+      "$targetProcessName = 'msedge'",
+      'switch ($capability) {',
+      "  'page.read' { $validated = $true }",
+      '}',
+      "Write-Output 'alice-learning-vm:learning-outcome-validated'",
+    ].join('; ');
+    const runner = normalizeAutonomousRunnerState({
+      tasksById: {
+        'learning-legacy': {
+          id: 'learning-legacy',
+          title: 'Legacy learning task',
+          status: 'ready',
+          steps: [
+            {
+              id: 'validate-learning-outcome',
+              title: 'VM: validar resultado substantivo do aprendizado',
+              type: 'visual',
+              action: {
+                kind: 'visual',
+                visualAction: 'run_command',
+                parameters: {
+                  command: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+                  args: ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', malformedCommand],
+                  timeout_seconds: 12,
+                },
+                requestedResources: {
+                  autonomousLearning: {
+                    controlledTarget: {
+                      profileId: 'browser',
+                      processName: 'msedge',
+                    },
+                  },
+                },
+              },
+              completionCriteria: {
+                type: 'file_contains',
+                contains: 'alice-learning-vm:learning-outcome-validated',
+              },
+              expectedEvidence: {
+                kind: 'complete',
+                required: ['command', 'stdout', 'stderr', 'exitCode'],
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const repairedCommand = runner.tasksById['learning-legacy'].steps[0].action.parameters.args.at(-1);
+
+    expect(repairedCommand).toContain("$capability = 'page.summary'");
+    expect(repairedCommand).toContain('$validated = $false');
+    expect(repairedCommand).toContain("$capability -eq 'page.summary'");
+    expect(repairedCommand).toContain('alice-learning-vm:learning-outcome-validated');
+    expect(repairedCommand).toContain('target_profile=browser');
+    expect(repairedCommand).not.toContain('switch ($capability) {;');
+  });
+
+  it('repairs stale learning validation commands that do not cover their own capability', () => {
+    const staleCommand = [
+      "$ErrorActionPreference = 'Stop'",
+      "$capability = 'form.fill'",
+      "$targetProcessName = 'notepad'",
+      '$validated = $false',
+      "if ($capability -eq 'field.interaction') { $validated = $true }",
+      "if (-not $validated) { throw ('unsupported_substantive_validation:' + $capability) }",
+      "Write-Output 'alice-learning-vm:learning-outcome-validated'",
+    ].join('; ');
+    const runner = normalizeAutonomousRunnerState({
+      tasksById: {
+        'learning-stale-capability': {
+          id: 'learning-stale-capability',
+          title: 'Stale learning task',
+          status: 'ready',
+          steps: [
+            {
+              id: 'validate-learning-outcome',
+              title: 'VM: validar resultado substantivo do aprendizado',
+              type: 'visual',
+              action: {
+                kind: 'visual',
+                visualAction: 'run_command',
+                parameters: {
+                  args: ['-NoProfile', '-Command', staleCommand],
+                },
+              },
+              completionCriteria: {
+                type: 'file_contains',
+                contains: 'alice-learning-vm:learning-outcome-validated',
+              },
+              expectedEvidence: {
+                kind: 'complete',
+                required: ['command', 'stdout', 'stderr', 'exitCode'],
+              },
+            },
+          ],
+        },
+      },
+    });
+
+    const repairedCommand = runner.tasksById['learning-stale-capability'].steps[0].action.parameters.args.at(-1);
+
+    expect(repairedCommand).toContain("$capability = 'form.fill'");
+    expect(repairedCommand).toContain("$capability -eq 'form.fill'");
+    expect(repairedCommand).toContain('alice-learning-vm:learning-outcome-validated');
+  });
+
   it('rejects invalid task transition and records audit', () => {
     const runner = enqueueAutonomousRunnerTask(createEmptyAutonomousRunnerState(), createReadyTask());
     const result = transitionAutonomousRunnerTask(runner, 'task-a', 'done', {
@@ -780,6 +891,387 @@ describe('autonomous runner evidence retention and volume hardening', () => {
     expect(validationResult.passed).toBe(true);
     expect(validationResult.commandResult.exitCode).toBe(0);
     expect(validationResult.commandResult.stdout).toContain('clipboard_paste');
+  });
+
+  it('stores VM text input diagnostics in runner evidence metadata', () => {
+    const diagnostics = {
+      driver: 'vmTextInputDriver',
+      target: 'notepad',
+      expectedText: 'alice expected',
+      actualTextPreview: 'alice expected',
+      inputMethod: 'clipboard_paste',
+      clipboardPasteAttempted: true,
+      sendKeysFallbackUsed: false,
+      activeWindowConfirmed: true,
+      activeWindowBeforeInput: '100',
+      activeWindowAfterInput: '100',
+      saveAttempted: true,
+      fileExists: true,
+      fileSize: 14,
+      expectedLength: 14,
+      actualLength: 14,
+      fileUpdated: true,
+      fileLastWriteTimeChanged: true,
+      validationPassed: true,
+      failureReason: '',
+      filePath: 'C:\\Temp\\alice-learning-notepad.txt',
+    };
+    const refs = buildRunnerEvidenceFromExecution({
+      task: {
+        id: 'learning-gap-text-input-1',
+        priority: 'medium',
+      },
+      step: {
+        id: 'learning-vm-notepad-field-command',
+        type: 'visual',
+        action: {
+          kind: 'visual',
+          visualAction: 'run_command',
+        },
+        expectedEvidence: {
+          kind: 'complete',
+          required: ['metadata', 'stdout', 'validationResult'],
+        },
+      },
+      executionResult: {
+        ok: true,
+        stdout: [
+          `vm_text_input_diagnostics=${JSON.stringify(diagnostics)}`,
+          'alice-learning-vm:field-interacted',
+        ].join('\n'),
+        stderr: '',
+        artifacts: { statusCode: 200 },
+      },
+      validationResult: {
+        passed: true,
+        reason: 'runner_completion_validated',
+      },
+      executionId: 'runner-exec-text-input-diagnostics',
+    });
+
+    const metadata = refs.find((ref) => ref.label === 'metadata');
+    const validation = refs.find((ref) => ref.label === 'validation');
+
+    expect(metadata.metadata.textInputDiagnostics).toMatchObject({
+      driver: 'vmTextInputDriver',
+      inputMethod: 'clipboard_paste',
+      validationPassed: true,
+    });
+    expect(validation.metadata.textInputDiagnostics).toMatchObject({
+      fileUpdated: true,
+      activeWindowConfirmed: true,
+      expectedText: 'alice expected',
+      actualTextPreview: 'alice expected',
+      inputMethod: 'clipboard_paste',
+      sendKeysFallbackUsed: false,
+      activeWindowBeforeInput: '100',
+      activeWindowAfterInput: '100',
+      saveAttempted: true,
+      fileExists: true,
+      fileSize: 14,
+      expectedLength: 14,
+      actualLength: 14,
+      fileLastWriteTimeChanged: true,
+      validationPassed: true,
+    });
+  });
+
+  it('persists VM text input diagnostics in the validation evidence payload', async () => {
+    const diagnostics = {
+      driver: 'vmTextInputDriver',
+      target: 'notepad',
+      expectedText: 'alice expected',
+      actualTextPreview: 'alice expected',
+      inputMethod: 'clipboard_paste',
+      sendKeysFallbackUsed: false,
+      activeWindowBeforeInput: '100',
+      activeWindowAfterInput: '100',
+      saveAttempted: true,
+      fileExists: true,
+      fileSize: 14,
+      expectedLength: 14,
+      actualLength: 14,
+      fileLastWriteTimeChanged: true,
+      validationPassed: true,
+      failureReason: '',
+    };
+    const agentResponse = {
+      success: true,
+      result: {
+        exit_code: 0,
+        stdout: [
+          `vm_text_input_diagnostics=${JSON.stringify(diagnostics)}`,
+          'alice-learning-vm:field-interacted',
+          'input_method=clipboard_paste',
+        ].join('\n'),
+        stderr: '',
+      },
+    };
+    const task = createAutonomousRunnerTask({
+      id: 'runtime-text-input-diagnostics-task',
+      title: 'Runtime text input diagnostics task',
+      status: RUNNER_TASK_STATUSES.READY,
+      requiresRealVm: true,
+      allowWorkspaceFallback: false,
+      steps: [{
+        id: 'runtime-vm-notepad-text-input',
+        title: 'VM text input',
+        type: 'visual',
+        action: {
+          kind: 'visual',
+          visualAction: 'run_command',
+          environment: 'real_vm',
+        },
+        completionCriteria: {
+          type: 'file_contains',
+          contains: 'alice-learning-vm:field-interacted',
+        },
+        expectedEvidence: {
+          kind: 'complete',
+          required: ['metadata', 'stdout', 'stderr', 'validationResult'],
+        },
+      }],
+    }, { now: '2026-05-04T10:00:00.000Z' });
+    const runner = {
+      ...enqueueAutonomousRunnerTask(createEmptyAutonomousRunnerState(), task, {
+        now: '2026-05-04T10:00:00.000Z',
+      }),
+      enabled: true,
+    };
+    const calls = [];
+
+    const result = await runAutonomousTaskRunnerTick({
+      runner,
+      vmStatus: { realVmAvailable: true, guestCommandReady: true },
+      nowMs: Date.parse('2026-05-04T10:01:00.000Z'),
+      invokeTool: async (name, payload) => {
+        calls.push([name, payload]);
+        if (name === 'save_runner_evidence') {
+          return {
+            ok: true,
+            message: 'evidence saved',
+            artifacts: { executionId: payload.request.executionId },
+          };
+        }
+        if (name === 'verify_runner_evidence') {
+          return {
+            ok: true,
+            message: 'verified',
+            artifacts: {
+              executionId: payload.request.executionId,
+              status: 'ok',
+              files: payload.request.files,
+              existingFiles: payload.request.files,
+              missingFiles: [],
+            },
+          };
+        }
+        return {
+          ok: true,
+          message: 'Acao visual executada dentro da VM: run_command.',
+          stdout: JSON.stringify(agentResponse),
+          stderr: '',
+          artifacts: {
+            statusCode: 0,
+            agentResponse,
+          },
+        };
+      },
+    });
+
+    const saveCall = calls.find((call) => call[0] === 'save_runner_evidence');
+
+    expect(result.task.status).toBe('done');
+    expect(result.validationResult.textInputDiagnostics).toMatchObject({
+      expectedText: 'alice expected',
+      actualTextPreview: 'alice expected',
+      inputMethod: 'clipboard_paste',
+      sendKeysFallbackUsed: false,
+      validationPassed: true,
+    });
+    expect(saveCall[1].request.validation.textInputDiagnostics).toMatchObject({
+      expectedText: 'alice expected',
+      actualTextPreview: 'alice expected',
+      fileExists: true,
+      fileSize: 14,
+      expectedLength: 14,
+      actualLength: 14,
+      inputMethod: 'clipboard_paste',
+      sendKeysFallbackUsed: false,
+      activeWindowBeforeInput: '100',
+      activeWindowAfterInput: '100',
+      saveAttempted: true,
+      fileLastWriteTimeChanged: true,
+      validationPassed: true,
+      failureReason: '',
+    });
+  });
+
+  it('keeps file_contains validation failed while exposing text input mismatch diagnostics', () => {
+    const diagnostics = {
+      driver: 'vmTextInputDriver',
+      target: 'notepad',
+      expectedText: 'alice expected',
+      actualTextPreview: 'wrong text',
+      inputMethod: 'clipboard_paste',
+      activeWindowBeforeInput: '100',
+      activeWindowAfterInput: '100',
+      saveAttempted: true,
+      fileExists: true,
+      fileSize: 10,
+      fileLastWriteTimeChanged: true,
+      validationPassed: false,
+      failureReason: 'controlled_text_file_mismatch',
+    };
+    const validationResult = validateRunnerCompletionCriteria({
+      step: {
+        ...executableStep,
+        completionCriteria: { type: 'file_contains', contains: 'alice-learning-vm:field-interacted' },
+        expectedEvidence: {
+          kind: 'complete',
+          required: ['stdout'],
+        },
+      },
+      executionResult: {
+        ok: true,
+        stdout: `vm_text_input_diagnostics=${JSON.stringify(diagnostics)}`,
+        stderr: 'controlled_text_file_mismatch',
+        artifacts: { statusCode: 200 },
+      },
+      evidenceRefs: [{
+        id: 'stdout-ref',
+        kind: 'stdout',
+        label: 'stdout',
+        path: 'data/evidence/exec/stdout.txt',
+      }],
+    });
+
+    expect(validationResult.passed).toBe(false);
+    expect(validationResult.reason).toBe('file_contains_not_evidenced');
+    expect(validationResult.textInputDiagnostics).toMatchObject({
+      expectedText: 'alice expected',
+      actualTextPreview: 'wrong text',
+      inputMethod: 'clipboard_paste',
+      fileExists: true,
+      fileSize: 10,
+      failureReason: 'controlled_text_file_mismatch',
+    });
+    expect(validationResult.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'vm_text_input_diagnostics',
+        passed: false,
+      }),
+    ]));
+
+    const refs = buildRunnerEvidenceFromExecution({
+      task: { id: 'learning-gap-text-input-mismatch', priority: 'critical' },
+      step: {
+        id: 'learning-vm-notepad-field-command',
+        type: 'visual',
+        action: { kind: 'visual', visualAction: 'run_command' },
+        expectedEvidence: { kind: 'complete', required: ['metadata', 'stdout', 'validationResult'] },
+      },
+      executionResult: {
+        ok: true,
+        stdout: `vm_text_input_diagnostics=${JSON.stringify(diagnostics)}`,
+        stderr: 'controlled_text_file_mismatch',
+        artifacts: { statusCode: 200 },
+      },
+      validationResult,
+      executionId: 'runner-exec-text-input-mismatch',
+    });
+    const validationRef = refs.find((ref) => ref.label === 'validation');
+
+    expect(validationRef.metadata.textInputDiagnostics).toMatchObject({
+      expectedText: 'alice expected',
+      actualTextPreview: 'wrong text',
+      validationPassed: false,
+      failureReason: 'controlled_text_file_mismatch',
+    });
+  });
+
+  it('classifies missing Tauri invoke as runtime unavailable instead of file_contains failure', () => {
+    const validationResult = validateRunnerCompletionCriteria({
+      step: {
+        ...executableStep,
+        completionCriteria: { type: 'file_contains', contains: 'alice-learning-vm:field-interacted' },
+        expectedEvidence: {
+          kind: 'complete',
+          required: ['stdout'],
+        },
+      },
+      executionResult: {
+        ok: false,
+        reason: RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE,
+        message: 'Runner exige runtime Tauri para executar VM/workspace.',
+        stdout: '',
+        stderr: '',
+        artifacts: {
+          runtimeRequired: true,
+          runtimeAvailable: false,
+        },
+      },
+      evidenceRefs: [],
+    });
+
+    expect(validationResult.passed).toBe(false);
+    expect(validationResult.status).toBe('blocked');
+    expect(validationResult.reason).toBe(RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE);
+    expect(validationResult.checks[0]).toMatchObject({
+      type: 'execution_runtime',
+      passed: false,
+    });
+  });
+
+  it('blocks runtime-unavailable execution without retry or recovery loop', async () => {
+    const task = createAutonomousRunnerTask({
+      id: 'runtime-required-task',
+      title: 'Runtime required',
+      status: RUNNER_TASK_STATUSES.READY,
+      requiresRealVm: true,
+      allowWorkspaceFallback: false,
+      maxAttempts: 3,
+      steps: [{
+        id: 'runtime-step',
+        title: 'Runtime step',
+        type: 'visual',
+        action: {
+          kind: 'visual',
+          visualAction: 'run_command',
+          environment: 'real_vm',
+        },
+        completionCriteria: {
+          type: 'file_contains',
+          contains: 'ok',
+        },
+        expectedEvidence: {
+          kind: 'complete',
+          required: ['stdout'],
+        },
+        maxAttempts: 3,
+      }],
+    }, { now: '2026-05-04T10:00:00.000Z' });
+    const runner = {
+      ...enqueueAutonomousRunnerTask(createEmptyAutonomousRunnerState(), task, {
+        now: '2026-05-04T10:00:00.000Z',
+      }),
+      enabled: true,
+    };
+
+    const result = await runAutonomousTaskRunnerTick({
+      runner,
+      vmStatus: { realVmAvailable: true, guestCommandReady: true },
+      invokeTool: null,
+      nowMs: Date.parse('2026-05-04T10:01:00.000Z'),
+    });
+
+    expect(result.reason).toBe(RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE);
+    expect(result.task.status).toBe(RUNNER_TASK_STATUSES.BLOCKED);
+    expect(result.task.reason).toBe(RUNNER_REASONS.RUNTIME_INVOKE_UNAVAILABLE);
+    expect(result.step.status).toBe(RUNNER_TASK_STATUSES.BLOCKED);
+    expect(result.step.nextRunAt).toBeNull();
+    expect(result.runner.runnerLock).toBeNull();
+    expect(result.runner.audits.some((audit) => audit.reason === RUNNER_REASONS.RECOVERY_LOOP_DETECTED)).toBe(false);
   });
 
   it('marks evidence refs with physical persistence status for HUD summaries', () => {

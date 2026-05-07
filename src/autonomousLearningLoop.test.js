@@ -624,6 +624,65 @@ describe('autonomous learning loop governance', () => {
     expect(installScript).toContain('alice-learning-vm:installer-checked');
   });
 
+  it('planner emits parseable PowerShell for substantive VM outcome validation', () => {
+    const fileTask = createAutonomousLearningTaskForGap({
+      ...fileManagementGap,
+      capability: 'file.explorer.open',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const validationStep = fileTask.task.steps.find((step) => step.id === 'validate-learning-outcome');
+    const command = validationStep.action.parameters.args.join(' ');
+
+    expect(fileTask.ok).toBe(true);
+    expect(command).toContain("$capability = 'file.explorer.open'");
+    expect(command).toContain('$validated = $false');
+    expect(command).toContain("if ($capability -eq 'file.explorer.open')");
+    expect(command).toContain('unsupported_substantive_validation');
+    expect(command).toContain('alice-learning-vm:learning-outcome-validated');
+    expect(command).not.toContain('switch ($capability) {;');
+  });
+
+  it('planner covers goal-stage capabilities with substantive validation instead of unsupported fallbacks', () => {
+    const windowTask = createAutonomousLearningTaskForGap({
+      ...appLaunchGap,
+      capability: 'app.window.focus',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const formTask = createAutonomousLearningTaskForGap({
+      ...fieldInteractionGap,
+      capability: 'form.fill',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const summaryTask = createAutonomousLearningTaskForGap({
+      ...pageValidationGap,
+      type: 'page_read',
+      capability: 'page.summary',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+    const searchTask = createAutonomousLearningTaskForGap({
+      ...browserGap,
+      type: 'page_validation',
+      capability: 'search.results.validate',
+    }, {
+      now: '2026-04-30T10:00:00.000Z',
+    });
+
+    const windowValidation = windowTask.task.steps.find((step) => step.id === 'validate-learning-outcome');
+    const formValidation = formTask.task.steps.find((step) => step.id === 'validate-learning-outcome');
+    const summaryValidation = summaryTask.task.steps.find((step) => step.id === 'validate-learning-outcome');
+    const searchValidation = searchTask.task.steps.find((step) => step.id === 'validate-learning-outcome');
+
+    expect(windowValidation.action.parameters.args.join(' ')).toContain("$capability -eq 'app.window.focus'");
+    expect(formValidation.action.parameters.args.join(' ')).toContain("$capability -eq 'form.fill'");
+    expect(summaryValidation.action.parameters.args.join(' ')).toContain("$capability -eq 'page.summary'");
+    expect(searchValidation.action.parameters.args.join(' ')).toContain('alice-learning-vm:browser-search-validated');
+    expect(searchValidation.action.parameters.args.join(' ')).toContain('browser_search_text_not_observed');
+  });
+
   it('planner creates real VM field interaction and page validation tasks in VM-only mode', () => {
     const fieldTask = createAutonomousLearningTaskForGap(fieldInteractionGap, {
       now: '2026-04-30T10:00:00.000Z',
@@ -663,6 +722,14 @@ describe('autonomous learning loop governance', () => {
       JSON.stringify(step.action?.parameters || {}).includes('alice-learning-vm:field-interacted'))).toBe(true);
     expect(textTask.task.steps.some((step) =>
       JSON.stringify(step.action?.parameters || {}).includes('field_window_not_detected'))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes('Set-Clipboard -Value $inputText'))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes("inputMethod = 'clipboard_paste'"))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes("inputMethod = 'sendkeys_fallback'"))).toBe(true);
+    expect(textTask.task.steps.some((step) =>
+      JSON.stringify(step.action?.parameters || {}).includes('vm_text_input_diagnostics='))).toBe(true);
     expect(textTask.task.steps.some((step) =>
       step.id === 'validate-learning-outcome' &&
       step.action?.requestedResources?.autonomousLearning?.substantiveValidation === true)).toBe(true);
@@ -1307,6 +1374,149 @@ describe('autonomous learning loop governance', () => {
     expect(contextualGap.type).toBe('app_install');
     expect(contextualGap.description).toContain('Instalador Seguro');
     expect(contextualGap.metadata.context.failureSignals.join(' ')).toContain('winget_search_failed');
+    expect(contextualGap.metadata).toMatchObject({
+      repairDepth: 1,
+      originalFailedTaskId: 'task-install',
+      repairFamily: 'repair-family-task-install',
+      needsHumanReview: false,
+    });
+    expect(contextualGap.metadata.parentFailureSignature).toContain('package_manager_unavailable');
+  });
+
+  it('scanner routes failed context-repair tasks to human review instead of recursive repair', () => {
+    const memory = createEmptyAliceMemory();
+    memory.autonomousRunner = {
+      ...memory.autonomousRunner,
+      tasksById: {
+        'learning-gap-context-repair-task-field-1': {
+          id: 'learning-gap-context-repair-task-field-1',
+          title: 'Aprender: reparar interacao de campo',
+          status: 'failed',
+          reason: 'max_attempts_reached',
+          riskLevel: 'low',
+          metadata: {
+            gapId: 'gap-context-repair-task-field',
+            capability: 'field.interaction',
+            repairDepth: 1,
+            originalFailedTaskId: 'task-field',
+            parentFailureSignature: 'field.interaction|max_attempts_reached|file_contains_not_evidenced',
+            repairFamily: 'repair-family-task-field',
+          },
+          steps: [{
+            id: 'step-field',
+            status: 'failed',
+            reason: 'file_contains_not_evidenced',
+          }],
+        },
+      },
+      audits: [{
+        type: 'runner_transition',
+        taskId: 'learning-gap-context-repair-task-field-1',
+        afterState: 'failed',
+        reason: 'max_attempts_reached',
+        summary: 'context repair repetiu file_contains_not_evidenced',
+      }],
+    };
+
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:02:00.000Z',
+    });
+    const reviewGap = scan.gaps.find((gap) => gap.gapId === 'gap-context-review-task-field');
+
+    expect(reviewGap).toBeTruthy();
+    expect(reviewGap.status).toBe('needs_human_review');
+    expect(reviewGap.metadata).toMatchObject({
+      needsHumanReview: true,
+      humanReviewReason: 'context_repair_depth_limit_reached',
+      repairDepth: 1,
+      originalFailedTaskId: 'task-field',
+      repairFamily: 'repair-family-task-field',
+    });
+    expect(scan.gaps.some((gap) => gap.gapId.startsWith('gap-context-repair-learning-gap-context-repair'))).toBe(false);
+  });
+
+  it('scanner dedupes repeated repair signatures into human review cooldown', () => {
+    const memory = createEmptyAliceMemory();
+    memory.autonomousRunner = {
+      ...memory.autonomousRunner,
+      tasksById: {
+        'task-field': {
+          id: 'task-field',
+          title: 'Preencher campo controlado',
+          status: 'failed',
+          reason: 'max_attempts_reached',
+          riskLevel: 'low',
+          metadata: { capability: 'field.interaction' },
+          steps: [{
+            id: 'step-field',
+            status: 'failed',
+            reason: 'file_contains_not_evidenced',
+          }],
+        },
+        'learning-gap-context-repair-task-field-1': {
+          id: 'learning-gap-context-repair-task-field-1',
+          title: 'Aprender: reparar interacao de campo',
+          status: 'failed',
+          reason: 'max_attempts_reached',
+          riskLevel: 'low',
+          metadata: {
+            gapId: 'gap-context-repair-task-field',
+            capability: 'field.interaction',
+            repairDepth: 1,
+            originalFailedTaskId: 'task-field',
+            parentFailureSignature: 'field.interaction|max_attempts_reached|step-field|file_contains_not_evidenced',
+            repairFamily: 'repair-family-task-field',
+          },
+          steps: [{
+            id: 'step-field',
+            status: 'failed',
+            reason: 'file_contains_not_evidenced',
+          }],
+        },
+      },
+      audits: [{
+        type: 'runner_transition',
+        taskId: 'task-field',
+        afterState: 'failed',
+        reason: 'max_attempts_reached',
+        summary: 'file_contains_not_evidenced',
+      }],
+    };
+
+    const scan = scanAutonomousCapabilityGaps(memory, {
+      policy: memory.autonomousLearning.policy,
+      now: '2026-04-30T10:03:00.000Z',
+    });
+    const reviewGap = scan.gaps.find((gap) => gap.gapId === 'gap-context-review-task-field');
+
+    expect(reviewGap).toBeTruthy();
+    expect(reviewGap.status).toBe('needs_human_review');
+    expect(reviewGap.metadata.humanReviewReason).toBe('context_repair_signature_cooldown');
+    expect(scan.gaps.some((gap) => gap.gapId === 'gap-context-repair-task-field')).toBe(false);
+  });
+
+  it('planner refuses to create automatic tasks for human-review repair gaps', () => {
+    const planned = createAutonomousLearningTaskForGap({
+      gapId: 'gap-context-review-task-field',
+      type: 'field_interaction',
+      capability: 'field.interaction',
+      description: 'Revisao humana necessaria para falha repetida.',
+      status: 'needs_human_review',
+      metadata: {
+        repairDepth: 1,
+        originalFailedTaskId: 'task-field',
+        repairFamily: 'repair-family-task-field',
+        parentFailureSignature: 'field.interaction|max_attempts_reached',
+      },
+    }, {
+      policy: createEmptyAliceMemory().autonomousLearning.policy,
+      now: '2026-04-30T10:04:00.000Z',
+    });
+
+    expect(planned.ok).toBe(false);
+    expect(planned.reason).toBe('learning_gap_needs_human_review');
+    expect(planned.task).toBeNull();
   });
 
   it('contextual repair gaps do not inherit an unrelated recently observed target', () => {

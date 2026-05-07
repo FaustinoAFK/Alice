@@ -9,6 +9,7 @@ import {
 import { hasActiveRunnerLock } from './autonomousRunnerLease';
 import { resolveRunnerDependencies } from './autonomousRunnerScheduler';
 import { normalizeVmStatus } from './autonomousLearning';
+import { validateResolvedFolderTarget } from './filesystem/filesystemNameSanitizer';
 
 const commandLooksUnsafe = (command = '') =>
   /\b(rm\s+-rf|del\s+\/[fsq]|format\b|shutdown\b|restart-computer\b|reg\s+delete)\b/i.test(command);
@@ -75,6 +76,23 @@ export const checkTaskExecutable = (task = {}, nowMs = Date.now()) => {
       reason: RUNNER_REASONS.POLICY_BLOCKED,
       step,
     };
+  }
+  if (step.action?.folderCreate) {
+    const folderValidation = validateResolvedFolderTarget({
+      filesystemName: step.action.folderCreate.filesystemName,
+      targetPath: step.action.folderCreate.targetPath,
+    });
+    if (!folderValidation.ok) {
+      return {
+        ok: false,
+        state: RUNNER_TASK_STATUSES.BLOCKED,
+        reason: 'folder_target_invalid',
+        step: {
+          ...step,
+          folderValidation,
+        },
+      };
+    }
   }
   return { ok: true, step };
 };

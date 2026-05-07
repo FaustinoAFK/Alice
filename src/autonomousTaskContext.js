@@ -1,3 +1,5 @@
+import { buildTaskFailureSignature } from './autonomousFailureSignatureBuilder';
+
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
@@ -5,6 +7,7 @@ const toSafeIdPart = (value) =>
   normalizeLower(value).replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'task';
 
 const terminalFailureStatuses = new Set(['failed', 'blocked', 'waiting_retry']);
+const HUMAN_REVIEW_STATUS = 'needs_human_review';
 
 const inferGapTypeFromCapability = (capability = '', fallback = '') => {
   const text = normalizeLower(`${capability} ${fallback}`);
@@ -39,6 +42,36 @@ const collectStepSignals = (task = {}) =>
       step.result?.validation?.reason ? `validation=${normalizeText(step.result.validation.reason)}` : '',
     ].filter(Boolean).join('|'))
     .slice(0, 6);
+
+const normalizeRepairDepth = (value) => {
+  const depth = Number(value);
+  return Number.isFinite(depth) && depth >= 0 ? Math.trunc(depth) : 0;
+};
+
+const isContextRepairTask = (task = {}) => {
+  const metadata = task.metadata || {};
+  return normalizeRepairDepth(metadata.repairDepth) > 0 ||
+    normalizeText(metadata.source) === 'runner_context_adaptation' ||
+    normalizeText(metadata.gapId).startsWith('gap-context-repair-') ||
+    normalizeText(task.id).startsWith('learning-gap-context-repair-');
+};
+
+export const getTaskRepairMetadata = (task = {}) => {
+  const metadata = task.metadata || {};
+  const currentDepth = isContextRepairTask(task)
+    ? Math.max(1, normalizeRepairDepth(metadata.repairDepth))
+    : normalizeRepairDepth(metadata.repairDepth);
+  const originalFailedTaskId = normalizeText(metadata.originalFailedTaskId) || normalizeText(task.id);
+  const parentFailureSignature = normalizeText(metadata.parentFailureSignature) || buildTaskFailureSignature(task);
+  const repairFamily = normalizeText(metadata.repairFamily) || `repair-family-${toSafeIdPart(originalFailedTaskId)}`;
+  return {
+    currentDepth,
+    nextRepairDepth: currentDepth + 1,
+    originalFailedTaskId,
+    parentFailureSignature,
+    repairFamily,
+  };
+};
 
 const tokenizeForAffinity = (value = '') =>
   normalizeLower(value)
@@ -163,19 +196,28 @@ export const createContextualLearningGapForTask = (
   const gapType = inferGapTypeFromCapability(context.capability, `${task.title || ''} ${task.description || ''}`);
   const capability = context.capability || `${gapType}.context_adaptation`;
   const targetPart = context.target ? ` no contexto "${context.target}"` : '';
+  const repair = getTaskRepairMetadata(task);
+  const repairBlocked = repair.currentDepth >= 1;
 
   return {
-    gapId: `gap-context-repair-${toSafeIdPart(context.taskId)}`,
+    gapId: repairBlocked
+      ? `gap-context-review-${toSafeIdPart(repair.originalFailedTaskId)}`
+      : `gap-context-repair-${toSafeIdPart(context.taskId)}`,
     type: gapType,
     capability,
-    description: `Aprender uma adaptacao contextual para executar "${context.title}"${targetPart} sem repetir a falha atual.`,
-    priority: task.status === 'blocked' ? 'high' : 'medium',
+    description: repairBlocked
+      ? `Revisao humana necessaria: reparo automatico ja tentou corrigir "${context.title}"${targetPart} e repetiu a falha.`
+      : `Aprender uma adaptacao contextual para executar "${context.title}"${targetPart} sem repetir a falha atual.`,
+    priority: repairBlocked || task.status === 'blocked' ? 'high' : 'medium',
     riskLevel: task.riskLevel || task.metadata?.riskLevel || 'low',
-    status: 'open',
+    status: repairBlocked ? HUMAN_REVIEW_STATUS : 'open',
     firstSeenAt: now,
     lastSeenAt: now,
     evidence: [
       `sourceTaskId=${context.taskId}`,
+      `originalFailedTaskId=${repair.originalFailedTaskId}`,
+      `repairDepth=${repairBlocked ? repair.currentDepth : repair.nextRepairDepth}`,
+      `parentFailureSignature=${repair.parentFailureSignature}`,
       context.summary,
       ...context.failureSignals,
     ].filter(Boolean).slice(0, 10),
@@ -183,6 +225,12 @@ export const createContextualLearningGapForTask = (
       source: 'runner_context_adaptation',
       sourceTaskId: context.taskId,
       sourceTaskStatus: context.status,
+      originalFailedTaskId: repair.originalFailedTaskId,
+      repairDepth: repairBlocked ? repair.currentDepth : repair.nextRepairDepth,
+      parentFailureSignature: repair.parentFailureSignature,
+      repairFamily: repair.repairFamily,
+      needsHumanReview: repairBlocked,
+      humanReviewReason: repairBlocked ? 'context_repair_depth_limit_reached' : '',
       context,
     },
   };

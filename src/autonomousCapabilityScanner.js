@@ -6,6 +6,12 @@ import { createContextualLearningGapForTask } from './autonomousTaskContext';
 const normalizeText = (value) => String(value || '').trim().replace(/\s+/g, ' ');
 const normalizeLower = (value) => normalizeText(value).toLowerCase();
 const normalizeArray = (value) => (Array.isArray(value) ? value.filter(Boolean) : []);
+const HUMAN_REVIEW_STATUS = 'needs_human_review';
+const RUNTIME_ENVIRONMENT_FAILURE_REASONS = new Set([
+  'runtime_invoke_unavailable',
+  'invoke_unavailable',
+  'execution_runtime_unavailable',
+]);
 
 const FOUNDATION_CAPABILITY_GAPS = [
   {
@@ -143,6 +149,9 @@ const recentRunnerFailures = (runner = {}) =>
   normalizeArray(runner.audits)
     .filter((event) => {
       const haystack = `${event.type} ${event.reason} ${event.afterState} ${event.summary}`;
+      if (RUNTIME_ENVIRONMENT_FAILURE_REASONS.has(normalizeLower(event.reason))) {
+        return false;
+      }
       if (event.type === 'evidence_persistence' && event.metadata?.ok === true) {
         return false;
       }
@@ -160,11 +169,53 @@ const recentRunnerFailures = (runner = {}) =>
     .slice(-8);
 
 const existingGapIds = (state = {}) => new Set(normalizeArray(state.knownGaps).map((gap) => gap.gapId));
+const knownGapForRepair = (state = {}, { repairFamily = '', parentFailureSignature = '' } = {}) =>
+  normalizeArray(state.knownGaps).find((gap) =>
+    (repairFamily && gap.metadata?.repairFamily === repairFamily) ||
+    (parentFailureSignature && gap.metadata?.parentFailureSignature === parentFailureSignature),
+  );
+
 const runnerAlreadyHasTaskForGap = (runner = {}, gapId = '') =>
   Object.values(runner.tasksById || {}).some((task) =>
     task.metadata?.gapId === gapId &&
     ['planned', 'ready', 'running', 'waiting_retry', 'blocked', 'done'].includes(task.status),
   );
+
+const runnerAlreadyHasRepairForSignature = (
+  runner = {},
+  { repairFamily = '', parentFailureSignature = '', originalFailedTaskId = '' } = {},
+) =>
+  Object.values(runner.tasksById || {}).some((task) => {
+    const metadata = task.metadata || {};
+    const repairDepth = Number(metadata.repairDepth || 0);
+    return repairDepth > 0 && (
+      (repairFamily && metadata.repairFamily === repairFamily) ||
+      (parentFailureSignature && metadata.parentFailureSignature === parentFailureSignature) ||
+      (originalFailedTaskId && metadata.originalFailedTaskId === originalFailedTaskId)
+    );
+  });
+
+const createHumanReviewRepairGap = (gap = {}, {
+  reason = 'context_repair_signature_cooldown',
+  now = new Date().toISOString(),
+} = {}) => ({
+  ...gap,
+  gapId: `gap-context-review-${normalizeLower(gap.metadata?.originalFailedTaskId || gap.gapId).replace(/[^a-z0-9]+/g, '-') || 'task'}`,
+  status: HUMAN_REVIEW_STATUS,
+  priority: 'high',
+  description: `Revisao humana necessaria: ${gap.description}`,
+  firstSeenAt: gap.firstSeenAt || now,
+  lastSeenAt: now,
+  evidence: [
+    ...(gap.evidence || []),
+    reason,
+  ],
+  metadata: {
+    ...(gap.metadata || {}),
+    needsHumanReview: true,
+    humanReviewReason: reason,
+  },
+});
 
 const createGap = (gap, { policy = {} } = {}) => ({
   gapId: gap.gapId,
@@ -239,20 +290,33 @@ export const scanAutonomousCapabilityGaps = (memory = {}, { policy = {}, now = n
     if (!task || task.status === 'done') {
       return;
     }
-    const contextualGap = createContextualLearningGapForTask(task, { memory, now });
-    if (contextualGap && !runnerAlreadyHasTaskForGap(memory.autonomousRunner, contextualGap.gapId)) {
-      gaps.push(createGap({
-        ...contextualGap,
-        evidence: [
-          ...(contextualGap.evidence || []),
-          event.reason || 'runner_failure',
-          event.summary || '',
-        ],
-        firstSeenAt: knownGapSet.has(contextualGap.gapId)
-          ? memory.autonomousLearning?.knownGaps?.find((gap) => gap.gapId === contextualGap.gapId)?.firstSeenAt || now
-          : now,
-        lastSeenAt: now,
-      }, { policy }));
+    let contextualGap = createContextualLearningGapForTask(task, { memory, now });
+    if (contextualGap) {
+      const repairMetadata = contextualGap.metadata || {};
+      const existingRepairGap = knownGapForRepair(memory.autonomousLearning, repairMetadata);
+      const repairAlreadyAttempted = runnerAlreadyHasRepairForSignature(memory.autonomousRunner, repairMetadata);
+      if (contextualGap.status !== HUMAN_REVIEW_STATUS && (existingRepairGap || repairAlreadyAttempted)) {
+        contextualGap = createHumanReviewRepairGap(contextualGap, {
+          reason: existingRepairGap?.status === HUMAN_REVIEW_STATUS
+            ? 'context_repair_already_needs_human_review'
+            : 'context_repair_signature_cooldown',
+          now,
+        });
+      }
+      if (!runnerAlreadyHasTaskForGap(memory.autonomousRunner, contextualGap.gapId)) {
+        gaps.push(createGap({
+          ...contextualGap,
+          evidence: [
+            ...(contextualGap.evidence || []),
+            event.reason || 'runner_failure',
+            event.summary || '',
+          ],
+          firstSeenAt: knownGapSet.has(contextualGap.gapId)
+            ? memory.autonomousLearning?.knownGaps?.find((gap) => gap.gapId === contextualGap.gapId)?.firstSeenAt || now
+            : now,
+          lastSeenAt: now,
+        }, { policy }));
+      }
       return;
     }
     const gapId = `gap-runner-failure-${normalizeLower(event.taskId).replace(/[^a-z0-9]+/g, '-')}`;

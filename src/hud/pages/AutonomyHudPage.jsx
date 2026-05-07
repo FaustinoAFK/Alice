@@ -173,3 +173,5 @@ export function AutonomyHudPage({ debugHud, autonomousLearningState, onApprovePr
     </section>
   );
 }
+
+export default AutonomyHudPage;
