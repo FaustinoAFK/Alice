@@ -422,7 +422,48 @@ Ao final de cada ciclo, responder com:
 
 ## Proximo passo recomendado
 
-Fase 1 deve continuar com uma mudanca de baixo risco: manter o registry contextual inerte e, antes de qualquer ativacao, desenhar um caminho opt-in/testado para escolher perfis sem alterar o default de `createAliceLiveSetup`. O padrao ainda deve enviar `ALICE_LIVE_TOOLS` completo ao Gemini Live ate haver decisao explicita e cobertura de regressao.
+Fase 1 deve continuar com uma mudanca de baixo risco: manter o registry e o resolver contextual inertes e, antes de qualquer ativacao, desenhar um caminho opt-in/testado para escolher perfis sem alterar o default de `createAliceLiveSetup`. O padrao ainda deve enviar `ALICE_LIVE_TOOLS` completo ao Gemini Live ate haver decisao explicita e cobertura de regressao.
+
+### Fase 1.6 - Tool profile resolver inerte
+
+Resumo: foi criado um resolvedor puro que sugere qual perfil contextual poderia ser usado futuramente, sem conectar isso ao runtime. Ele recebe contexto opcional como `userText`, `hasActiveWebPage`, `hasScreenShare`, `targetEnvironment`, `requestedOperation`, `riskLevel`, `explicitToolProfile` e `currentMode`, e retorna `{ profile, reason, confidence, fallbackProfile: 'full' }`.
+
+Arquivos criados:
+
+- `src/tools/registry/toolProfileResolver.js`
+- `src/tools/registry/toolProfileResolver.test.js`
+
+Garantias:
+
+- O resolvedor valida perfis contra `TOOL_CONTEXT_PROFILES`.
+- `explicitToolProfile` valido e respeitado.
+- `explicitToolProfile` invalido cai para `full`.
+- Conversa comum sugere `conversation`.
+- Texto vazio ou ambiguo cai para `full` por seguranca.
+- Pagina/site/aba atual sugere `web` somente quando `hasActiveWebPage=true`.
+- Pedidos de VM sugerem `vm`.
+- Pedidos de fila/tarefa longa/Runner sugerem `runner`.
+- Pedidos de auto-melhoria/codigo da Alice sugerem `selfImprovement`.
+- Pedidos de aprendizado/candidatos/procedimentos sugerem `learningReview`.
+- Pedidos de snapshot/rollback/risco no PC real sugerem `hostSafety`.
+- O resolver nao altera o contexto recebido e nao e usado por `src/alice.js`, `createAliceLiveSetup` ou `ALICE_LIVE_TOOLS`.
+- Fixture e schemas de tools nao foram alterados.
+
+Testes:
+
+- `npx vitest run src/tools/registry/toolProfileResolver.test.js`: passou, `13` testes.
+- `npm test`: passou, `48` arquivos de teste e `512` testes.
+- `npm run lint`: passou.
+- `npm run build`: passou, com aviso conhecido de chunk acima de 500 kB.
+- `cargo test`: nao necessario se `src-tauri/` permanecer intocado.
+
+Riscos restantes:
+
+- O resolvedor e heuristico e ainda nao deve ser fonte de decisao ativa.
+- Qualquer wiring futuro precisa ser opt-in e provar que o default continua usando `ALICE_LIVE_TOOLS` completo.
+- A selecao contextual real ainda precisa de contrato com o runtime e observabilidade no HUD antes de ativacao.
+
+Proximo passo recomendado: criar testes de contrato para uma futura integracao opt-in, ainda sem conectar o resolver ao runtime padrao.
 
 ## Historico de execucao
 
@@ -431,3 +472,4 @@ Fase 1 deve continuar com uma mudanca de baixo risco: manter o registry contextu
 - Fase 1.3: adicionar fixture JSON de contrato para `ALICE_LIVE_TOOLS[0].functionDeclarations` e teste dedicado para proteger shape, campos obrigatorios, dominios, ordem e schemas completos antes de separar tools por dominio.
 - Fase 1.4: modularizar completamente as Live tools por dominio em arquivos dedicados (`web`, `mindMap`, `autonomousStatus`, `runner`, `vm`, `autonomousPlanning`, `hostSafety`, `selfImprovement`, `learning`) e transformar `src/tools/aliceLiveTools.js` em montador/facade. Garantia principal: `ALICE_LIVE_TOOLS[0].functionDeclarations` continua igual ao fixture de contrato, preservando nomes, ordem, descriptions, parameters e required. Riscos restantes: ainda nao ha carregamento contextual de tools e `src/App.jsx`, `src/aliceMemory.js` e `src-tauri/src/lib.rs` seguem como centros de acoplamento. Proximo passo recomendado: criar uma camada de tool registry contextual somente em modo inerte/testado, sem mudar quais tools o Gemini Live recebe por padrao.
 - Fase 1.5: criar `src/tools/registry/` com registry contextual inerte. `TOOL_CONTEXT_PROFILES` mapeia perfis para dominios, nao para schemas duplicados; `toolRegistry.js` lista dominios, nomes, declarations e Live tools por perfil usando declarations oficiais e preservando a ordem de `ALICE_LIVE_TOOLS`. Testes garantem que `full` equivale ao fixture completo, todos os dominios existem, nao ha tools duplicadas por perfil, todos os nomes pertencem ao contrato oficial, `conversation` fica vazio/minimo, `web` fica apenas em `web`, `vm` nao inclui `hostSafety`, `selfImprovement` apenas descreve declarations e `learningReview` fica limitado a status + learning. O runtime nao foi alterado.
+- Fase 1.6: criar `src/tools/registry/toolProfileResolver.js` e testes para sugerir perfis de tools de forma inerte. O resolver retorna `profile`, `reason`, `confidence` e `fallbackProfile`, respeita perfil explicito valido, cai para `full` em perfil invalido/duvida, sugere `web`, `vm`, `runner`, `selfImprovement`, `learningReview`, `hostSafety` ou `conversation` conforme sinais de contexto, valida retorno contra `TOOL_CONTEXT_PROFILES` e preserva pureza sem mutar o contexto. O runtime nao foi alterado; `createAliceLiveSetup` continua usando `ALICE_LIVE_TOOLS` completo; fixture e schemas nao foram alterados.

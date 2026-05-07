@@ -2,21 +2,20 @@
 
 ## Estado atual do projeto
 
-A Alice esta em Fase 1 de organizacao arquitetural incremental. `src/alice.js` continua como facade publica; o prompt segue separado; as Live tools estao modularizadas por dominio em arquivos dedicados; `src/tools/aliceLiveTools.js` continua como montador/facade e exporta o mesmo `ALICE_LIVE_TOOLS` final. Existe uma camada inerte de registry contextual em `src/tools/registry/`, mas nao ha carregamento contextual ativo ainda.
+A Alice esta em Fase 1 de organizacao arquitetural incremental. `src/alice.js` continua como facade publica; o prompt segue separado; as Live tools estao modularizadas por dominio em arquivos dedicados; `src/tools/aliceLiveTools.js` continua como montador/facade e exporta o mesmo `ALICE_LIVE_TOOLS` final. Existe uma camada inerte de registry contextual em `src/tools/registry/`, incluindo um resolvedor puro que sugere perfis futuros, mas nao ha carregamento contextual ativo ainda.
 
 ## Ultima alteracao realizada
 
-Foi executada a Fase 1.5 - Tool registry contextual inerte. Foram criados perfis contextuais que mapeiam contextos para dominios de tools, sem duplicar schemas e sem alterar runtime. O registry monta nomes, declarations e objetos Live tools por perfil apenas quando chamado diretamente em testes/codigo futuro; `createAliceLiveSetup` e `ALICE_LIVE_TOOLS` padrao continuam iguais.
+Foi executada a Fase 1.6 - Tool profile resolver inerte. Foi criado `resolveToolProfile(context)`, uma funcao pura que sugere um perfil de tools com base em texto/contexto, retorna `profile`, `reason`, `confidence` e `fallbackProfile`, e valida perfis contra `TOOL_CONTEXT_PROFILES`. O resolvedor nao e usado pelo runtime real; `createAliceLiveSetup` e `ALICE_LIVE_TOOLS` padrao continuam iguais.
 
 ## Objetivo da alteracao
 
-Preparar a futura selecao contextual de tools com uma camada puramente funcional e inerte. A mudanca apenas descreve quais dominios seriam usados em perfis como `full`, `conversation`, `web`, `vm`, `selfImprovement` e `learningReview`; ela preserva exatamente o contrato completo de `ALICE_LIVE_TOOLS[0].functionDeclarations` contra o fixture JSON criado na Fase 1.3.
+Preparar uma camada conservadora para futura selecao contextual de tools sem ativar essa selecao. A mudanca apenas sugere perfis como `conversation`, `web`, `vm`, `runner`, `selfImprovement`, `learningReview`, `hostSafety` ou `full`, caindo para `full` quando ha duvida ou perfil explicito invalido.
 
 ## Arquivos criados
 
-- `src/tools/registry/toolContextProfiles.js`
-- `src/tools/registry/toolRegistry.js`
-- `src/tools/registry/toolRegistry.test.js`
+- `src/tools/registry/toolProfileResolver.js`
+- `src/tools/registry/toolProfileResolver.test.js`
 
 ## Arquivos alterados
 
@@ -42,7 +41,7 @@ Preparar a futura selecao contextual de tools com uma camada puramente funcional
 
 - `src/tools/aliceLiveToolDomains.js`
   - alterado: nao
-  - motivo: dominios oficiais existentes foram reutilizados.
+  - motivo: dominios oficiais existentes foram reutilizados sem mudanca.
   - risco: nenhum risco novo introduzido.
 
 - `src/tools/__fixtures__/aliceLiveTools.contract.json`
@@ -84,9 +83,8 @@ Preparar a futura selecao contextual de tools com uma camada puramente funcional
 - `createAliceLiveSetup` continua exportado: sim.
 - `createAliceLiveSetup` continua usando `ALICE_LIVE_TOOLS` completo por padrao: sim.
 - Ordem das tools foi preservada: sim, via `ALICE_LIVE_TOOL_ORDER`, dominios e fixture.
-- Schemas das tools foram preservados: sim, `ALICE_LIVE_TOOLS[0].functionDeclarations` bate com `src/tools/__fixtures__/aliceLiveTools.contract.json`.
-- Registry contextual esta inerte: sim, nao e importado por `src/alice.js` nem usado por `createAliceLiveSetup`.
-- Perfil `full` equivale ao contrato completo: sim, `buildLiveToolsForProfile('full')` bate com fixture e `ALICE_LIVE_TOOLS`.
+- Schemas das tools foram preservados: sim, nenhum schema ou fixture foi alterado.
+- Resolver contextual esta inerte: sim, nao e importado por `src/alice.js` nem usado por `createAliceLiveSetup`.
 - Prompt principal nao mudou semanticamente: sim, prompt nao foi alterado.
 - Runner continua exigindo lease, validacao e evidencia: sim, Runner nao foi alterado.
 - Nenhuma task pode virar done sem evidencia validada: sim, transicoes do Runner nao foram alteradas.
@@ -94,40 +92,34 @@ Preparar a futura selecao contextual de tools com uma camada puramente funcional
 - Rollback/snapshot nao foi enfraquecido: sim, rollback/snapshot nao foram alterados.
 - Learning automatico nao promove comportamento ativo sem revisao: sim, learning runtime nao foi alterado.
 
-## Registry criado
+## Resolver criado
 
-- `TOOL_CONTEXT_PROFILES` descreve perfis por lista de dominios, nao por schemas duplicados.
-- `getToolDomainsForProfile(profileName)` lista dominios do perfil.
-- `getToolNamesForProfile(profileName)` lista nomes de tools do perfil.
-- `getToolDeclarationsForProfile(profileName)` monta declarations a partir das declarations oficiais, preservando a ordem oficial de `ALICE_LIVE_TOOLS`.
-- `buildLiveToolsForProfile(profileName)` monta o shape Live tools para uso futuro/opt-in.
-- Validadores puros cobrem dominios inexistentes, duplicidade de tools, existencia dos nomes no contrato oficial e equivalencia do perfil `full`.
+- `resolveToolProfile(context)` e uma funcao pura sem side effects.
+- O retorno tem shape `{ profile, reason, confidence, fallbackProfile: 'full' }`.
+- `explicitToolProfile` valido tem prioridade.
+- `explicitToolProfile` invalido cai para `full` com reason claro.
+- Perguntas sobre pagina/site/aba atual sugerem `web` apenas quando `hasActiveWebPage=true`; sem pagina ativa caem para `full`.
+- Pedidos de VM sugerem `vm`.
+- Pedidos de fila/tarefa longa/runner sugerem `runner`.
+- Pedidos de auto-melhoria/codigo da Alice sugerem `selfImprovement`.
+- Pedidos de aprendizado/candidato/procedimento sugerem `learningReview`.
+- Pedidos de snapshot/rollback/risco no PC real sugerem `hostSafety`.
+- Conversa comum sugere `conversation`, sempre com `fallbackProfile: 'full'`.
+- Texto vazio ou ambiguo cai para `full` por seguranca.
 
 ## Testes executados
 
 ```powershell
-npx vitest run src/tools/registry/toolRegistry.test.js
+npx vitest run src/tools/registry/toolProfileResolver.test.js
 ```
 
-Resultado: passou. `1` arquivo de teste, `9` testes.
-
-```powershell
-npx vitest run src/tools/aliceLiveTools.contract.test.js
-```
-
-Resultado: passou. `1` arquivo de teste, `7` testes.
-
-```powershell
-npx vitest run src/alice.test.js
-```
-
-Resultado: passou. `1` arquivo de teste, `9` testes.
+Resultado: passou. `1` arquivo de teste, `13` testes.
 
 ```powershell
 npm test
 ```
 
-Resultado: passou. `47` arquivos de teste, `499` testes.
+Resultado: passou. `48` arquivos de teste, `512` testes.
 
 ```powershell
 npm run lint
@@ -151,7 +143,8 @@ Resultado: nao executado nesta rodada porque nenhum arquivo em `src-tauri/` foi 
 ## Riscos ainda existentes
 
 - Ainda nao existe carregamento contextual ativo de tools; todas continuam indo para o Gemini Live por padrao.
-- O registry contextual ainda e descritivo/inativo por design; qualquer ativacao futura precisa passar por `createAliceLiveSetup` com teste de equivalencia e decisao explicita.
+- O resolver e heuristico e inerte por design; qualquer ativacao futura precisa ser opt-in/testada.
+- Antes de usar o resolver no runtime, sera necessario provar que o default de `createAliceLiveSetup` continua enviando `ALICE_LIVE_TOOLS` completo.
 - `src/App.jsx` continua grande e acoplado, coordenando UI, Live, memoria, Runner, learning, HUD e timers.
 - `src/aliceMemory.js` continua sendo contrato persistente amplo demais.
 - `src-tauri/src/lib.rs` continua concentrando comandos nativos sensiveis.
@@ -159,4 +152,4 @@ Resultado: nao executado nesta rodada porque nenhum arquivo em `src-tauri/` foi 
 
 ## Proximo passo
 
-Proximo passo seguro: revisar como o runtime poderia escolher um perfil em modo opt-in/testado, ainda sem mudar o padrao. Antes de ativar qualquer selecao contextual, adicionar teste que prove que o default continua enviando `ALICE_LIVE_TOOLS` completo.
+Proximo passo seguro: criar um desenho opt-in para como o runtime poderia consultar `resolveToolProfile` sem alterar o comportamento padrao, ou adicionar testes de contrato que protejam explicitamente o default antes de qualquer wiring futuro.
