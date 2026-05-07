@@ -1,0 +1,21 @@
+export const TOOL_CONTEXT_PROFILES = {
+  full: [
+    'web',
+    'mindMap',
+    'autonomousStatus',
+    'runner',
+    'vm',
+    'autonomousPlanning',
+    'hostSafety',
+    'selfImprovement',
+    'learning',
+  ],
+  conversation: [],
+  web: ['web'],
+  visual: ['mindMap'],
+  vm: ['autonomousStatus', 'runner', 'vm'],
+  runner: ['autonomousStatus', 'runner'],
+  selfImprovement: ['selfImprovement'],
+  learningReview: ['autonomousStatus', 'learning'],
+  hostSafety: ['hostSafety'],
+};

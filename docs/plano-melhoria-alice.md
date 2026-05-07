@@ -422,7 +422,7 @@ Ao final de cada ciclo, responder com:
 
 ## Proximo passo recomendado
 
-Fase 1 deve continuar com uma mudanca de baixo risco: criar `src/prompts/` e `src/tools/` como fronteiras documentadas ou extrair o system instruction/tool declarations de `src/alice.js` com teste de equivalencia. A opcao mais segura e criar primeiro READMEs de fronteira e, no ciclo seguinte, mover constantes mantendo `alice.js` como facade.
+Fase 1 deve continuar com uma mudanca de baixo risco: manter o registry contextual inerte e, antes de qualquer ativacao, desenhar um caminho opt-in/testado para escolher perfis sem alterar o default de `createAliceLiveSetup`. O padrao ainda deve enviar `ALICE_LIVE_TOOLS` completo ao Gemini Live ate haver decisao explicita e cobertura de regressao.
 
 ## Historico de execucao
 
@@ -430,3 +430,4 @@ Fase 1 deve continuar com uma mudanca de baixo risco: criar `src/prompts/` e `sr
 - Fase 1.2: adicionar metadados de dominio em `src/tools/aliceLiveToolDomains.js` sem alterar `ALICE_LIVE_TOOLS`, validando cobertura, unicidade e ordem oficial por teste.
 - Fase 1.3: adicionar fixture JSON de contrato para `ALICE_LIVE_TOOLS[0].functionDeclarations` e teste dedicado para proteger shape, campos obrigatorios, dominios, ordem e schemas completos antes de separar tools por dominio.
 - Fase 1.4: modularizar completamente as Live tools por dominio em arquivos dedicados (`web`, `mindMap`, `autonomousStatus`, `runner`, `vm`, `autonomousPlanning`, `hostSafety`, `selfImprovement`, `learning`) e transformar `src/tools/aliceLiveTools.js` em montador/facade. Garantia principal: `ALICE_LIVE_TOOLS[0].functionDeclarations` continua igual ao fixture de contrato, preservando nomes, ordem, descriptions, parameters e required. Riscos restantes: ainda nao ha carregamento contextual de tools e `src/App.jsx`, `src/aliceMemory.js` e `src-tauri/src/lib.rs` seguem como centros de acoplamento. Proximo passo recomendado: criar uma camada de tool registry contextual somente em modo inerte/testado, sem mudar quais tools o Gemini Live recebe por padrao.
+- Fase 1.5: criar `src/tools/registry/` com registry contextual inerte. `TOOL_CONTEXT_PROFILES` mapeia perfis para dominios, nao para schemas duplicados; `toolRegistry.js` lista dominios, nomes, declarations e Live tools por perfil usando declarations oficiais e preservando a ordem de `ALICE_LIVE_TOOLS`. Testes garantem que `full` equivale ao fixture completo, todos os dominios existem, nao ha tools duplicadas por perfil, todos os nomes pertencem ao contrato oficial, `conversation` fica vazio/minimo, `web` fica apenas em `web`, `vm` nao inclui `hostSafety`, `selfImprovement` apenas descreve declarations e `learningReview` fica limitado a status + learning. O runtime nao foi alterado.
