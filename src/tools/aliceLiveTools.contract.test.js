@@ -3,9 +3,14 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   ALICE_LIVE_TOOL_DOMAINS,
+  ALICE_LIVE_TOOL_ORDER,
   flattenAliceLiveToolDomainNames,
 } from './aliceLiveToolDomains';
-import { ALICE_LIVE_TOOLS } from './aliceLiveTools';
+import {
+  ALICE_LIVE_TOOL_DECLARATIONS,
+  ALICE_LIVE_TOOL_DECLARATIONS_BY_DOMAIN,
+  ALICE_LIVE_TOOLS,
+} from './aliceLiveTools';
 
 const contractPath = fileURLToPath(
   new URL('./__fixtures__/aliceLiveTools.contract.json', import.meta.url),
@@ -18,6 +23,47 @@ const serializeToolDeclarations = (functionDeclarations) =>
   JSON.stringify(functionDeclarations, null, 2);
 
 const getFunctionDeclarations = () => ALICE_LIVE_TOOLS[0]?.functionDeclarations || [];
+
+const namesOf = (declarations) => declarations.map((tool) => tool.name);
+
+const EXPECTED_DOMAIN_TOOL_NAMES = {
+  web: [
+    'get_navigation_context',
+    'inspect_current_page',
+    'search_same_domain',
+    'search_web',
+    'fetch_web_page',
+  ],
+  mindMap: ['update_mind_map'],
+  autonomousStatus: ['get_autonomous_learning_status'],
+  runner: ['manage_autonomous_runner'],
+  vm: [
+    'diagnose_local_vm_setup',
+    'run_local_vm_smoke_test',
+    'install_vm_guest_agent',
+    'diagnose_vm_guest_agent',
+    'start_vm_guest_agent_resident',
+    'capture_vm_guest_screen',
+    'run_vm_guest_agent_action',
+    'run_vm_visual_smoke_test',
+    'run_vm_operational_task',
+  ],
+  autonomousPlanning: ['plan_autonomous_task'],
+  hostSafety: [
+    'create_host_change_snapshot',
+    'record_host_file_checkpoint',
+    'report_unexpected_risk',
+  ],
+  selfImprovement: [
+    'create_self_improvement_proposal',
+    'approve_self_improvement_proposal',
+  ],
+  learning: [
+    'record_validated_learning',
+    'record_research_finding',
+    'inspect_project_context',
+  ],
+};
 
 describe('ALICE_LIVE_TOOLS contract', () => {
   it('keeps the expected top-level shape', () => {
@@ -44,6 +90,7 @@ describe('ALICE_LIVE_TOOLS contract', () => {
 
     expect(new Set(names).size).toBe(names.length);
     expect(names).toEqual(domainNames);
+    expect(names).toEqual(ALICE_LIVE_TOOL_ORDER);
   });
 
   it('keeps every tool assigned to exactly one domain', () => {
@@ -61,7 +108,31 @@ describe('ALICE_LIVE_TOOLS contract', () => {
     names.forEach((toolName) => {
       expect(seenDomainTools.get(toolName)).toBe(1);
     });
-    expect([...seenDomainTools.keys()]).toEqual(names);
+    expect([...seenDomainTools.keys()].sort()).toEqual([...names].sort());
+  });
+
+  it('keeps each domain export limited to its expected tools', () => {
+    expect(Object.keys(ALICE_LIVE_TOOL_DECLARATIONS_BY_DOMAIN).sort()).toEqual(
+      Object.keys(EXPECTED_DOMAIN_TOOL_NAMES).sort(),
+    );
+
+    Object.entries(EXPECTED_DOMAIN_TOOL_NAMES).forEach(([domain, expectedToolNames]) => {
+      expect(namesOf(ALICE_LIVE_TOOL_DECLARATIONS_BY_DOMAIN[domain])).toEqual(expectedToolNames);
+      const metadata = ALICE_LIVE_TOOL_DOMAINS.find((item) => item.domain === domain);
+      expect(metadata?.toolNames).toEqual(expectedToolNames);
+    });
+  });
+
+  it('assembles final declarations from domain declarations in the official order', () => {
+    const names = getFunctionDeclarations().map((tool) => tool.name);
+    const domainDeclarationNames = Object.values(ALICE_LIVE_TOOL_DECLARATIONS_BY_DOMAIN)
+      .flat()
+      .map((tool) => tool.name);
+
+    expect(ALICE_LIVE_TOOL_DECLARATIONS).toBe(getFunctionDeclarations());
+    expect(names).toEqual(ALICE_LIVE_TOOL_ORDER);
+    expect(new Set(domainDeclarationNames).size).toBe(domainDeclarationNames.length);
+    expect([...domainDeclarationNames].sort()).toEqual([...ALICE_LIVE_TOOL_ORDER].sort());
   });
 
   it('matches the stable fixture for complete function declarations', () => {
