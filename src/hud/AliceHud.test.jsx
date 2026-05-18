@@ -1,15 +1,33 @@
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
 import { AliceHud } from './AliceHud';
+import { createStarterMindMap } from './mindMap/utils/mindMapData';
 
 const buildProps = (overrides = {}) => ({
+  activeHudPage: 'mind-map',
+  activeMindMap: createStarterMindMap(),
+  autonomousLearningState: {},
+  autonomousRunnerState: {
+    enabled: false,
+    runnerState: 'idle',
+    queue: [],
+    tasksById: {},
+    audits: [],
+    evidenceRefs: [],
+  },
   caption: '',
+  debugHud: {},
   diagnostics: {},
   error: '',
   inputCaption: '',
   isBusy: false,
   isLive: false,
+  mindMapRevision: 0,
+  onApproveProposal: vi.fn(),
+  onMindMapChange: vi.fn(),
   onNavigate: vi.fn(),
+  onRejectProposal: vi.fn(),
+  onRunnerAction: vi.fn(),
   onToggleLiveSession: vi.fn(),
   onToggleSidebar: vi.fn(),
   sessionNotice: '',
@@ -19,16 +37,43 @@ const buildProps = (overrides = {}) => ({
   ...overrides,
 });
 
-describe('AliceHud essential mode', () => {
-  it('renders only the live conversation and screen-vision surface', () => {
+describe('AliceHud lazy loading', () => {
+  it('all lazy HUD pages expose a default component export', async () => {
+    const modules = await Promise.all([
+      import('./pages/KnowledgeHudPage'),
+      import('./pages/MindMapHudPage'),
+      import('./pages/AutonomyHudPage'),
+      import('./pages/AutonomousLearningHudPage'),
+      import('./pages/AutonomousRunnerHudPage'),
+      import('./pages/DebugHudPage'),
+    ]);
+
+    modules.forEach((module) => {
+      expect(typeof module.default).toBe('function');
+    });
+  });
+
+  it('renders the knowledge tab with a suspense fallback instead of loading the page eagerly', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'knowledge' })} />);
+
+    expect(html).toContain('Carregando conhecimento');
+  });
+
+  it('renders the mind map tab with a suspense fallback instead of breaking navigation', () => {
     const html = renderToString(<AliceHud {...buildProps()} />);
 
-    expect(html).toContain('Alice Live');
-    expect(html).toContain('Voz e tela ao vivo');
-    expect(html).toContain('Ao vivo');
-    expect(html).not.toContain('Conhecimento');
-    expect(html).not.toContain('Mapa');
-    expect(html).not.toContain('Autonomia');
-    expect(html).not.toContain('Runner');
+    expect(html).toContain('Carregando mapa mental');
+  });
+
+  it('renders the learning tab with a suspense fallback instead of eagerly loading the page', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'learning' })} />);
+
+    expect(html).toContain('Carregando aprendizado autonomo');
+  });
+
+  it('renders the runner tab with a suspense fallback instead of loading the audit page eagerly', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'runner', debugHud: { runner: {} } })} />);
+
+    expect(html).toContain('Carregando runner autonomo');
   });
 });
