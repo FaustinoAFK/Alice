@@ -415,6 +415,70 @@ describe('buildMemoryPrefixTurns', () => {
     expect(turns[0].parts[0].text).toContain('Projetos ativos: Alice Virtual (active).');
     expect(turns[0].parts[0].text).toContain('Resumo recente: Usuario: continuar fase 5');
   });
+
+  it('includes learning, runner and mind map memory when they exist', () => {
+    const turns = buildMemoryPrefixTurns({
+      ...createEmptyAliceMemory(),
+      autonomousLearning: {
+        ...createEmptyAliceMemory().autonomousLearning,
+        learningGoals: [{ description: 'Aprender fluxo de login' }],
+        knownGaps: [{ title: 'Gap de autenticacao' }],
+        recentExperiments: [{ summary: 'Teste visual aprovado' }],
+        procedureCandidates: [{ candidateId: 'candidate-1', procedureId: 'procedure-login' }],
+        promotedProcedures: [{ procedureId: 'procedure-1', title: 'Validar login' }],
+      },
+      autonomousRunner: {
+        ...createEmptyAliceMemory().autonomousRunner,
+        runnerState: 'running',
+        activeTaskId: 'task-1',
+        queue: ['task-1'],
+        tasksById: {
+          'task-1': {
+            id: 'task-1',
+            title: 'Validar login na VM',
+            status: 'running',
+            createdAt: '2026-04-23T12:00:00.000Z',
+            updatedAt: '2026-04-23T12:00:00.000Z',
+            priority: 'normal',
+            riskLevel: 'medium',
+            steps: [],
+            evidenceRefs: [],
+            executionHistory: [],
+            dependencies: [],
+            metadata: {},
+          },
+        },
+        audits: [],
+        evidenceRefs: [],
+      },
+      mindMaps: {
+        byId: {
+          'map-1': {
+            id: 'map-1',
+            title: 'Mapa',
+            nodes: [
+              { id: 'root', data: { label: 'Minha Ideia Central' }, position: { x: 0, y: 0 } },
+              { id: 'login', data: { label: 'Login' }, position: { x: 1, y: 0 } },
+              { id: 'vm', data: { label: 'VM' }, position: { x: 2, y: 0 } },
+            ],
+            edges: [{ id: 'e1', source: 'root', target: 'login' }],
+            history: [],
+            createdAt: '2026-04-23T12:00:00.000Z',
+            updatedAt: '2026-04-23T12:00:00.000Z',
+          },
+        },
+        activeId: 'map-1',
+      },
+    });
+
+    expect(turns[0].parts[0].text).toContain('Memoria de aprendizado:');
+    expect(turns[0].parts[0].text).toContain('Objetivos de aprendizado: Aprender fluxo de login.');
+    expect(turns[0].parts[0].text).toContain('Gaps conhecidos: Gap de autenticacao.');
+    expect(turns[0].parts[0].text).toContain('Experimentos recentes: Teste visual aprovado.');
+    expect(turns[0].parts[0].text).toContain('Resumo do Runner autonomo:');
+    expect(turns[0].parts[0].text).toContain('task_ativa=Validar login na VM');
+    expect(turns[0].parts[0].text).toContain('Topicos do mapa: Login; VM.');
+  });
 });
 
 describe('loadAliceMemory', () => {

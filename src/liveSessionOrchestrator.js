@@ -225,8 +225,7 @@ export class LiveSessionOrchestrator {
 
   async connectWithMode(mode, token) {
     const nextGeneration = this.connectionGeneration + 1;
-    const initialHistoryTurns =
-      mode === 'rehydrate' ? await this.getMemoryPrefixTurns() : [];
+    const initialHistoryTurns = await this.getMemoryPrefixTurns({ mode });
     const setup = this.buildSetup({
       resumptionHandle: mode === 'resume' ? this.resumptionHandle : '',
       memoryPrefixTurns: initialHistoryTurns,

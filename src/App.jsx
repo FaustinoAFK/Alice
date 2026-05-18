@@ -883,21 +883,55 @@ function App() {
     }
   };
 
-  const buildLiveMemoryPrefixTurns = () => [
-    ...buildOperationalContextTurns({
+  const buildLiveMemoryPrefixTurns = ({ mode = 'fresh' } = {}) => {
+    const currentMemory = aliceMemoryRef.current;
+    const currentMindMap = getActiveMindMap(currentMemory);
+    const runnerSummary = getAutonomousRunnerSummary(currentMemory);
+    const operationalTurns = buildOperationalContextTurns({
       trustedUtterance: trustedUtteranceRef.current,
       outputTranscript: outputTranscriptRef.current,
-      memorySummary: aliceMemoryRef.current.recentContextSummary?.summary || '',
+      memorySummary: currentMemory.recentContextSummary?.summary || '',
       knowledgeState: knowledgeStateRef.current,
       autonomousLearningState: autonomousLearningStateRef.current,
+      autonomousLearningMemoryState: currentMemory.autonomousLearning,
+      autonomousRunnerSummary: {
+        ...runnerSummary,
+        activeTask: runnerSummary.activeTaskId
+          ? getAutonomousRunnerState(currentMemory).tasksById[runnerSummary.activeTaskId]
+          : null,
+      },
+      activeMindMap: currentMindMap,
       screenGeometry: getScreenCaptureGeometry(),
-    }),
-    ...buildMemoryPrefixTurns(aliceMemoryRef.current),
-    ...buildSessionRehydrationTurns({
+    });
+    const rehydrationTurns = buildSessionRehydrationTurns({
       trustedUtterance: trustedUtteranceRef.current,
       outputTranscript: outputTranscriptRef.current,
-    }),
-  ];
+      memorySummary: currentMemory.recentContextSummary?.summary || '',
+      knowledgeState: knowledgeStateRef.current,
+      autonomousLearningState: autonomousLearningStateRef.current,
+      autonomousLearningMemoryState: currentMemory.autonomousLearning,
+      autonomousRunnerSummary: {
+        ...runnerSummary,
+        activeTask: runnerSummary.activeTaskId
+          ? getAutonomousRunnerState(currentMemory).tasksById[runnerSummary.activeTaskId]
+          : null,
+      },
+      activeMindMap: currentMindMap,
+    });
+
+    if (mode === 'resume') {
+      return [
+        ...operationalTurns,
+        ...rehydrationTurns,
+      ];
+    }
+
+    return [
+      ...operationalTurns,
+      ...buildMemoryPrefixTurns(currentMemory),
+      ...rehydrationTurns,
+    ];
+  };
 
   const executeLocalToolCall = async (functionCall, generation) => {
     const debugInteractionId = recordToolInteraction(functionCall);
@@ -1208,7 +1242,7 @@ function App() {
           onCloseReason,
           onError,
         }),
-      getMemoryPrefixTurns: async () => buildLiveMemoryPrefixTurns(),
+      getMemoryPrefixTurns: async ({ mode } = {}) => buildLiveMemoryPrefixTurns({ mode }),
       onEvent: handleLiveEvent,
       onStatus: (nextStatus) => {
         if (nextStatus !== 'idle') {

@@ -26,6 +26,40 @@ describe('buildSessionRehydrationTurns', () => {
     const turns = buildSessionRehydrationTurns({
       trustedUtterance: { text: 'continuar daqui' },
       outputTranscript: 'Ja estou vendo a tela e ouvindo voce.',
+      memorySummary: 'Usuario quer continuar o plano da VM.',
+      knowledgeState: {
+        navigationContext: {
+          title: 'Docs',
+          url: 'https://example.com/docs',
+        },
+        lastKnowledgeQuestion: 'onde esta o login?',
+      },
+      autonomousLearningState: {
+        improvementProposals: [{ status: 'pending_approval' }],
+      },
+      autonomousLearningMemoryState: {
+        learningGoals: [{ description: 'Aprender fluxo de login' }],
+        knownGaps: [{ title: 'Gap de autenticacao' }],
+        recentExperiments: [{ summary: 'Teste visual aprovado' }],
+        procedureCandidates: [{ candidateId: 'candidate-1' }],
+      },
+      autonomousRunnerSummary: {
+        runnerState: 'running',
+        queueSize: 2,
+        readyCount: 1,
+        blockedCount: 0,
+        failedCount: 0,
+        activeTaskStatus: 'running',
+        activeTask: { title: 'Validar fluxo VM' },
+      },
+      activeMindMap: {
+        nodes: [
+          { data: { label: 'Minha Ideia Central' } },
+          { data: { label: 'Login' } },
+          { data: { label: 'VM' } },
+        ],
+        edges: [{}],
+      },
     });
 
     expect(turns).toEqual([
@@ -33,14 +67,15 @@ describe('buildSessionRehydrationTurns', () => {
         role: 'user',
         parts: [
           {
-            text: [
-              'Contexto local recente antes de restaurar a sessao:',
-              'Ultima fala do usuario: continuar daqui',
-              'Ultima resposta da Alice: Ja estou vendo a tela e ouvindo voce.',
-            ].join('\n'),
+            text: expect.stringContaining('Contexto local recente antes de restaurar a sessao:'),
           },
         ],
       },
     ]);
+    expect(turns[0].parts[0].text).toContain('Ultima fala do usuario: continuar daqui');
+    expect(turns[0].parts[0].text).toContain('Resumo persistido: Usuario quer continuar o plano da VM.');
+    expect(turns[0].parts[0].text).toContain('Runner: estado=running fila=2');
+    expect(turns[0].parts[0].text).toContain('Aprendizado: objetivos=1 gaps=1 experimentos=1 candidatos=1 propostas=1');
+    expect(turns[0].parts[0].text).toContain('Mapa mental ativo: topicos=3 conexoes=1');
   });
 });

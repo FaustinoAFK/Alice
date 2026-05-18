@@ -139,6 +139,7 @@ describe('LiveSessionOrchestrator', () => {
     const firstReconnect = orchestrator.resumeLiveSession();
     const secondReconnect = orchestrator.resumeLiveSession();
     await Promise.resolve();
+    await Promise.resolve();
 
     expect(createSession).toHaveBeenCalledTimes(2);
 
@@ -338,6 +339,7 @@ describe('LiveSessionOrchestrator', () => {
     });
 
     sessions[0].options.onCloseReason(LIVE_CLOSE_REASONS.remoteClose, { code: 1006, reason: '' });
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(closeReasons).toEqual([LIVE_CLOSE_REASONS.remoteClose]);

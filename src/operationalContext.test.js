@@ -19,6 +19,32 @@ describe('operational context', () => {
       trustedUtterance: { text: 'isso fala de autenticacao?' },
       outputTranscript: 'Vou verificar a pagina.',
       memorySummary: 'Usuario prefere respostas diretas.',
+      autonomousLearningMemoryState: {
+        learningGoals: [{ description: 'Aprender a automatizar pesquisas no navegador' }],
+        knownGaps: [{ title: 'Descobrir melhor fluxo de busca no portal' }],
+        recentExperiments: [{ summary: 'Teste validado de captura de contexto' }],
+        procedureCandidates: [{ candidateId: 'candidate-1' }],
+        promotedProcedures: [{ procedureId: 'procedure-1' }],
+      },
+      autonomousRunnerSummary: {
+        enabled: true,
+        runnerState: 'running',
+        queueSize: 2,
+        readyCount: 1,
+        blockedCount: 0,
+        failedCount: 0,
+        activeTaskStatus: 'running',
+        currentRiskLevel: 'medium',
+        activeTask: { title: 'Validar fluxo de login na VM' },
+      },
+      activeMindMap: {
+        nodes: [
+          { data: { label: 'Minha Ideia Central' } },
+          { data: { label: 'Login VM' } },
+          { data: { label: 'Pesquisa portal' } },
+        ],
+        edges: [{}, {}],
+      },
       screenGeometry: { width: 1920, height: 1080 },
       now: 20_000,
       knowledgeState: {
@@ -60,6 +86,9 @@ describe('operational context', () => {
     expect(text).toContain('Texto selecionado na pagina: OAuth setup');
     expect(text).toContain('Tela compartilhada: 1920x1080');
     expect(text).toContain('agente_visual=online');
+    expect(text).toContain('Aprendizado/objetivos:');
+    expect(text).toContain('Runner autonomo:');
+    expect(text).toContain('Mapa mental ativo:');
     expect(text).toContain('Memoria util de longo prazo');
   });
 

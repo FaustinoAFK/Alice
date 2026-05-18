@@ -1003,6 +1003,11 @@ export const mergeActiveMindMap = (
 
 export const buildMemoryPrefixTurns = (memory) => {
   const normalizedMemory = pruneAliceMemory(memory);
+  const normalizedLearning = normalizeAutonomousLearningMemoryState(
+    normalizedMemory.autonomousLearning,
+  );
+  const runnerSummary = createAutonomousRunnerSummary(normalizedMemory.autonomousRunner);
+  const runnerState = normalizeAutonomousRunnerState(normalizedMemory.autonomousRunner);
   const lines = [
     `Nome da assistente: ${normalizedMemory.identity.assistantName}.`,
     `Persona base: ${normalizedMemory.identity.personaStyle}.`,
@@ -1064,6 +1069,79 @@ export const buildMemoryPrefixTurns = (memory) => {
     );
   }
 
+  if (
+    normalizedLearning.learningGoals.length > 0 ||
+    normalizedLearning.knownGaps.length > 0 ||
+    normalizedLearning.recentExperiments.length > 0 ||
+    normalizedLearning.procedureCandidates.length > 0 ||
+    normalizedLearning.promotedProcedures.length > 0
+  ) {
+    lines.push(
+      [
+        'Memoria de aprendizado:',
+        `objetivos=${normalizedLearning.learningGoals.length}`,
+        `gaps=${normalizedLearning.knownGaps.length}`,
+        `experimentos=${normalizedLearning.recentExperiments.length}`,
+        `candidatos=${normalizedLearning.procedureCandidates.length}`,
+        `promovidos=${normalizedLearning.promotedProcedures.length}.`,
+      ].join(' '),
+    );
+  }
+
+  if (normalizedLearning.learningGoals.length > 0) {
+    lines.push(
+      `Objetivos de aprendizado: ${normalizedLearning.learningGoals
+        .slice(0, 4)
+        .map((goal) => goal.description || goal.title || goal.goalId)
+        .filter(Boolean)
+        .join('; ')}.`,
+    );
+  }
+
+  if (normalizedLearning.knownGaps.length > 0) {
+    lines.push(
+      `Gaps conhecidos: ${normalizedLearning.knownGaps
+        .slice(0, 4)
+        .map((gap) => gap.title || gap.summary || gap.reason || gap.gapId)
+        .filter(Boolean)
+        .join('; ')}.`,
+    );
+  }
+
+  if (normalizedLearning.recentExperiments.length > 0) {
+    lines.push(
+      `Experimentos recentes: ${normalizedLearning.recentExperiments
+        .slice(0, 3)
+        .map((experiment) => experiment.title || experiment.summary || experiment.reason || experiment.status)
+        .filter(Boolean)
+        .join('; ')}.`,
+    );
+  }
+
+  if (
+    runnerSummary.queueSize > 0 ||
+    runnerSummary.readyCount > 0 ||
+    runnerSummary.blockedCount > 0 ||
+    runnerSummary.failedCount > 0 ||
+    runnerSummary.activeTaskId
+  ) {
+    const activeTask = runnerSummary.activeTaskId
+      ? runnerState.tasksById[runnerSummary.activeTaskId]
+      : null;
+    lines.push(
+      [
+        'Resumo do Runner autonomo:',
+        `estado=${runnerSummary.runnerState}`,
+        `fila=${runnerSummary.queueSize}`,
+        `ready=${runnerSummary.readyCount}`,
+        `blocked=${runnerSummary.blockedCount}`,
+        `failed=${runnerSummary.failedCount}`,
+        activeTask?.title ? `task_ativa=${activeTask.title}` : '',
+        runnerSummary.activeTaskStatus ? `status_task=${runnerSummary.activeTaskStatus}` : '',
+      ].filter(Boolean).join(' '),
+    );
+  }
+
   const activeMindMap = getActiveMindMap(normalizedMemory);
   const hasMeaningfulMindMap =
     activeMindMap.nodes.length > 1 ||
@@ -1074,6 +1152,14 @@ export const buildMemoryPrefixTurns = (memory) => {
     lines.push(
       `Mapa mental ativo: ${activeMindMap.nodes.length} topicos e ${activeMindMap.edges.length} conexoes.`,
     );
+    const highlightedTopics = uniqueNormalizedStrings(
+      activeMindMap.nodes
+        .map((node) => node?.data?.label)
+        .filter((label) => label && label !== 'Minha Ideia Central'),
+    ).slice(0, 6);
+    if (highlightedTopics.length > 0) {
+      lines.push(`Topicos do mapa: ${highlightedTopics.join('; ')}.`);
+    }
   }
 
   if (normalizedMemory.recentContextSummary.summary) {
