@@ -601,6 +601,52 @@ export const buildMindMapSummary = (map) => {
   };
 };
 
+export const buildMindMapConnectionSummary = (
+  map,
+  { maxTopics = 8, maxConnections = 8 } = {},
+) => {
+  const normalizedMap = map ? normalizeMindMap(map) : null;
+  if (!normalizedMap) {
+    return {
+      topics: [],
+      connections: [],
+    };
+  }
+
+  const topics = normalizedMap.nodes
+    .map((node) => normalizeText(node?.data?.label))
+    .filter((label) => label && label !== 'Minha Ideia Central')
+    .filter((label, index, collection) => collection.indexOf(label) === index)
+    .slice(0, maxTopics);
+
+  const nodeLabelById = new Map(
+    normalizedMap.nodes.map((node) => [node.id, normalizeText(node?.data?.label) || node.id]),
+  );
+  const seenConnections = new Set();
+  const connections = normalizedMap.edges
+    .map((edge) => {
+      const sourceLabel = nodeLabelById.get(edge.source) || edge.source;
+      const targetLabel = nodeLabelById.get(edge.target) || edge.target;
+      if (!sourceLabel || !targetLabel) {
+        return '';
+      }
+      return `${sourceLabel} -> ${targetLabel}`;
+    })
+    .filter((connection) => {
+      if (!connection || seenConnections.has(connection)) {
+        return false;
+      }
+      seenConnections.add(connection);
+      return true;
+    })
+    .slice(0, maxConnections);
+
+  return {
+    topics,
+    connections,
+  };
+};
+
 const pickSentenceLabels = (text, limit) =>
   normalizeText(text)
     .split(/(?:\.|;|\n|\r|\?|!)+/)

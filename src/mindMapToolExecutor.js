@@ -71,6 +71,53 @@ const createNode = ({ id, label, color, position, type, status, description, pri
 
 const findNode = (mindMap, id) => mindMap.nodes.find((node) => node.id === id);
 
+const uniqueIds = (values = []) => {
+  const seen = new Set();
+  return values
+    .map((value) => normalizeString(value))
+    .filter((value) => {
+      if (!value || seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+};
+
+const buildEdge = ({ id = '', source, target, label = '' }, index = 0) => ({
+  id: normalizeString(id) || `edge-${source}-${target}-${index + 1}`,
+  source,
+  target,
+  type: 'smoothstep',
+  animated: true,
+  ...(normalizeString(label) ? { label: normalizeString(label) } : {}),
+});
+
+const findExistingEdge = (mindMap, source, target, label = '') =>
+  mindMap.edges.find((edge) =>
+    edge.source === source &&
+    edge.target === target &&
+    normalizeString(edge.label) === normalizeString(label),
+  );
+
+const collectEdgeRequests = (payload = {}) => {
+  if (Array.isArray(payload.connections) && payload.connections.length > 0) {
+    return payload.connections.map((connection) => ({
+      id: connection?.id,
+      source: connection?.source,
+      target: connection?.target,
+      label: connection?.label,
+    }));
+  }
+
+  return [{
+    id: payload.id,
+    source: payload.source,
+    target: payload.target,
+    label: payload.label,
+  }];
+};
+
 const buildStatusMap = ({ operation, payload, baseMindMap, recordHistory, now }) => {
   const nodeId = normalizeString(payload.id || payload.nodeId);
   const statusByOperation = {
@@ -192,41 +239,66 @@ export const applyMindMapOperation = ({
 
     case 'add_node': {
       const node = createNode(payload.node || payload, baseMindMap.nodes.length);
-      const parentId = normalizeString(payload.parentId);
+      const linkedNodeIds = uniqueIds([
+        payload.parentId,
+        ...(Array.isArray(payload.parentIds) ? payload.parentIds : []),
+        ...(Array.isArray(payload.linkedToIds) ? payload.linkedToIds : []),
+      ]).filter((id) => findNode(baseMindMap, id));
+      const nextEdges = linkedNodeIds.reduce((edges, linkedNodeId, index) => {
+        if (findExistingEdge({ ...baseMindMap, edges }, linkedNodeId, node.id)) {
+          return edges;
+        }
+
+        return [
+          ...edges,
+          buildEdge(
+            {
+              id: Array.isArray(payload.edgeIds) ? payload.edgeIds[index] : payload.edgeId,
+              source: linkedNodeId,
+              target: node.id,
+            },
+            baseMindMap.edges.length + index,
+          ),
+        ];
+      }, [...baseMindMap.edges]);
       const nextMap = {
         ...baseMindMap,
         nodes: [...baseMindMap.nodes, node],
-        edges: parentId && findNode(baseMindMap, parentId)
-          ? [
-              ...baseMindMap.edges,
-              {
-                id: normalizeString(payload.edgeId) || `edge-${parentId}-${node.id}`,
-                source: parentId,
-                target: node.id,
-                type: 'smoothstep',
-                animated: true,
-              },
-            ]
-          : baseMindMap.edges,
+        edges: nextEdges,
       };
 
       return {
         ok: true,
-        message: 'Topico adicionado ao mapa mental.',
+        message: linkedNodeIds.length > 1
+          ? 'Topico adicionado ao mapa mental com varias conexoes.'
+          : 'Topico adicionado ao mapa mental.',
         mindMap: appendMindMapEvolution(normalizeMindMap(nextMap), {
           type: 'node_added',
           source: payload.source || 'alice',
-          summary: `Topico adicionado: ${node.data.label}`,
-          affectedNodeIds: [node.id],
+          summary: linkedNodeIds.length > 0
+            ? `Topico adicionado: ${node.data.label} ligado a ${linkedNodeIds.join(', ')}`
+            : `Topico adicionado: ${node.data.label}`,
+          affectedNodeIds: [node.id, ...linkedNodeIds],
           now,
         }),
       };
     }
 
     case 'add_edge': {
-      const source = normalizeString(payload.source);
-      const target = normalizeString(payload.target);
-      if (!source || !target || !findNode(baseMindMap, source) || !findNode(baseMindMap, target)) {
+      const requestedEdges = collectEdgeRequests(payload).map((edge) => ({
+        id: normalizeString(edge.id),
+        source: normalizeString(edge.source),
+        target: normalizeString(edge.target),
+        label: normalizeString(edge.label),
+      }));
+      const invalidEdge = requestedEdges.find((edge) =>
+        !edge.source ||
+        !edge.target ||
+        !findNode(baseMindMap, edge.source) ||
+        !findNode(baseMindMap, edge.target),
+      );
+
+      if (invalidEdge) {
         return {
           ok: false,
           reason: 'invalid_edge_endpoints',
@@ -235,26 +307,44 @@ export const applyMindMapOperation = ({
         };
       }
 
+      const nextEdges = requestedEdges.reduce((edges, edge, index) => {
+        if (findExistingEdge({ ...baseMindMap, edges }, edge.source, edge.target, edge.label)) {
+          return edges;
+        }
+
+        return [
+          ...edges,
+          buildEdge(
+            {
+              id: edge.id,
+              source: edge.source,
+              target: edge.target,
+              label: edge.label,
+            },
+            baseMindMap.edges.length + index,
+          ),
+        ];
+      }, [...baseMindMap.edges]);
+      const affectedNodeIds = uniqueIds(
+        requestedEdges.flatMap((edge) => [edge.source, edge.target]),
+      );
+
       return {
         ok: true,
-        message: 'Conexao adicionada ao mapa mental.',
+        message: requestedEdges.length > 1
+          ? 'Conexoes adicionadas ao mapa mental.'
+          : 'Conexao adicionada ao mapa mental.',
         mindMap: appendMindMapEvolution(normalizeMindMap({
           ...baseMindMap,
-          edges: [
-            ...baseMindMap.edges,
-            {
-              id: normalizeString(payload.id) || `edge-${source}-${target}-${baseMindMap.edges.length + 1}`,
-              source,
-              target,
-              type: 'smoothstep',
-              animated: true,
-            },
-          ],
+          edges: nextEdges,
         }), {
           type: 'edge_added',
           source: payload.source || 'alice',
-          summary: `Conexao adicionada: ${source} -> ${target}`,
-          affectedNodeIds: [source, target],
+          summary: requestedEdges
+            .slice(0, 4)
+            .map((edge) => `${edge.source} -> ${edge.target}`)
+            .join('; '),
+          affectedNodeIds,
           now,
         }),
       };

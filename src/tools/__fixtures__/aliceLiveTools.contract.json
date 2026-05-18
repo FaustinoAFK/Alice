@@ -108,7 +108,7 @@
         },
         "payload": {
           "type": "OBJECT",
-          "description": "Dados da operacao. Para add_node use label, type/status opcionais, parentId opcional, color e position. Para add_edge use source e target. Para set_status use nodeId e status. Para batch use operations[]. Para export use format json ou markdown."
+          "description": "Dados da operacao. Para add_node use label, type/status opcionais, parentId opcional e, quando o novo modulo precisar nascer interligado com varios outros, use parentIds[] e/ou linkedToIds[]. Para add_edge use source/target para uma conexao ou connections[] para varias conexoes no mesmo passo. Para set_status use nodeId e status. Para batch use operations[] quando precisar criar ou conectar varios modulos de uma vez. Para export use format json ou markdown."
         },
         "targetMapId": {
           "type": "STRING",

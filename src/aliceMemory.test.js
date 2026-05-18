@@ -478,6 +478,7 @@ describe('buildMemoryPrefixTurns', () => {
     expect(turns[0].parts[0].text).toContain('Resumo do Runner autonomo:');
     expect(turns[0].parts[0].text).toContain('task_ativa=Validar login na VM');
     expect(turns[0].parts[0].text).toContain('Topicos do mapa: Login; VM.');
+    expect(turns[0].parts[0].text).toContain('Relacoes do mapa: Minha Ideia Central -> Login.');
   });
 });
 

@@ -4,6 +4,7 @@ import {
   serializeAutonomousStateForAudit,
 } from './autonomousLearning/auditPersistence';
 import {
+  buildMindMapConnectionSummary,
   appendMindMapHistory,
   createMindMap as createMindMapData,
   createStarterMindMap,
@@ -1149,16 +1150,18 @@ export const buildMemoryPrefixTurns = (memory) => {
     activeMindMap.nodes[0]?.data?.label !== 'Minha Ideia Central';
 
   if (hasMeaningfulMindMap) {
+    const mindMapSummary = buildMindMapConnectionSummary(activeMindMap, {
+      maxTopics: 6,
+      maxConnections: 6,
+    });
     lines.push(
       `Mapa mental ativo: ${activeMindMap.nodes.length} topicos e ${activeMindMap.edges.length} conexoes.`,
     );
-    const highlightedTopics = uniqueNormalizedStrings(
-      activeMindMap.nodes
-        .map((node) => node?.data?.label)
-        .filter((label) => label && label !== 'Minha Ideia Central'),
-    ).slice(0, 6);
-    if (highlightedTopics.length > 0) {
-      lines.push(`Topicos do mapa: ${highlightedTopics.join('; ')}.`);
+    if (mindMapSummary.topics.length > 0) {
+      lines.push(`Topicos do mapa: ${mindMapSummary.topics.join('; ')}.`);
+    }
+    if (mindMapSummary.connections.length > 0) {
+      lines.push(`Relacoes do mapa: ${mindMapSummary.connections.join('; ')}.`);
     }
   }
 

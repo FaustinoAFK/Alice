@@ -39,11 +39,14 @@ describe('operational context', () => {
       },
       activeMindMap: {
         nodes: [
-          { data: { label: 'Minha Ideia Central' } },
-          { data: { label: 'Login VM' } },
-          { data: { label: 'Pesquisa portal' } },
+          { id: 'root', data: { label: 'Minha Ideia Central' } },
+          { id: 'login', data: { label: 'Login VM' } },
+          { id: 'portal', data: { label: 'Pesquisa portal' } },
         ],
-        edges: [{}, {}],
+        edges: [
+          { source: 'root', target: 'login' },
+          { source: 'login', target: 'portal' },
+        ],
       },
       screenGeometry: { width: 1920, height: 1080 },
       now: 20_000,
@@ -89,6 +92,7 @@ describe('operational context', () => {
     expect(text).toContain('Aprendizado/objetivos:');
     expect(text).toContain('Runner autonomo:');
     expect(text).toContain('Mapa mental ativo:');
+    expect(text).toContain('Relacoes do mapa: Minha Ideia Central -> Login VM | Login VM -> Pesquisa portal');
     expect(text).toContain('Memoria util de longo prazo');
   });
 

@@ -27,6 +27,40 @@ describe('executeMindMapFunctionCall', () => {
     ]);
   });
 
+  it('adds one node already interlinked with multiple existing modules', async () => {
+    const result = await executeMindMapFunctionCall({
+      functionCall: {
+        name: 'update_mind_map',
+        args: {
+          operation: 'add_node',
+          payload: {
+            id: 'runner',
+            label: 'Runner',
+            parentId: 'root',
+            linkedToIds: ['vm', 'learning'],
+          },
+        },
+      },
+      currentMindMap: {
+        ...createStarterMindMap(),
+        nodes: [
+          { id: 'root', data: { label: 'Alice' }, position: { x: 0, y: 0 } },
+          { id: 'vm', data: { label: 'VM' }, position: { x: 1, y: 1 } },
+          { id: 'learning', data: { label: 'Learning' }, position: { x: 2, y: 2 } },
+        ],
+        edges: [],
+      },
+    });
+
+    expect(result.response.ok).toBe(true);
+    expect(result.mindMap.nodes.map((node) => node.id)).toEqual(['root', 'vm', 'learning', 'runner']);
+    expect(result.mindMap.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'root', target: 'runner' }),
+      expect.objectContaining({ source: 'vm', target: 'runner' }),
+      expect.objectContaining({ source: 'learning', target: 'runner' }),
+    ]));
+  });
+
   it('rejects invalid edges without changing the current map', async () => {
     const currentMindMap = createStarterMindMap();
     const result = await executeMindMapFunctionCall({
@@ -46,6 +80,40 @@ describe('executeMindMapFunctionCall', () => {
     expect(result.response.ok).toBe(false);
     expect(result.response.reason).toBe('invalid_edge_endpoints');
     expect(result.mindMap).toEqual(normalizeMindMap(currentMindMap));
+  });
+
+  it('adds multiple edges in one operation when the payload carries connections', async () => {
+    const currentMindMap = {
+      ...createStarterMindMap(),
+      nodes: [
+        { id: 'root', data: { label: 'Alice' }, position: { x: 0, y: 0 } },
+        { id: 'vm', data: { label: 'VM' }, position: { x: 1, y: 1 } },
+        { id: 'runner', data: { label: 'Runner' }, position: { x: 2, y: 2 } },
+        { id: 'learning', data: { label: 'Learning' }, position: { x: 3, y: 3 } },
+      ],
+      edges: [],
+    };
+    const result = await executeMindMapFunctionCall({
+      functionCall: {
+        name: 'update_mind_map',
+        args: {
+          operation: 'add_edge',
+          payload: {
+            connections: [
+              { source: 'vm', target: 'runner' },
+              { source: 'learning', target: 'runner', label: 'depende' },
+            ],
+          },
+        },
+      },
+      currentMindMap,
+    });
+
+    expect(result.response.ok).toBe(true);
+    expect(result.mindMap.edges).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'vm', target: 'runner' }),
+      expect.objectContaining({ source: 'learning', target: 'runner', label: 'depende' }),
+    ]));
   });
 
   it('renames, removes and exports map data through structured operations', async () => {

@@ -1,3 +1,5 @@
+import { buildMindMapConnectionSummary } from './hud/mindMap/utils/mindMapData';
+
 const CONTEXT_TEXT_LIMIT = 360;
 const SOURCE_LIMIT = 3;
 const ITEM_LIMIT = 3;
@@ -64,14 +66,6 @@ const summarizeExperiment = (experiment) =>
     140,
   );
 
-const summarizeMindMapTopics = (activeMindMap) =>
-  uniqueTextList(
-    (activeMindMap?.nodes || [])
-      .map((node) => node?.data?.label)
-      .filter((label) => label && label !== 'Minha Ideia Central'),
-    4,
-  );
-
 export const buildOperationalContextSnapshot = ({
   trustedUtterance = null,
   outputTranscript = '',
@@ -103,7 +97,10 @@ export const buildOperationalContextSnapshot = ({
   const recentExperiments = uniqueTextList(
     (autonomousLearningMemoryState?.recentExperiments || []).map(summarizeExperiment),
   );
-  const mindMapTopics = summarizeMindMapTopics(activeMindMap);
+  const mindMapSummary = buildMindMapConnectionSummary(activeMindMap, {
+    maxTopics: 4,
+    maxConnections: 4,
+  });
 
   return {
     userUtterance: trimOperationalContextText(trustedUtterance?.text, 240),
@@ -167,7 +164,8 @@ export const buildOperationalContextSnapshot = ({
     mindMap: {
       topicCount: Number(activeMindMap?.nodes?.length || 0),
       edgeCount: Number(activeMindMap?.edges?.length || 0),
-      topics: mindMapTopics,
+      topics: mindMapSummary.topics,
+      connections: mindMapSummary.connections,
     },
   };
 };
@@ -289,6 +287,9 @@ export const buildOperationalContextText = (snapshot = {}) => {
           : '',
       ].filter(Boolean).join(' '),
     );
+    if (snapshot.mindMap.connections?.length) {
+      lines.push(`Relacoes do mapa: ${snapshot.mindMap.connections.join(' | ')}`);
+    }
   }
   if (snapshot.memorySummary) {
     lines.push(`Memoria util de longo prazo: ${snapshot.memorySummary}`);

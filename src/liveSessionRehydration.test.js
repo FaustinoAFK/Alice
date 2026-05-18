@@ -54,11 +54,11 @@ describe('buildSessionRehydrationTurns', () => {
       },
       activeMindMap: {
         nodes: [
-          { data: { label: 'Minha Ideia Central' } },
-          { data: { label: 'Login' } },
-          { data: { label: 'VM' } },
+          { id: 'root', data: { label: 'Minha Ideia Central' } },
+          { id: 'login', data: { label: 'Login' } },
+          { id: 'vm', data: { label: 'VM' } },
         ],
-        edges: [{}],
+        edges: [{ source: 'login', target: 'vm' }],
       },
     });
 
@@ -77,5 +77,6 @@ describe('buildSessionRehydrationTurns', () => {
     expect(turns[0].parts[0].text).toContain('Runner: estado=running fila=2');
     expect(turns[0].parts[0].text).toContain('Aprendizado: objetivos=1 gaps=1 experimentos=1 candidatos=1 propostas=1');
     expect(turns[0].parts[0].text).toContain('Mapa mental ativo: topicos=3 conexoes=1');
+    expect(turns[0].parts[0].text).toContain('Relacoes do mapa: Login -> VM');
   });
 });

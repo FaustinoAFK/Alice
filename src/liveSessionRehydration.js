@@ -1,3 +1,5 @@
+import { buildMindMapConnectionSummary } from './hud/mindMap/utils/mindMapData';
+
 const REHYDRATION_TEXT_LIMIT = 280;
 const LIST_LIMIT = 3;
 
@@ -35,14 +37,6 @@ const uniqueList = (values = [], limit = LIST_LIMIT) => {
     .slice(0, limit);
 };
 
-const summarizeMindMapTopics = (activeMindMap) =>
-  uniqueList(
-    (activeMindMap?.nodes || [])
-      .map((node) => node?.data?.label)
-      .filter((label) => label && label !== 'Minha Ideia Central'),
-    4,
-  );
-
 export const buildSessionRehydrationTurns = ({
   trustedUtterance = null,
   outputTranscript = '',
@@ -78,7 +72,10 @@ export const buildSessionRehydrationTurns = ({
     (autonomousLearningMemoryState?.recentExperiments || []).map((experiment) =>
       trimRehydrationSnippet(experiment?.title || experiment?.summary || experiment?.reason || experiment?.status || '', 120)),
   );
-  const mindMapTopics = summarizeMindMapTopics(activeMindMap);
+  const mindMapSummary = buildMindMapConnectionSummary(activeMindMap, {
+    maxTopics: 4,
+    maxConnections: 4,
+  });
 
   if (inputText) {
     lines.push(`Ultima fala do usuario: ${inputText}`);
@@ -160,9 +157,12 @@ export const buildSessionRehydrationTurns = ({
         'Mapa mental ativo:',
         `topicos=${Number(activeMindMap?.nodes?.length || 0)}`,
         `conexoes=${Number(activeMindMap?.edges?.length || 0)}`,
-        mindMapTopics.length ? `destaques=${mindMapTopics.join(' | ')}` : '',
+        mindMapSummary.topics.length ? `destaques=${mindMapSummary.topics.join(' | ')}` : '',
       ].filter(Boolean).join(' '),
     );
+    if (mindMapSummary.connections.length) {
+      lines.push(`Relacoes do mapa: ${mindMapSummary.connections.join(' | ')}`);
+    }
   }
 
   if (lines.length === 0) {
