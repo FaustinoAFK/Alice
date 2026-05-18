@@ -9,6 +9,7 @@ export class LiveSessionTransport {
     this.activeSession = null;
     this.activeGeneration = 0;
     this.frozen = false;
+    this.reconnecting = false;
     this.pendingToolResponses = new Map();
     this.acceptedToolResponseGenerations = new Set();
   }
@@ -22,12 +23,19 @@ export class LiveSessionTransport {
   }
 
   canSendToLive(generation) {
-    return Boolean(this.activeSession) && !this.frozen && generation === this.activeGeneration;
+    return (
+      Boolean(this.activeSession) &&
+      generation === this.activeGeneration &&
+      (!this.frozen || this.reconnecting)
+    );
   }
 
-  beginReconnect() {
+  beginReconnect({ preserveActiveSession = false } = {}) {
     this.frozen = true;
-    this.activeSession = null;
+    this.reconnecting = true;
+    if (!preserveActiveSession) {
+      this.activeSession = null;
+    }
   }
 
   activateSession({
@@ -39,6 +47,7 @@ export class LiveSessionTransport {
     this.activeSession = session || null;
     this.activeGeneration = generation || 0;
     this.frozen = false;
+    this.reconnecting = false;
     this.acceptedToolResponseGenerations = preserveAcceptedToolResponseGenerations
       ? new Set([...this.acceptedToolResponseGenerations, this.activeGeneration])
       : new Set([this.activeGeneration]);
@@ -55,8 +64,15 @@ export class LiveSessionTransport {
     this.activeSession = null;
     this.activeGeneration = 0;
     this.frozen = false;
+    this.reconnecting = false;
     this.pendingToolResponses.clear();
     this.acceptedToolResponseGenerations.clear();
+  }
+
+  deactivateSession(session) {
+    if (this.activeSession === session) {
+      this.activeSession = null;
+    }
   }
 
   sendRealtime({ generation, send }) {
@@ -71,7 +87,7 @@ export class LiveSessionTransport {
   sendToolResponse({ generation, functionResponse }) {
     if (
       this.activeSession &&
-      !this.frozen &&
+      (!this.frozen || this.reconnecting) &&
       this.acceptedToolResponseGenerations.has(generation)
     ) {
       this.activeSession.sendToolResponse([functionResponse]);

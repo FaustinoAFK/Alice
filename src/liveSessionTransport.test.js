@@ -67,6 +67,56 @@ describe('LiveSessionTransport', () => {
     expect(session.sendVideo).toHaveBeenCalledWith('frame-2');
   });
 
+  it('keeps the current generation sending during a preserved reconnect handoff', () => {
+    const transport = new LiveSessionTransport();
+    const session = { sendAudio: vi.fn(), sendToolResponse: vi.fn() };
+
+    transport.activateSession({ session, generation: 4 });
+    transport.beginReconnect({ preserveActiveSession: true });
+
+    expect(
+      transport.sendRealtime({
+        generation: 4,
+        send: (activeSession) => activeSession.sendAudio('handoff-chunk'),
+      }),
+    ).toBe(true);
+
+    expect(
+      transport.sendToolResponse({
+        generation: 4,
+        functionResponse: createFunctionResponseEnvelope(
+          { id: 'call-handoff', name: 'local_tool' },
+          { ok: true, message: 'Ainda na sessao antiga.' },
+        ),
+      }),
+    ).toEqual({ delivered: true, queued: false });
+
+    expect(session.sendAudio).toHaveBeenCalledWith('handoff-chunk');
+    expect(session.sendToolResponse).toHaveBeenCalledWith([
+      {
+        id: 'call-handoff',
+        name: 'local_tool',
+        response: { ok: true, message: 'Ainda na sessao antiga.' },
+      },
+    ]);
+  });
+
+  it('stops sending when the preserved session finally closes during reconnect', () => {
+    const transport = new LiveSessionTransport();
+    const session = { sendAudio: vi.fn() };
+
+    transport.activateSession({ session, generation: 7 });
+    transport.beginReconnect({ preserveActiveSession: true });
+    transport.deactivateSession(session);
+
+    expect(
+      transport.sendRealtime({
+        generation: 7,
+        send: (activeSession) => activeSession.sendAudio('late-chunk'),
+      }),
+    ).toBe(false);
+  });
+
   it('queues tool responses while reconnecting and replays them once on resume', () => {
     const previousSession = { sendToolResponse: vi.fn() };
     const resumedSession = { sendToolResponse: vi.fn() };

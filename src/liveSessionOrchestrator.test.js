@@ -99,11 +99,11 @@ describe('LiveSessionOrchestrator', () => {
       resumable: true,
     });
 
-    orchestrator.handleGoAway({ timeLeft: '3s' });
+    orchestrator.handleGoAway({ timeLeft: '7s' });
     await vi.advanceTimersByTimeAsync(1999);
     expect(createSession).toHaveBeenCalledTimes(1);
 
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(2001);
 
     expect(createSession).toHaveBeenCalledTimes(2);
     expect(sessions[1].setup.sessionResumption).toEqual({ handle: 'handle-1' });
@@ -170,6 +170,29 @@ describe('LiveSessionOrchestrator', () => {
     expect(orchestrator.getResumptionHandle()).toBe('');
     expect(statusUpdates.at(-1)).toBe('idle');
     expect(sessions[0].close).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports the closing session to the close callback during overlap reconnects', async () => {
+    const closeEvents = [];
+    const { createSession, sessions } = createSessionFactory();
+    const orchestrator = new LiveSessionOrchestrator({
+      buildSetup: buildSetupStub,
+      createSession,
+      onCloseReason: (reason, _event, session) => {
+        closeEvents.push({ reason, sessionId: session?.id || '' });
+      },
+    });
+
+    await orchestrator.startLiveSession();
+    sessions[0].options.onCloseReason(LIVE_CLOSE_REASONS.remoteClose, { code: 1006, reason: '' });
+    await Promise.resolve();
+
+    expect(closeEvents).toEqual([
+      {
+        reason: LIVE_CLOSE_REASONS.remoteClose,
+        sessionId: 'session-1',
+      },
+    ]);
   });
 
   it('falls back to rehydration when a resume attempt fails', async () => {

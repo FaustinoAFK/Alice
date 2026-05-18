@@ -1,6 +1,6 @@
 import { LIVE_CLOSE_REASONS } from './geminiLive';
 
-export const GO_AWAY_RENEW_BUFFER_MS = 1000;
+export const GO_AWAY_RENEW_BUFFER_MS = 5000;
 export const MAX_SETUP_TIMEOUT_RETRIES = 1;
 const timerHost = globalThis.window || globalThis;
 
@@ -274,7 +274,7 @@ export class LiveSessionOrchestrator {
           this.resumptionHandle = '';
         }
 
-        this.onCloseReason(reason, event);
+        this.onCloseReason(reason, event, session);
         if (this.sessionStates.get(session) !== 'active' && reason !== LIVE_CLOSE_REASONS.manualStop) {
           return;
         }

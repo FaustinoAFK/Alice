@@ -1234,8 +1234,9 @@ function App() {
         });
       },
       onPrepareReconnect: async ({ mode }) => {
-        liveTransportRef.current.beginReconnect();
-        stopStreamingPipelines();
+        liveTransportRef.current.beginReconnect({
+          preserveActiveSession: mode === 'resume',
+        });
         noteDiagnostic({ type: 'reconnecting' });
         dispatchUi({ type: 'session-reconnecting', mode });
       },
@@ -1266,7 +1267,8 @@ function App() {
           session.sendText(readyCheckPrompt);
         }
       },
-      onCloseReason: (reason) => {
+      onCloseReason: (reason, _event, session) => {
+        liveTransportRef.current.deactivateSession(session);
         if (reason !== LIVE_CLOSE_REASONS.manualStop) {
           noteDiagnostic({ type: 'close-reason', reason });
         }
