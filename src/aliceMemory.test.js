@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
+  ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
   ALICE_MEMORY_SCHEMA_VERSION,
   ALICE_MEMORY_MAX_JSON_BYTES,
   buildMemoryPrefixTurns,
@@ -412,8 +414,60 @@ describe('buildMemoryPrefixTurns', () => {
         ],
       },
     ]);
-    expect(turns[0].parts[0].text).toContain('Projetos ativos: Alice Virtual (active).');
+    expect(turns[0].parts[0].text).toContain('Projetos ativos recentes: Alice Virtual (active).');
     expect(turns[0].parts[0].text).toContain('Resumo recente: Usuario: continuar fase 5');
+  });
+
+  it('can omit stale active projects and tasks during reconnect-focused prompts', () => {
+    const turns = buildMemoryPrefixTurns({
+      ...createEmptyAliceMemory(),
+      activeProjects: [
+        {
+          id: 'project:stale',
+          title: 'Projeto Antigo',
+          summary: 'Nao deveria dominar o foco.',
+          status: 'active',
+          updatedAt: '2026-01-01T12:00:00.000Z',
+        },
+        {
+          id: 'project:fresh',
+          title: 'Projeto Atual',
+          summary: 'Continua relevante.',
+          status: 'active',
+          updatedAt: '2026-05-18T12:00:00.000Z',
+        },
+      ],
+      activeTasks: [
+        {
+          id: 'task:old',
+          title: 'Task Antiga',
+          summary: 'Nao deveria voltar no reconnect.',
+          status: 'doing',
+          updatedAt: '2026-04-01T12:00:00.000Z',
+        },
+        {
+          id: 'task:fresh',
+          title: 'Task Atual',
+          summary: 'Ainda esta em andamento.',
+          status: 'doing',
+          updatedAt: '2026-05-18T12:00:00.000Z',
+        },
+      ],
+    }, {
+      nowMs: Date.parse('2026-05-18T12:30:00.000Z'),
+      supplementalOnly: true,
+      includeRecentContext: false,
+      filterActiveItemsByRecency: true,
+      activeProjectRecencyMs: ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
+      activeTaskRecencyMs: ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
+    });
+
+    expect(turns[0].parts[0].text).toContain('Memoria persistida complementar da Alice:');
+    expect(turns[0].parts[0].text).toContain('Projetos ativos recentes: Projeto Atual (active).');
+    expect(turns[0].parts[0].text).toContain('Tarefas ativas recentes: Task Atual (doing).');
+    expect(turns[0].parts[0].text).toContain('Itens antigos omitidos nesta retomada');
+    expect(turns[0].parts[0].text).not.toContain('Projeto Antigo');
+    expect(turns[0].parts[0].text).not.toContain('Task Antiga');
   });
 
   it('includes learning, runner and mind map memory when they exist', () => {

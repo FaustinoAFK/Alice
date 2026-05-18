@@ -43,6 +43,8 @@ export const MAX_AUTONOMOUS_LEARNING_GOALS = 500;
 export const MAX_AUTONOMOUS_LEARNING_GAPS = 500;
 export const MAX_AUTONOMOUS_LEARNING_EXPERIMENTS = 1000;
 export const MAX_AUTONOMOUS_LEARNING_AUDITS = 1000;
+export const ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS = 1000 * 60 * 60 * 24 * 45;
+export const ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS = 1000 * 60 * 60 * 24 * 14;
 
 const DEFAULT_ASSISTANT_NAME = 'Alice';
 const DEFAULT_PERSONA_STYLE = 'playful_confident';
@@ -90,6 +92,11 @@ export const createAliceMemoryPersistenceSnapshot = (
 };
 
 const normalizeFactKey = (value) => normalizeText(value).toLowerCase();
+
+const parseTimestampMs = (value) => {
+  const timestamp = Date.parse(String(value || '').trim());
+  return Number.isFinite(timestamp) ? timestamp : 0;
+};
 
 const uniqueNormalizedStrings = (values = []) => {
   const seen = new Set();
@@ -1002,14 +1009,67 @@ export const mergeActiveMindMap = (
     historyReason: 'active_map_update',
   });
 
-export const buildMemoryPrefixTurns = (memory) => {
+const splitRecentRecords = (items = [], { nowMs = Date.now(), maxAgeMs = 0 } = {}) => {
+  if (!Array.isArray(items) || items.length === 0 || !(maxAgeMs > 0)) {
+    return {
+      recent: Array.isArray(items) ? items : [],
+      omittedCount: 0,
+    };
+  }
+
+  const recent = [];
+  let omittedCount = 0;
+
+  items.forEach((item) => {
+    const updatedAtMs = parseTimestampMs(item?.updatedAt);
+    if (updatedAtMs > 0 && nowMs - updatedAtMs <= maxAgeMs) {
+      recent.push(item);
+    } else {
+      omittedCount += 1;
+    }
+  });
+
+  return {
+    recent,
+    omittedCount,
+  };
+};
+
+export const buildMemoryPrefixTurns = (
+  memory,
+  {
+    nowMs = Date.now(),
+    supplementalOnly = false,
+    includeRecentContext = true,
+    includeActiveProjects = true,
+    includeActiveTasks = true,
+    filterActiveItemsByRecency = false,
+    activeProjectRecencyMs = ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
+    activeTaskRecencyMs = ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
+  } = {},
+) => {
   const normalizedMemory = pruneAliceMemory(memory);
   const normalizedLearning = normalizeAutonomousLearningMemoryState(
     normalizedMemory.autonomousLearning,
   );
   const runnerSummary = createAutonomousRunnerSummary(normalizedMemory.autonomousRunner);
   const runnerState = normalizeAutonomousRunnerState(normalizedMemory.autonomousRunner);
+  const visibleProjects = includeActiveProjects
+    ? splitRecentRecords(normalizedMemory.activeProjects, {
+        nowMs,
+        maxAgeMs: filterActiveItemsByRecency ? activeProjectRecencyMs : 0,
+      })
+    : { recent: [], omittedCount: normalizedMemory.activeProjects.length };
+  const visibleTasks = includeActiveTasks
+    ? splitRecentRecords(normalizedMemory.activeTasks, {
+        nowMs,
+        maxAgeMs: filterActiveItemsByRecency ? activeTaskRecencyMs : 0,
+      })
+    : { recent: [], omittedCount: normalizedMemory.activeTasks.length };
   const lines = [
+    supplementalOnly
+      ? 'Use esta memoria persistida apenas como apoio. O foco atual vem da fala recente do usuario e do handoff local desta sessao.'
+      : 'Use esta memoria persistida como apoio complementar. Se houver conflito com a fala atual ou com o handoff recente, priorize o contexto mais novo.',
     `Nome da assistente: ${normalizedMemory.identity.assistantName}.`,
     `Persona base: ${normalizedMemory.identity.personaStyle}.`,
   ];
@@ -1036,19 +1096,25 @@ export const buildMemoryPrefixTurns = (memory) => {
     lines.push(`Combinados com o usuario: ${normalizedMemory.stablePreferences.userConventions.join(', ')}.`);
   }
 
-  if (normalizedMemory.activeProjects.length > 0) {
+  if (visibleProjects.recent.length > 0) {
     lines.push(
-      `Projetos ativos: ${normalizedMemory.activeProjects
+      `Projetos ativos recentes: ${visibleProjects.recent
         .map((project) => `${project.title} (${project.status || 'active'})`)
         .join('; ')}.`,
     );
   }
 
-  if (normalizedMemory.activeTasks.length > 0) {
+  if (visibleTasks.recent.length > 0) {
     lines.push(
-      `Tarefas ativas: ${normalizedMemory.activeTasks
+      `Tarefas ativas recentes: ${visibleTasks.recent
         .map((task) => `${task.title} (${task.status || 'doing'})`)
         .join('; ')}.`,
+    );
+  }
+
+  if (filterActiveItemsByRecency && (visibleProjects.omittedCount > 0 || visibleTasks.omittedCount > 0)) {
+    lines.push(
+      `Itens antigos omitidos nesta retomada para evitar desvio de foco: projetos=${visibleProjects.omittedCount} tarefas=${visibleTasks.omittedCount}.`,
     );
   }
 
@@ -1165,11 +1231,11 @@ export const buildMemoryPrefixTurns = (memory) => {
     }
   }
 
-  if (normalizedMemory.recentContextSummary.summary) {
+  if (includeRecentContext && normalizedMemory.recentContextSummary.summary) {
     lines.push(`Resumo recente: ${normalizedMemory.recentContextSummary.summary}.`);
   }
 
-  if (lines.length <= 2 && !normalizedMemory.recentContextSummary.summary) {
+  if (lines.length <= 3 && (!includeRecentContext || !normalizedMemory.recentContextSummary.summary)) {
     return [];
   }
 
@@ -1178,7 +1244,12 @@ export const buildMemoryPrefixTurns = (memory) => {
       role: 'user',
       parts: [
         {
-          text: ['Memoria persistida relevante da Alice:', ...lines].join('\n'),
+          text: [
+            supplementalOnly
+              ? 'Memoria persistida complementar da Alice:'
+              : 'Memoria persistida relevante da Alice:',
+            ...lines,
+          ].join('\n'),
         },
       ],
     },

@@ -174,7 +174,11 @@ export const buildSessionRehydrationTurns = ({
       role: 'user',
       parts: [
         {
-          text: ['Contexto local recente antes de restaurar a sessao:', ...lines].join('\n'),
+          text: [
+            'Contexto local recente antes de restaurar a sessao:',
+            'Ao retomar, continue a partir deste contexto recente. Nao reative objetivos antigos nem projetos antigos se eles nao aparecerem aqui ou na fala atual do usuario.',
+            ...lines,
+          ].join('\n'),
         },
       ],
     },

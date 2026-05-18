@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useReducer, useRef, useState } from 'react';
 import { ALICE_LIVE_MODEL, createAliceLiveSetup } from './alice';
 import {
+  ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
+  ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
   buildMemoryPrefixTurns,
   createAliceMemoryPersistenceSnapshot,
   getAutonomousRunnerState,
@@ -30,6 +32,7 @@ import { GeminiLiveSession, LIVE_CLOSE_REASONS } from './geminiLive';
 import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio';
 import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
 import { buildSessionRehydrationTurns } from './liveSessionRehydration';
+import { buildRecentSessionTurns } from './liveSessionRecentTurns';
 import { createFunctionResponseEnvelope, LiveSessionTransport } from './liveSessionTransport';
 import { buildOperationalContextTurns } from './operationalContext';
 import { resolveScreenCaptureGeometry, SCREEN_SHARE_VIDEO_CONSTRAINTS } from './screenGeometry';
@@ -903,6 +906,20 @@ function App() {
       activeMindMap: currentMindMap,
       screenGeometry: getScreenCaptureGeometry(),
     });
+    const recentSessionTurns = buildRecentSessionTurns({
+      interactions: debugInteractionsRef.current,
+      trustedUtterance: trustedUtteranceRef.current,
+      outputTranscript: outputTranscriptRef.current,
+    });
+    const persistentMemoryTurns = buildMemoryPrefixTurns(currentMemory, {
+      supplementalOnly: mode !== 'fresh',
+      includeRecentContext: mode === 'fresh',
+      includeActiveProjects: mode === 'fresh',
+      includeActiveTasks: mode === 'fresh',
+      filterActiveItemsByRecency: true,
+      activeProjectRecencyMs: ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
+      activeTaskRecencyMs: ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
+    });
     const rehydrationTurns = buildSessionRehydrationTurns({
       trustedUtterance: trustedUtteranceRef.current,
       outputTranscript: outputTranscriptRef.current,
@@ -922,13 +939,16 @@ function App() {
     if (mode === 'resume') {
       return [
         ...operationalTurns,
+        ...recentSessionTurns,
+        ...persistentMemoryTurns,
         ...rehydrationTurns,
       ];
     }
 
     return [
       ...operationalTurns,
-      ...buildMemoryPrefixTurns(currentMemory),
+      ...recentSessionTurns,
+      ...persistentMemoryTurns,
       ...rehydrationTurns,
     ];
   };

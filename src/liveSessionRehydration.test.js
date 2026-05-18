@@ -72,6 +72,7 @@ describe('buildSessionRehydrationTurns', () => {
         ],
       },
     ]);
+    expect(turns[0].parts[0].text).toContain('Nao reative objetivos antigos nem projetos antigos');
     expect(turns[0].parts[0].text).toContain('Ultima fala do usuario: continuar daqui');
     expect(turns[0].parts[0].text).toContain('Resumo persistido: Usuario quer continuar o plano da VM.');
     expect(turns[0].parts[0].text).toContain('Runner: estado=running fila=2');

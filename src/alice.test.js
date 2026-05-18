@@ -117,6 +117,7 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('responseGuidance');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('finalOrigin');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('finalSufficiency');
+    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Em retomadas de sessao');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('ja pode atualizar a pagina');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('frame visual da tela compartilhada');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Se o conteudo visual estiver pequeno');
