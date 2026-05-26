@@ -1,266 +1,416 @@
-# Relatório de Erros e Riscos — Projeto Alice
+# Relatorio Explicado de Problemas - Alice Virtual
 
-Este arquivo é mantido pelo agente auditor de código.
-Ele lista problemas encontrados no projeto `alice-virtual`, com evidências, impacto, forma de confirmação e sugestão de correção futura.
+Data da revisao: 2026-05-25
 
-## Resumo atual
+Este documento explica, em linguagem simples, os problemas encontrados no projeto `alice-virtual`. A ideia nao e apenas dizer "tem erro", mas mostrar por que aquilo importa, qual risco cria e qual seria o caminho pratico para corrigir.
 
-- Total de problemas encontrados: 4
-- Críticos: 0
-- Altos: 3
-- Médios: 1
-- Baixos: 0
-- Melhorias recomendadas: 4
-- Última análise: 2026-05-03 00:36:09 -04:00
+## Como ler a severidade
 
-## Índice de problemas
+- **Alta:** pode afetar seguranca, privacidade, execucao de comandos, perda de dados ou confianca do app.
+- **Media:** nao e necessariamente perigoso agora, mas aumenta risco de bug, manutencao dificil ou comportamento inesperado.
+- **Baixa:** organizacao, limpeza, qualidade de relatorio ou poluicao do projeto.
 
-- [ERRO-0001 — Bridge local de conhecimento aceita escrita cross-origin sem autenticação nem limite de corpo](#erro-0001--bridge-local-de-conhecimento-aceita-escrita-cross-origin-sem-autenticacao-nem-limite-de-corpo)
-- [ERRO-0002 — Guest Agent residente pode iniciar sem autenticação enquanto expõe execução de comandos](#erro-0002--guest-agent-residente-pode-iniciar-sem-autenticacao-enquanto-expoe-execucao-de-comandos)
-- [ERRO-0003 — Gravação atômica da memória remove o arquivo antigo antes de concluir o rename](#erro-0003--gravacao-atomica-da-memoria-remove-o-arquivo-antigo-antes-de-concluir-o-rename)
-- [ERRO-0004 — Reordenação manual do Runner pode não alterar a ordem efetiva da fila](#erro-0004--reordenacao-manual-do-runner-pode-nao-alterar-a-ordem-efetiva-da-fila)
+## Resumo rapido
 
-## Índice de melhorias
+- O projeto tem bons testes: `npm run lint` passou e `npm test` passou com 49 arquivos e 521 testes.
+- Os maiores riscos estao no Guest Agent, na bridge local web, no CSP desligado e na execucao de comandos.
+- Tambem existem arquivos gerados/logs que nao deveriam estar versionados ou espalhados no projeto.
 
-- [MELHORIA-0001 — Criar manifesto transacional para evidências físicas do Runner](#melhoria-0001--criar-manifesto-transacional-para-evidencias-fisicas-do-runner)
-- [MELHORIA-0002 — Separar App.jsx em hooks e serviços testáveis](#melhoria-0002--separar-app-jsx-em-hooks-e-servicos-testaveis)
-- [MELHORIA-0003 — Dividir executor de ferramentas autônomas por domínio](#melhoria-0003--dividir-executor-de-ferramentas-autonomas-por-dominio)
-- [MELHORIA-0004 — Criar comando único de validação completa do projeto](#melhoria-0004--criar-comando-unico-de-validacao-completa-do-projeto)
-
-## ERRO-0001 — Bridge local de conhecimento aceita escrita cross-origin sem autenticação nem limite de corpo
+## 1. Guest Agent residente pode rodar sem autenticacao
 
 **Severidade:** Alta  
-**Status:** Aberto  
-**Módulo:** Ponte local de conhecimento web / extensão Edge  
-**Arquivos envolvidos:**
-- `src-tauri/src/web_knowledge.rs`
-- `edge-extension/background.js`
-- `edge-extension/manifest.json`
+**Arquivos:** `src-tauri/vm/guest_agent/server.py`, `src-tauri/src/vm_visual.rs`
 
-**Resumo:**  
-A ponte HTTP local de conhecimento aceita snapshots de página em endpoint loopback com CORS amplo, sem segredo compartilhado e lendo o corpo completo em memória.
+**Em palavras simples:**  
+O Guest Agent e um pequeno servidor que roda dentro da VM para receber comandos da Alice. O problema e que, se nenhum token for configurado, ele aceita qualquer requisicao como autorizada.
 
-**Evidência no código:**  
-`web_knowledge.rs` define `Access-Control-Allow-Origin: *`, expõe `POST /v1/page-state` e usa `read_to_string(&mut body)` para carregar o payload completo antes de qualquer limite explícito.
+**O que acontece no codigo:**  
+Em `server.py`, a funcao `_authorized()` faz isto: se nao existe token, ela retorna `True`. Ou seja, "sem senha" vira "todo mundo pode".
 
-**Por que isso é um problema:**  
-Uma página ou processo local pode tentar injetar contexto falso na Alice ou enviar payload grande para DoS local, contaminando respostas e decisões baseadas em contexto web.
+**Exemplo de risco:**  
+Imagine que a Alice inicia o agente residente na VM sem `ALICE_VM_GUEST_AGENT_TOKEN`. Um processo local que consiga chamar a porta do agente pode pedir acoes como digitar texto, clicar, capturar tela ou executar comando.
 
-**Cenário provável de falha:**  
-Com a Alice aberta, uma página maliciosa chama `http://127.0.0.1:38947/v1/page-state` com JSON fabricado ou grande; a Alice passa a usar snapshot falso ou consome memória desnecessariamente.
+**Por que isso importa:**  
+Como o agente tem permissoes fortes, autenticacao deveria ser obrigatoria. Esse tipo de servidor nunca deve confiar em "se nao tem token, libera".
 
-**Como confirmar:**  
-Inspecionar `src-tauri/src/web_knowledge.rs` e a chamada oficial em `edge-extension/background.js`; testar manualmente um `POST` local para o endpoint enquanto o app está ativo.
+**Como corrigir:**  
+Tornar o token obrigatorio. Se `ALICE_VM_GUEST_AGENT_TOKEN` estiver vazio, o servidor deve recusar iniciar ou deve bloquear as acoes perigosas, principalmente `run_command` e `start_background_command`.
 
-**Sugestão de correção futura:**  
-Adicionar token local por sessão, validar origem/cabeçalhos, limitar `Content-Length` antes da leitura e rejeitar payloads acima do teto.
-
-**Prioridade recomendada:**  
-P1
-## ERRO-0002 — Guest Agent residente pode iniciar sem autenticação enquanto expõe execução de comandos
+## 2. Guest Agent escuta em `0.0.0.0`
 
 **Severidade:** Alta  
-**Status:** Aberto  
-**Módulo:** VM / Guest Interaction Agent residente  
-**Arquivos envolvidos:**
-- `src-tauri/src/vm_visual.rs`
-- `src-tauri/vm/guest_agent/server.py`
-- `src-tauri/vm/guest_agent/action_executor.py`
+**Arquivos:** `src-tauri/vm/guest_agent/server.py`, `src-tauri/src/vm_visual.rs`
 
-**Resumo:**  
-O servidor residente do Guest Agent permite modo sem token e expõe ações capazes de executar comandos dentro da VM.
+**Em palavras simples:**  
+`0.0.0.0` significa "escutar em todas as interfaces de rede". Isso deixa o servidor mais exposto dentro da VM.
 
-**Evidência no código:**  
-`vm_visual.rs` lê `ALICE_VM_GUEST_AGENT_TOKEN` e pode iniciar o servidor em `0.0.0.0`; `server.py` autoriza quando não há token; `action_executor.py` implementa `run_command` e `start_background_command`.
+**O que acontece no codigo:**  
+O servidor tem `--host 0.0.0.0` como padrao ou como argumento usado ao iniciar o residente.
 
-**Por que isso é um problema:**  
-Qualquer processo que alcance a porta encaminhada pode acionar comandos na VM fora do fluxo governado da Alice.
+**Exemplo de risco:**  
+Se a VM tiver alguma rede compartilhada, adaptador bridge ou outro servico com acesso, o Guest Agent pode ficar acessivel alem do necessario.
 
-**Cenário provável de falha:**  
-O usuário inicia o residente sem token; um processo local chama a porta do agente e dispara `run_command` sem passar por HUD, policy, auditoria ou validação.
+**Por que isso importa:**  
+Um agente que executa comandos deve ficar o mais fechado possivel. Se ele so precisa falar com a Alice via localhost/port-forward, nao precisa escutar em todas as interfaces.
 
-**Como confirmar:**  
-Inspecionar os três arquivos citados e iniciar o agente residente sem `ALICE_VM_GUEST_AGENT_TOKEN` em ambiente controlado para verificar se requisições sem token são aceitas.
+**Como corrigir:**  
+Usar `127.0.0.1` como padrao. Se algum modo realmente precisar de `0.0.0.0`, exigir token forte, registrar aviso claro e tratar como modo avancado/perigoso.
 
-**Sugestão de correção futura:**  
-Tornar token obrigatório, gerar segredo efêmero por sessão ou bloquear ações de comando quando o residente estiver sem autenticação.
-
-**Prioridade recomendada:**  
-P1
-## ERRO-0003 — Gravação atômica da memória remove o arquivo antigo antes de concluir o rename
+## 3. Execucao livre de comandos dentro da VM
 
 **Severidade:** Alta  
-**Status:** Aberto  
-**Módulo:** Persistência de memória local  
-**Arquivos envolvidos:**
-- `src-tauri/src/lib.rs`
-- `src/aliceMemory.js`
+**Arquivo:** `src-tauri/vm/guest_agent/action_executor.py`
 
-**Resumo:**  
-A escrita da memória usa arquivo temporário, mas remove o arquivo antigo antes do rename, criando uma janela de perda de dados.
+**Em palavras simples:**  
+O agente aceita pedidos para rodar comandos dentro da VM. Isso e poderoso, mas tambem perigoso.
 
-**Evidência no código:**  
-`write_memory_json_atomic` valida e escreve o `.tmp`, remove `path` quando existe e só depois faz `rename(&tmp_path, path)`.
+**O que acontece no codigo:**  
+As acoes `run_command` e `start_background_command` pegam `command` e `args` da requisicao e executam com `subprocess`.
 
-**Por que isso é um problema:**  
-Falha entre remoção e rename pode deixar a Alice sem memória persistida, forçando recuperação vazia ou perda de estado operacional.
+**Exemplo de risco:**  
+Uma requisicao pode tentar rodar `powershell`, `cmd`, instaladores, scripts longos ou comandos que alteram arquivos da VM.
 
-**Cenário provável de falha:**  
-Durante o fechamento do app ou flush de memória, antivírus, permissão ou queda de energia interrompe o rename depois do `remove_file`; o próximo boot não encontra memória válida.
+**Por que isso importa:**  
+Mesmo sendo "so dentro da VM", a VM pode conter dados, credenciais, sessoes abertas ou acesso a pastas compartilhadas. Tambem pode ser usada para atacar o proprio host se houver integracoes mal configuradas.
 
-**Como confirmar:**  
-Inspecionar `write_memory_json_atomic` em `src-tauri/src/lib.rs` e simular falha de rename em teste unitário com arquivo existente.
+**Como corrigir:**  
+Criar uma allowlist de comandos permitidos. Separar comandos seguros de comandos sensiveis. Bloquear shells genericos por padrao. Exigir aprovacao humana para comandos que instalam, removem, alteram configuracao ou rodam por muito tempo.
 
-**Sugestão de correção futura:**  
-Usar rename/substituição atômica apropriada por plataforma sem remover antes, mantendo backup temporário e recovery de último arquivo válido.
+## 4. Bridge local web aceita escrita cross-origin
 
-**Prioridade recomendada:**  
-P1
-## ERRO-0004 — Reordenação manual do Runner pode não alterar a ordem efetiva da fila
+**Severidade:** Alta  
+**Arquivos:** `src-tauri/src/web_knowledge.rs`, `edge-extension/background.js`
 
-**Severidade:** Média  
-**Status:** Aberto  
-**Módulo:** Autonomous Task Runner / fila  
-**Arquivos envolvidos:**
-- `src/autonomousRunnerState.js`
-- `src/autonomousRunnerScheduler.js`
-- `src/hud/pages/AutonomousRunnerHudPage.jsx`
+**Em palavras simples:**  
+A bridge local recebe informacoes do navegador para a Alice entender a pagina atual. O problema e que ela aceita escrita com CORS aberto, sem segredo compartilhado.
 
-**Resumo:**  
-A reordenação atual altera `queueRank` da task, mas não reescreve a lista `queue`, que é a origem usada para montar candidatos antes da ordenação.
+**O que acontece no codigo:**  
+`web_knowledge.rs` define `Access-Control-Allow-Origin: *` e aceita `POST /v1/page-state`.
 
-**Evidência no código:**  
-`reorderAutonomousRunnerTask` chama `updateAutonomousRunnerTask` com novo `queueRank`, mas não atualiza `runner.queue`; o scheduler parte da ordem de `queue` para resolver tasks antes de ordenar por prioridade/rank.
+**Exemplo de risco:**  
+Uma pagina maliciosa aberta no navegador poderia tentar enviar um contexto falso para a Alice, dizendo por exemplo que a pagina atual contem informacoes que nao existem.
 
-**Por que isso é um problema:**  
-O HUD pode sugerir que uma task foi reordenada, mas o comportamento real pode continuar dependente da fila antiga em cenários de empate ou normalização.
+**Por que isso importa:**  
+A Alice usa esse contexto para responder e tomar decisoes. Se o contexto pode ser falsificado, a IA pode ser induzida a agir com base em informacao falsa.
 
-**Cenário provável de falha:**  
-Usuário move task para o topo pelo HUD, mas outra task com prioridade equivalente continua sendo selecionada primeiro porque a fila persistida não foi regravada de forma explícita.
+**Como corrigir:**  
+Gerar um token local por sessao. A extensao envia esse token em um cabecalho. A bridge rejeita qualquer escrita sem token valido. Tambem vale validar origem e tipo de payload.
 
-**Como confirmar:**  
-Criar teste com duas tasks de mesma prioridade, chamar `reorderAutonomousRunnerTask` e verificar `runner.queue` e ordem selecionada por `getEligibleRunnerTasks`.
+## 5. Bridge local le payload inteiro em memoria
 
-**Sugestão de correção futura:**  
-Atualizar `queue` junto com `queueRank` ou definir um único contrato de ordenação persistida e cobri-lo por teste.
+**Severidade:** Alta  
+**Arquivo:** `src-tauri/src/web_knowledge.rs`
 
-**Prioridade recomendada:**  
-P2
+**Em palavras simples:**  
+O endpoint le o corpo inteiro da requisicao antes de limitar o tamanho.
 
-# Melhorias Recomendadas
+**O que acontece no codigo:**  
+O codigo usa `read_to_string(&mut body)` no endpoint `/v1/page-state`.
 
-## MELHORIA-0001 — Criar manifesto transacional para evidências físicas do Runner
+**Exemplo de risco:**  
+Um processo local pode enviar um payload enorme. O app tenta carregar tudo na memoria e pode travar ou consumir recursos demais.
 
-**Severidade:** Média  
-**Status:** Aberto  
-**Módulo:** Runner / evidências  
-**Arquivos envolvidos:**
-- `src-tauri/src/lib.rs`
-- `src/autonomousRunnerEvidence.js`
-- `src/autonomousTaskRunner.js`
+**Por que isso importa:**  
+Mesmo em localhost, endpoints precisam ter limite de tamanho. Localhost nao significa automaticamente seguro.
 
-**Resumo:**  
-Um manifesto verificável reduz risco de evidência parcial ser interpretada como completa e melhora auditoria de execuções críticas.
+**Como corrigir:**  
+Antes de ler o corpo, verificar `Content-Length`. Se passar do limite, rejeitar. Tambem limitar a leitura com um reader/take para impedir abuso mesmo quando o cabecalho estiver ausente ou incorreto.
 
-**Evidência no código:**  
-`save_runner_evidence` grava arquivos separados, mas não há manifesto final com hashes/tamanhos nem marcador de commit atômico do conjunto.
+## 6. CSP do Tauri esta desativado
 
-**Por que vale fazer:**  
-Um manifesto verificável reduz risco de evidência parcial ser interpretada como completa e melhora auditoria de execuções críticas.
+**Severidade:** Alta  
+**Arquivo:** `src-tauri/tauri.conf.json`
 
-**Risco de não fazer:**  
-Sem manifesto, falhas intermediárias podem deixar diretórios parcialmente escritos e dificultar distinguir execução incompleta de evidência íntegra.
+**Em palavras simples:**  
+CSP e uma camada de seguranca que limita quais scripts, conexoes e recursos uma pagina pode usar. No app ela esta desligada.
 
-**Como confirmar:**  
-Inspecionar `save_runner_evidence` e `verify_runner_evidence`; verificar ausência de arquivo de manifesto ou hash por arquivo.
+**O que acontece no codigo:**  
+`tauri.conf.json` tem `"csp": null`.
 
-**Sugestão de implementação futura:**  
-Gravar arquivos em diretório temporário, calcular hash/tamanho, criar `manifest.json` e só então promover o diretório para execução confirmada.
+**Exemplo de risco:**  
+Se algum XSS ou conteudo inesperado entrar na interface, a falta de CSP facilita executar script ou conectar em destinos indesejados.
 
-**Prioridade recomendada:**  
-P1
-## MELHORIA-0002 — Separar App.jsx em hooks e serviços testáveis
+**Por que isso importa:**  
+Aplicativo desktop com ponte local e comandos nativos precisa ser mais restrito que uma pagina comum. Um bug pequeno de frontend pode virar problema maior.
+
+**Como corrigir:**  
+Configurar CSP restritiva para producao. Liberar apenas `self`, endpoints locais necessarios e conexoes realmente usadas pelo app.
+
+## 7. Shell local sem allowlist de executavel
+
+**Severidade:** Alta  
+**Arquivo:** `src-tauri/src/lib.rs`
+
+**Em palavras simples:**  
+Existe uma acao de shell local que valida o diretorio e o timeout, mas nao restringe bem qual programa pode ser executado.
+
+**O que acontece no codigo:**  
+`validate_shell_action` verifica se o comando nao esta vazio, valida `working_directory` e limita `timeout_ms`. Depois `perform_shell_action` executa `Command::new(command)`.
+
+**Exemplo de risco:**  
+Se uma chamada conseguir chegar com `command = powershell.exe` ou outro executavel sensivel, ela pode rodar algo perigoso dentro de uma pasta permitida.
+
+**Por que isso importa:**  
+Validar so o diretorio nao basta. Um comando perigoso continua perigoso mesmo dentro de `C:\projetos`.
+
+**Como corrigir:**  
+Permitir apenas executaveis esperados, por exemplo `npm`, `node` ou comandos internos muito especificos. Bloquear shells genericos por padrao e registrar cada execucao.
+
+## 8. Validacao de caminho sem canonicalizacao forte
+
+**Severidade:** Media  
+**Arquivo:** `src-tauri/src/lib.rs`
+
+**Em palavras simples:**  
+O app tenta validar se um caminho esta dentro de uma pasta permitida olhando para a string do caminho. Isso ajuda, mas nao cobre todos os casos.
+
+**O que acontece no codigo:**  
+A validacao normaliza barras e letras, depois compara se o caminho comeca com um escopo permitido.
+
+**Exemplo de risco:**  
+No Windows, links, junctions, atalhos e `..` podem tornar um caminho visualmente seguro, mas resolver para outro lugar.
+
+**Por que isso importa:**  
+Operacoes de arquivo incluem criar, mover, copiar e apagar. Se a validacao errar, o app pode mexer fora do escopo permitido.
+
+**Como corrigir:**  
+Quando o caminho existir, usar `canonicalize`. Para caminhos novos, canonicalizar a pasta pai e validar o nome final separadamente. Depois comparar o caminho resolvido com escopos permitidos.
+
+## 9. Escrita atomica da memoria remove arquivo antigo antes do rename
+
+**Severidade:** Alta  
+**Arquivo:** `src-tauri/src/lib.rs`
+
+**Em palavras simples:**  
+O app tenta salvar a memoria local de forma segura, mas apaga o arquivo antigo antes de colocar o novo no lugar.
+
+**O que acontece no codigo:**  
+`write_memory_json_atomic` escreve um `.tmp`, faz `remove_file(path)` se o arquivo antigo existe, e depois faz `rename(&temp_path, path)`.
+
+**Exemplo de risco:**  
+Se o app travar, faltar energia, o antivirus bloquear ou o `rename` falhar depois do remove, a Alice fica sem o arquivo antigo e sem o novo.
+
+**Por que isso importa:**  
+Memoria local e estado do app sao dados importantes. Perder esse arquivo pode fazer a Alice "esquecer" configuracoes e contexto.
+
+**Como corrigir:**  
+Usar substituicao atomica adequada para a plataforma ou manter backup. Uma estrategia simples: gravar `.tmp`, validar, renomear o arquivo atual para `.bak`, promover `.tmp`, e so depois limpar `.bak`.
+
+## 10. Extensao com permissoes amplas demais
+
+**Severidade:** Media  
+**Arquivo:** `edge-extension/manifest.json`
+
+**Em palavras simples:**  
+A extensao pede permissao para acessar todos os sites.
+
+**O que acontece no codigo:**  
+`host_permissions` contem `"<all_urls>"`.
+
+**Exemplo de risco:**  
+A extensao pode coletar contexto de paginas que nao precisam ser analisadas pela Alice, incluindo paginas sensiveis.
+
+**Por que isso importa:**  
+Extensoes devem pedir o minimo de permissao possivel. Isso protege o usuario e reduz impacto se houver bug.
+
+**Como corrigir:**  
+Usar captura sob demanda, limitar dominios quando possivel ou pedir permissao ativa apenas quando o usuario clicar na extensao.
+
+## 11. Captura passiva frequente demais
+
+**Severidade:** Media  
+**Arquivo:** `edge-extension/background.js`
+
+**Em palavras simples:**  
+A extensao captura contexto da pagina com muita frequencia.
+
+**O que acontece no codigo:**  
+`CAPTURE_PERIOD_MINUTES = 0.05`, equivalente a cerca de 3 segundos. Alem disso, tambem captura em eventos de aba, foco e atualizacao.
+
+**Exemplo de risco:**  
+O usuario navega rapidamente por paginas diferentes e a extensao envia muitos snapshots que talvez nem sejam usados.
+
+**Por que isso importa:**  
+Isso pode consumir recursos, gerar ruido no contexto e criar sensacao de coleta excessiva.
+
+**Como corrigir:**  
+Aumentar o intervalo, capturar apenas quando a Alice precisar, pausar quando nao houver sessao ativa e evitar captura em paginas sensiveis.
+
+## 12. Arquivos de harness grandes versionados
+
+**Severidade:** Media  
+**Pasta:** `.harness-smoke`
+
+**Em palavras simples:**  
+Arquivos grandes gerados por teste foram parar no Git.
+
+**O que acontece no projeto:**  
+Ha tres arquivos JSON/backups com cerca de 7.9 MB cada em `.harness-smoke`.
+
+**Exemplo de problema:**  
+Cada clone do repositorio baixa esses arquivos. Cada diff fica mais pesado. O historico do Git cresce sem necessidade.
+
+**Por que isso importa:**  
+Repositorio saudavel deve versionar codigo, configuracao e fixtures pequenas. Resultado de teste normalmente deve ficar fora do Git.
+
+**Como corrigir:**  
+Remover esses arquivos do versionamento e adicionar `.harness-smoke/` ao `.gitignore`.
+
+## 13. Saidas de dev versionadas
+
+**Severidade:** Media  
+**Arquivos:** `alice-dev.err`, `alice-dev.out`
+
+**Em palavras simples:**  
+Arquivos de saida de execucao local estao no Git.
+
+**O que acontece no projeto:**  
+`alice-dev.err` e `alice-dev.out` parecem ter sido criados por execucao local do app.
+
+**Exemplo de problema:**  
+Esses arquivos mudam quando alguem roda o app. Isso gera alteracoes falsas no Git e pode vazar mensagens locais.
+
+**Por que isso importa:**  
+Logs e saidas locais raramente devem ser versionados. Eles atrapalham revisao e nao ajudam a construir o app.
+
+**Como corrigir:**  
+Remover do Git e adicionar padroes como `*.err`, `*.out`, `*.log` e `*.stderr` ao `.gitignore`.
+
+## 14. Muitos logs locais no diretorio raiz
 
 **Severidade:** Baixa  
-**Status:** Aberto  
-**Módulo:** React / orquestração principal  
-**Arquivos envolvidos:**
-- `src/App.jsx`
+**Arquivos:** `alice-code-auditor.watch.log`, `alice-dev.log`, `tauri-*.log`, `*.stderr`
 
-**Resumo:**  
-Separar responsabilidades reduz acoplamento, facilita testes unitários e diminui risco de regressão em efeitos React longos.
+**Em palavras simples:**  
+A raiz do projeto esta cheia de logs.
 
-**Evidência no código:**  
-App.jsx possui aproximadamente 1757 linhas e concentra Live API, memória, Runner, HUD, tool calls, persistência e observações.
+**O que acontece no projeto:**  
+Existem varios arquivos `tauri-...log`, `alice-dev.log`, logs do auditor e stderr.
 
-**Por que vale fazer:**  
-Separar responsabilidades reduz acoplamento, facilita testes unitários e diminui risco de regressão em efeitos React longos.
+**Exemplo de problema:**  
+Fica mais dificil enxergar os arquivos importantes do projeto. Um iniciante pode achar que esses logs fazem parte do codigo.
 
-**Risco de não fazer:**  
-Manter tudo no componente principal aumenta custo de revisão e torna mais fácil introduzir bugs em timers, refs e persistência.
+**Por que isso importa:**  
+Organizacao ajuda manutencao. Projeto limpo reduz erro humano.
 
-**Como confirmar:**  
-Contar linhas e mapear responsabilidades de `App.jsx`; observar múltiplos `useEffect`, refs globais e handlers de domínios distintos.
+**Como corrigir:**  
+Apagar logs locais e concentrar logs futuros em uma pasta `logs/` ignorada pelo Git.
 
-**Sugestão de implementação futura:**  
-Extrair hooks/serviços para sessão Live, persistência de memória, Runner loop, debug interactions e aprendizado observado, preservando contratos atuais.
-
-**Prioridade recomendada:**  
-P2
-## MELHORIA-0003 — Dividir executor de ferramentas autônomas por domínio
+## 15. Logs em `data/harness/logs`
 
 **Severidade:** Baixa  
-**Status:** Aberto  
-**Módulo:** Tools autônomas / integração  
-**Arquivos envolvidos:**
-- `src/autonomousLearningToolExecutor.js`
+**Pasta:** `data/harness/logs`
 
-**Resumo:**  
-Adapters por domínio tornam o fluxo mais testável, reduzem efeitos colaterais cruzados e deixam claro qual ferramenta altera qual parte da memória.
+**Em palavras simples:**  
+Existe uma pasta de logs de harness dentro de `data`.
 
-**Evidência no código:**  
-`autonomousLearningToolExecutor.js` concentra diversas operações em um único executor/switch, misturando VM, propostas, auditoria, snapshots, rollback e aprendizado.
+**O que acontece no projeto:**  
+`data/harness/logs` contem logs de smoke/restart.
 
-**Por que vale fazer:**  
-Adapters por domínio tornam o fluxo mais testável, reduzem efeitos colaterais cruzados e deixam claro qual ferramenta altera qual parte da memória.
+**Exemplo de problema:**  
+A pasta `data` pode parecer conter dados importantes do app, mas esses logs sao artefatos temporarios.
 
-**Risco de não fazer:**  
-Um executor grande tende a acumular contratos implícitos e dificulta validar permissões, rollback e persistência por operação.
+**Por que isso importa:**  
+Misturar dado real, fixture e log temporario deixa o projeto confuso.
 
-**Como confirmar:**  
-Inspecionar o executor e contar operações/cases; comparar com testes existentes por domínio.
+**Como corrigir:**  
+Manter logs fora do versionamento. Se forem uteis para debug, documentar como gerar novamente.
 
-**Sugestão de implementação futura:**  
-Criar módulos pequenos para VM, runner, host snapshots, propostas e aprendizado, mantendo um roteador fino compatível com a API atual.
+## 16. Caminhos especificos da maquina no backend
 
-**Prioridade recomendada:**  
-P2
-## MELHORIA-0004 — Criar comando único de validação completa do projeto
+**Severidade:** Media  
+**Arquivo:** `src-tauri/src/lib.rs`
+
+**Em palavras simples:**  
+O backend tem caminhos fixos que so fazem sentido nesta maquina ou neste ambiente.
+
+**O que acontece no codigo:**  
+Escopos como `C:\projetos` e `C:\Atlas` estao hardcoded.
+
+**Exemplo de problema:**  
+Em outro computador, esses caminhos podem nao existir. Ou pior: podem existir com conteudo diferente e ainda assim serem permitidos.
+
+**Por que isso importa:**  
+Politica de seguranca nao deve depender de uma pasta especifica do computador do desenvolvedor.
+
+**Como corrigir:**  
+Mover os escopos permitidos para configuracao local. Usar defaults restritos, como pasta de dados do app ou workspace escolhido pelo usuario.
+
+## 17. Texto corrompido no auditor
 
 **Severidade:** Baixa  
-**Status:** Aberto  
-**Módulo:** Scripts / validação  
-**Arquivos envolvidos:**
-- `package.json`
-- `scripts/`
+**Arquivo:** `scripts/alice-code-auditor.mjs`
 
-**Resumo:**  
-Um comando único reduz falhas por validação parcial e facilita handoff entre contas/sessões.
+**Em palavras simples:**  
+Alguns textos do auditor estao com acentos quebrados.
 
-**Evidência no código:**  
-`package.json` tem comandos separados para JS, build e harness; validações Rust e Python estão documentadas no README, mas não há comando único versionado.
+**O que acontece no codigo:**  
+Aparecem textos como `autenticaÃ§Ã£o` e `memÃ³ria`.
 
-**Por que vale fazer:**  
-Um comando único reduz falhas por validação parcial e facilita handoff entre contas/sessões.
+**Exemplo de problema:**  
+O relatorio gerado fica menos profissional e mais dificil de ler.
 
-**Risco de não fazer:**  
-Mudanças podem passar com `npm test` mas quebrar Rust, Python ou harness, especialmente em áreas Tauri/VM/Runner.
+**Por que isso importa:**  
+Ferramenta de auditoria precisa gerar texto claro. Se o proprio relatorio parece quebrado, passa menos confianca.
 
-**Como confirmar:**  
-Inspecionar `package.json` e `README.md`; verificar ausência de `validate:all` ou script equivalente.
+**Como corrigir:**  
+Salvar o arquivo em UTF-8 e corrigir os textos. Tambem vale adicionar uma verificacao simples para evitar mojibake em relatorios.
 
-**Sugestão de implementação futura:**  
-Adicionar script orquestrador que rode `npm test`, `npm run lint`, `npm run build`, `cargo test`, testes Python e `runner:harness -- verify-safe-state` com relatório consolidado.
+## 18. `App.jsx` grande demais
 
-**Prioridade recomendada:**  
-P2
+**Severidade:** Media  
+**Arquivo:** `src/App.jsx`
+
+**Em palavras simples:**  
+O componente principal cresceu demais e concentra muitas responsabilidades.
+
+**O que acontece no codigo:**  
+`App.jsx` tem cerca de 1932 linhas e mistura sessao Live, memoria, Runner, HUD, ferramentas, persistencia e observacoes.
+
+**Exemplo de problema:**  
+Uma alteracao pequena no Runner pode quebrar algo da memoria ou da interface, porque tudo esta muito proximo no mesmo arquivo.
+
+**Por que isso importa:**  
+Arquivos grandes aumentam o custo de entender, testar e alterar. Isso e especialmente importante em app com automacao e comandos nativos.
+
+**Como corrigir:**  
+Extrair aos poucos: `useLiveSession`, `useAliceMemory`, `useAutonomousRunner`, `useHudState`, `useToolCalls` e servicos separados para persistencia.
+
+## 19. Executor autonomo grande demais
+
+**Severidade:** Media  
+**Arquivo:** `src/autonomousLearningToolExecutor.js`
+
+**Em palavras simples:**  
+O executor de ferramentas autonomas virou um ponto central grande demais.
+
+**O que acontece no codigo:**  
+O arquivo tem cerca de 1604 linhas e muitos `case`, misturando VM, runner, auditoria, snapshots, rollback e aprendizado.
+
+**Exemplo de problema:**  
+Ao adicionar uma nova ferramenta, fica facil mexer sem querer em fluxo de outra area.
+
+**Por que isso importa:**  
+Executores grandes acumulam regras implicitas. Isso dificulta testar permissoes, rollback e efeitos colaterais.
+
+**Como corrigir:**  
+Separar por dominio: executor de VM, executor de runner, executor de snapshots, executor de propostas e executor de aprendizado. O arquivo atual pode virar apenas um roteador pequeno.
+
+## Ordem recomendada de correcao
+
+1. Corrigir Guest Agent sem token.
+2. Trocar `0.0.0.0` por `127.0.0.1` quando possivel.
+3. Restringir `run_command` e `start_background_command`.
+4. Proteger a bridge web com token local.
+5. Adicionar limite de payload na bridge web.
+6. Ativar CSP no Tauri.
+7. Criar allowlist para shell local.
+8. Corrigir escrita atomica da memoria.
+9. Fortalecer validacao de caminhos.
+10. Remover arquivos gerados/logs do Git.
+11. Reduzir permissoes e frequencia da extensao.
+12. Refatorar `App.jsx` e `autonomousLearningToolExecutor.js` em etapas pequenas.
+
+## Observacao final
+
+Nem todos esses itens significam que o app esta quebrado hoje. Muitos sao riscos de projeto: coisas que funcionam durante desenvolvimento, mas que nao deveriam ir para uma versao mais segura e organizada. Os itens de severidade alta devem vir primeiro porque envolvem autenticacao, comando nativo, ponte local, CSP e perda de dados.
