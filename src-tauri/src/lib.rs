@@ -27,6 +27,7 @@ const MAX_TYPE_TEXT_CHARS: usize = 10_000;
 const MAX_MEMORY_JSON_BYTES: usize = 52_428_800;
 const MAX_RUNNER_EVIDENCE_TEXT_BYTES: usize = 1_048_576;
 const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
+const ALICE_MEMORY_BACKUP_COUNT: usize = 3;
 const MAX_SHELL_OUTPUT_CHARS: usize = 12_000;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 10_000;
 const MAX_SHELL_TIMEOUT_MS: u64 = 600_000;
@@ -286,15 +287,82 @@ fn resolve_alice_memory_path(base_dir: &std::path::Path) -> PathBuf {
     base_dir.join(ALICE_MEMORY_FILE_NAME)
 }
 
+fn resolve_alice_memory_backup_path(path: &Path, index: usize) -> PathBuf {
+    path.with_file_name(format!("alice-memory.backup-{index}.json"))
+}
+
+fn read_memory_backup_json(path: &Path) -> Result<Option<String>, String> {
+    for index in 1..=ALICE_MEMORY_BACKUP_COUNT {
+        let backup_path = resolve_alice_memory_backup_path(path, index);
+        match fs::read_to_string(&backup_path) {
+            Ok(json) => return Ok(Some(json)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Falha ao ler backup da memoria local da Alice em {}: {error}",
+                    backup_path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 fn read_memory_json(path: &std::path::Path) -> Result<Option<String>, String> {
     match fs::read_to_string(path) {
         Ok(json) => Ok(Some(json)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => read_memory_backup_json(path),
         Err(error) => Err(format!(
             "Falha ao ler a memoria local da Alice em {}: {error}",
             path.display()
         )),
     }
+}
+
+fn rotate_memory_backups(path: &Path) -> Result<(), String> {
+    let oldest_backup = resolve_alice_memory_backup_path(path, ALICE_MEMORY_BACKUP_COUNT);
+    if oldest_backup.exists() {
+        fs::remove_file(&oldest_backup).map_err(|error| {
+            format!(
+                "Falha ao remover backup antigo da memoria local da Alice em {}: {error}",
+                oldest_backup.display()
+            )
+        })?;
+    }
+
+    for index in (1..ALICE_MEMORY_BACKUP_COUNT).rev() {
+        let from = resolve_alice_memory_backup_path(path, index);
+        let to = resolve_alice_memory_backup_path(path, index + 1);
+        if from.exists() {
+            fs::rename(&from, &to).map_err(|error| {
+                format!(
+                    "Falha ao rotacionar backup da memoria local da Alice de {} para {}: {error}",
+                    from.display(),
+                    to.display()
+                )
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn preserve_current_memory_backup(path: &Path) -> Result<Option<PathBuf>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    rotate_memory_backups(path)?;
+    let backup_path = resolve_alice_memory_backup_path(path, 1);
+    fs::copy(path, &backup_path).map_err(|error| {
+        format!(
+            "Falha ao criar backup da memoria local da Alice em {}: {error}",
+            backup_path.display()
+        )
+    })?;
+
+    Ok(Some(backup_path))
 }
 
 fn write_memory_json_atomic(path: &std::path::Path, json: &str) -> Result<(), String> {
@@ -334,6 +402,8 @@ fn write_memory_json_atomic(path: &std::path::Path, json: &str) -> Result<(), St
     })?;
     drop(temp_file);
 
+    let last_good_backup = preserve_current_memory_backup(path)?;
+
     if path.exists() {
         fs::remove_file(path).map_err(|error| {
             format!(
@@ -344,6 +414,9 @@ fn write_memory_json_atomic(path: &std::path::Path, json: &str) -> Result<(), St
     }
 
     fs::rename(&temp_path, path).map_err(|error| {
+        if let Some(backup_path) = &last_good_backup {
+            let _ = fs::copy(backup_path, path);
+        }
         let _ = fs::remove_file(&temp_path);
         format!(
             "Falha ao concluir a gravacao atomica da memoria local da Alice em {}: {error}",
@@ -2084,7 +2157,8 @@ fn load_dev_runtime_requests(app: tauri::AppHandle) -> Result<Vec<Value>, String
     for entry in fs::read_dir(&request_dir)
         .map_err(|error| format!("Falha ao listar pedidos dev de runtime: {error}"))?
     {
-        let entry = entry.map_err(|error| format!("Falha ao ler pedido dev de runtime: {error}"))?;
+        let entry =
+            entry.map_err(|error| format!("Falha ao ler pedido dev de runtime: {error}"))?;
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
             continue;
@@ -2720,6 +2794,46 @@ mod tests {
         assert_eq!(
             read_memory_json(&memory_path),
             Ok(Some("{\"ok\":false}".to_string()))
+        );
+        assert_eq!(
+            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 1)).unwrap(),
+            "{\"ok\":true}".to_string()
+        );
+
+        write_memory_json_atomic(&memory_path, "{\"ok\":\"latest\"}").unwrap();
+        assert_eq!(
+            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 1)).unwrap(),
+            "{\"ok\":false}".to_string()
+        );
+        assert_eq!(
+            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 2)).unwrap(),
+            "{\"ok\":true}".to_string()
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn read_memory_json_falls_back_to_latest_backup_when_primary_is_missing() {
+        let base_dir = std::env::temp_dir().join(format!(
+            "alice-memory-test-backup-read-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base_dir).unwrap();
+        let memory_path = resolve_alice_memory_path(&base_dir);
+        fs::write(
+            resolve_alice_memory_backup_path(&memory_path, 1),
+            "{\"backup\":true}",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_memory_json(&memory_path),
+            Ok(Some("{\"backup\":true}".to_string()))
         );
 
         let _ = fs::remove_dir_all(&base_dir);
