@@ -2102,6 +2102,11 @@ fn create_gemini_live_url() -> Result<GeminiLiveAccess, String> {
 }
 
 #[tauri::command]
+fn get_gemini_api_key() -> Result<String, String> {
+    gemini_api_key_from_env()
+}
+
+#[tauri::command]
 fn load_alice_memory_json(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app
         .path()
@@ -2456,6 +2461,7 @@ pub fn run() {
     #[cfg(feature = "desktop-commands")]
     let builder = builder.invoke_handler(tauri::generate_handler![
         create_gemini_live_url,
+        get_gemini_api_key,
         load_alice_memory_json,
         save_alice_memory_json,
         load_dev_runtime_requests,
@@ -2492,6 +2498,7 @@ pub fn run() {
     #[cfg(not(feature = "desktop-commands"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
         create_gemini_live_url,
+        get_gemini_api_key,
         load_alice_memory_json,
         save_alice_memory_json,
         load_dev_runtime_requests,
