@@ -24,7 +24,6 @@ import {
 } from './aliceMemory';
 import { createInitialAppUiState, readyCaption, reduceAppUiState, statusCopy } from './appUiState';
 import { GeminiLiveSession, LIVE_CLOSE_REASONS } from './geminiLive';
-import { GeminiRestClient } from './geminiRest';
 import { calculateRms, decodePcm16Base64, encodePcm16Base64 } from './liveAudio';
 import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
 import { buildSessionRehydrationTurns } from './liveSessionRehydration';
@@ -274,8 +273,6 @@ function App() {
   const liveSessionRef = useRef(null);
   const liveOrchestratorRef = useRef(null);
   const liveTransportRef = useRef(new LiveSessionTransport());
-  const geminiRestClientRef = useRef(null);
-  const useRestModeRef = useRef(true); // Usar REST por padrao para mais estabilidade
   const aliceMemoryRef = useRef(createEmptyAliceMemory());
   const memorySaveTimerRef = useRef(null);
   const memoryHydratedRef = useRef(false);
@@ -1485,51 +1482,12 @@ function App() {
 
       screenStream.getVideoTracks()[0]?.addEventListener('ended', stopLiveSession, { once: true });
 
-      // Inicializa cliente REST (mais estavel que WebSocket)
-      const apiKey = await invoke('get_gemini_api_key');
-      geminiRestClientRef.current = new GeminiRestClient({
-        apiKey,
-        onStatus: (restStatus) => {
-          if (restStatus === 'sending') {
-            dispatchUi({ type: 'session-live-status', status: 'configuring' });
-          } else if (restStatus === 'idle') {
-            dispatchUi({ type: 'session-live-status', status: 'connected' });
-          } else if (restStatus === 'error') {
-            dispatchUi({ type: 'session-live-status', status: 'error' });
-          }
-        },
-        onError: (sessionError) => {
-          noteDiagnostic({
-            type: 'error',
-            message: sessionError.message || 'Erro na comunicacao com Gemini.',
-          });
-        }
-      });
-
-      // Configura instrucao do sistema e ferramentas
-      const memoryPrefixTurns = await buildLiveMemoryPrefixTurns({ mode: 'fresh' });
-      const systemInstruction = memoryPrefixTurns.length > 0 
-        ? { parts: [{ text: memoryPrefixTurns[0].parts.map(p => p.text || '').join(' ') }] }
-        : null;
-      
-      geminiRestClientRef.current.setSystemInstruction(systemInstruction);
-      geminiRestClientRef.current.setTools([
-        { functionDeclarations: KNOWLEDGE_TOOLS },
-        { functionDeclarations: MIND_MAP_TOOLS },
-        { functionDeclarations: AUTONOMOUS_LEARNING_TOOLS },
-        { functionDeclarations: AUTONOMOUS_RUNNER_TOOLS }
-      ]);
+      const liveAccess = await invoke('create_gemini_live_url');
+      const liveOrchestrator = createLiveOrchestrator(liveAccess.url);
 
       liveTransportRef.current.clear();
-      useRestModeRef.current = true;
-      noteDiagnostic({ type: 'connected' });
-      dispatchUi({
-        type: 'session-ready',
-        mode: 'fresh',
-        resumed: false,
-        rehydrated: false,
-        caption: readyCaption,
-      });
+      liveOrchestratorRef.current = liveOrchestrator;
+      await liveOrchestrator.startLiveSession();
     } catch (sessionError) {
       await liveOrchestratorRef.current?.stopLiveSession();
       releaseLiveResources();
