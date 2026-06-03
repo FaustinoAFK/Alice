@@ -14,9 +14,7 @@
     "test": "vitest run",
     "preview": "vite preview",
     "audit:alice": "node scripts/alice-code-auditor.mjs --once",
-    "audit:alice:watch": "node scripts/alice-code-auditor.mjs --watch",
-    "runner:harness": "node scripts/runner-harness.mjs",
-    "learning:harness": "node scripts/learning-planner-harness.mjs"
+    "audit:alice:watch": "node scripts/alice-code-auditor.mjs --watch"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

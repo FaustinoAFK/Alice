@@ -45,7 +45,6 @@ import {
   createEmptyAutonomousLearningState,
   hydrateAutonomousStateFromAudit,
   mergeAutonomousLearningState,
-  normalizeVmStatus,
 } from './autonomousLearning';
 import {
   executeAutonomousLearningFunctionCall,
@@ -64,7 +63,6 @@ import {
   upsertAutonomousLearningGoal,
 } from './autonomousLearningGoals';
 import { registerObservedLearningTargets } from './autonomousObservedLearning';
-import { recoverAutonomousTasksOnStartup } from './autonomousRunnerLease';
 import { syncMindMapWithRunnerTask } from './autonomousRunnerMindMap';
 import { syncMindMapWithExecution } from './mindMapExecutionSync';
 import { AliceHud } from './hud/AliceHud';
@@ -146,6 +144,7 @@ const readyCheckPrompt =
 const ALICE_MEMORY_SAVE_DELAY_MS = 750;
 const TRUSTED_UTTERANCE_WINDOW_MS = 10000;
 const MAX_DEBUG_INTERACTIONS = 80;
+const AUTONOMY_RUNTIME_ENABLED = false;
 
 const createDebugInteractionId = () =>
   `debug-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -493,7 +492,6 @@ function App() {
   const commitAliceMemory = (nextMemory) => {
     aliceMemoryRef.current = nextMemory;
     setActiveMindMap(getActiveMindMap(nextMemory));
-    setAutonomousRunnerState(getAutonomousRunnerState(nextMemory));
     setMindMapRevision((current) => current + 1);
     updatePersistenceDiagnostics();
     scheduleAliceMemorySave();
@@ -512,6 +510,10 @@ function App() {
     });
 
   const runStartupAutonomousLearningLoop = async ({ startup = false, dryRun = null } = {}) => {
+    if (!AUTONOMY_RUNTIME_ENABLED) {
+      return null;
+    }
+
     if (!memoryHydratedRef.current || !canUseTauriRuntime()) {
       return null;
     }
@@ -565,6 +567,10 @@ function App() {
     screen = {},
     knowledge = knowledgeStateRef.current,
   } = {}) => {
+    if (!AUTONOMY_RUNTIME_ENABLED) {
+      return null;
+    }
+
     if (!memoryHydratedRef.current) {
       return null;
     }
@@ -1468,14 +1474,6 @@ function App() {
         label: screenTrack?.label || '',
         displaySurface: screenSettings.displaySurface || '',
       });
-      registerObservedLearningFromContext({
-        source: 'screen_capture_started',
-        screen: {
-          label: screenTrack?.label || '',
-          displaySurface: screenSettings.displaySurface || '',
-          logicalSurface: screenSettings.logicalSurface,
-        },
-      });
       noteDiagnostic({ type: 'microphone-started' });
       videoRef.current.srcObject = screenStream;
       await videoRef.current.play();
@@ -1526,11 +1524,6 @@ function App() {
               runtimeDetected,
             },
           });
-          const recoveredRunner = recoverAutonomousTasksOnStartup(
-            getAutonomousRunnerState(diagnosticMemory),
-            { now: new Date().toISOString(), nowMs: Date.now() },
-          );
-          diagnosticMemory = updateAutonomousRunnerState(diagnosticMemory, recoveredRunner);
           diagnosticMemory = appendRunnerAppDiagnostic(diagnosticMemory, {
             type: 'memory_hydrated',
             summary: 'Memoria da Alice hidratada no app.',
@@ -1539,44 +1532,13 @@ function App() {
           });
           aliceMemoryRef.current = diagnosticMemory;
           setActiveMindMap(getActiveMindMap(diagnosticMemory));
-          setAutonomousRunnerState(getAutonomousRunnerState(diagnosticMemory));
           setMindMapRevision((current) => current + 1);
           const hydratedAutonomy = hydrateAutonomousStateFromAudit(diagnosticMemory.autonomousAudit);
           autonomousLearningStateRef.current = hydratedAutonomy;
           setAutonomousLearningState(hydratedAutonomy);
           memoryHydratedRef.current = true;
-          setRunnerLoopWakeVersion((current) => current + 1);
           updatePersistenceDiagnostics();
           scheduleAliceMemorySave();
-          void runStartupAutonomousLearningLoop({ startup: true });
-
-          void invoke('get_local_vm_status')
-            .then((status) => {
-              if (disposed) {
-                return;
-              }
-              const vmStatus = normalizeVmStatus(status?.artifacts || status);
-              const refreshedAutonomy = appendAutonomousLog(
-                mergeAutonomousLearningState(autonomousLearningStateRef.current, {
-                  vm: {
-                    ...autonomousLearningStateRef.current.vm,
-                    ...vmStatus,
-                    lastHealthCheck: Date.now(),
-                  },
-                }),
-                'local_vm_status_refreshed_on_boot',
-                {
-                  provider: vmStatus.provider || 'none',
-                  status: vmStatus.providerStatus || vmStatus.status || 'unknown',
-                  guestCommandReady: Boolean(vmStatus.guestCommandReady),
-                },
-              );
-              autonomousLearningStateRef.current = refreshedAutonomy;
-              setAutonomousLearningState(refreshedAutonomy);
-            })
-            .catch(() => {
-              // Runtime VM status is diagnostic-only; memory hydration remains usable without it.
-            });
         }
       })
       .catch((loadError) => {
@@ -1614,6 +1576,10 @@ function App() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!AUTONOMY_RUNTIME_ENABLED) {
+      return undefined;
+    }
+
     let disposed = false;
 
     const clearRunnerTimer = () => {
@@ -1786,6 +1752,10 @@ function App() {
   }, [runnerLoopWakeVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
+    if (!AUTONOMY_RUNTIME_ENABLED) {
+      return undefined;
+    }
+
     let disposed = false;
     let timer = null;
 

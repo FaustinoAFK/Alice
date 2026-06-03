@@ -11,13 +11,10 @@ use std::time::Duration;
 use tauri::Manager;
 use wait_timeout::ChildExt;
 
-mod autonomous_playground;
 mod host_versioning;
 #[cfg(any(test, feature = "desktop-commands"))]
 mod legacy_desktop_commands;
-mod local_vm;
 mod python_sidecar;
-mod vm_visual;
 mod web_knowledge;
 
 const GEMINI_LIVE_WS_ENDPOINT: &str =
@@ -2466,20 +2463,6 @@ pub fn run() {
         save_alice_memory_json,
         load_dev_runtime_requests,
         clear_dev_runtime_request,
-        save_runner_evidence,
-        verify_runner_evidence,
-        local_vm::get_local_vm_status,
-        local_vm::diagnose_local_vm_setup,
-        local_vm::run_local_vm_guest_task,
-        local_vm::run_local_vm_smoke_test,
-        vm_visual::install_vm_guest_agent,
-        vm_visual::diagnose_vm_guest_agent,
-        vm_visual::start_vm_guest_agent_resident,
-        vm_visual::run_vm_guest_agent_action,
-        vm_visual::capture_vm_guest_screen,
-        vm_visual::run_vm_visual_smoke_test,
-        autonomous_playground::run_local_workspace_playground_task,
-        autonomous_playground::cancel_autonomous_task,
         host_versioning::create_host_file_snapshot,
         host_versioning::diff_host_file_snapshot,
         host_versioning::record_host_file_checkpoint,
@@ -2503,20 +2486,6 @@ pub fn run() {
         save_alice_memory_json,
         load_dev_runtime_requests,
         clear_dev_runtime_request,
-        save_runner_evidence,
-        verify_runner_evidence,
-        local_vm::get_local_vm_status,
-        local_vm::diagnose_local_vm_setup,
-        local_vm::run_local_vm_guest_task,
-        local_vm::run_local_vm_smoke_test,
-        vm_visual::install_vm_guest_agent,
-        vm_visual::diagnose_vm_guest_agent,
-        vm_visual::start_vm_guest_agent_resident,
-        vm_visual::run_vm_guest_agent_action,
-        vm_visual::capture_vm_guest_screen,
-        vm_visual::run_vm_visual_smoke_test,
-        autonomous_playground::run_local_workspace_playground_task,
-        autonomous_playground::cancel_autonomous_task,
         host_versioning::create_host_file_snapshot,
         host_versioning::diff_host_file_snapshot,
         host_versioning::record_host_file_checkpoint,
