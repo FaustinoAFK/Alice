@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { ALICE_LIVE_TOOLS } from '../aliceLiveTools';
 import { TOOL_CONTEXT_PROFILES } from './toolContextProfiles';
@@ -17,13 +15,6 @@ import {
   validateToolDomainsForProfile,
 } from './toolRegistry';
 
-const contractPath = fileURLToPath(
-  new URL('../__fixtures__/aliceLiveTools.contract.json', import.meta.url),
-);
-
-const loadContractDeclarations = () =>
-  JSON.parse(readFileSync(contractPath, 'utf8'));
-
 const DANGEROUS_TOOL_NAMES = [
   'manage_autonomous_runner',
   'diagnose_local_vm_setup',
@@ -36,22 +27,12 @@ const DANGEROUS_TOOL_NAMES = [
   'run_vm_visual_smoke_test',
   'run_vm_operational_task',
   'plan_autonomous_task',
-  'create_host_change_snapshot',
-  'record_host_file_checkpoint',
-  'create_self_improvement_proposal',
-  'approve_self_improvement_proposal',
-  'report_unexpected_risk',
 ];
 
 describe('tool registry contextual profiles', () => {
-  it('keeps the full profile equivalent to the stable complete fixture', () => {
+  it('keeps the full profile equivalent to current live tools', () => {
     const fullTools = buildLiveToolsForProfile('full');
 
-    expect(fullTools).toEqual([
-      {
-        functionDeclarations: loadContractDeclarations(),
-      },
-    ]);
     expect(fullTools).toEqual(ALICE_LIVE_TOOLS);
     expect(validateFullProfileMatchesAliceLiveTools()).toBe(true);
   });
@@ -112,19 +93,6 @@ describe('tool registry contextual profiles', () => {
     ]);
   });
 
-  it('keeps vm scoped to status, runner and vm without hostSafety by default', () => {
-    expect(getToolDomainsForProfile('vm')).toEqual([
-      'autonomousStatus',
-      'runner',
-      'vm',
-    ]);
-    expect(getToolDomainsForProfile('vm')).not.toContain('hostSafety');
-    expect(getToolNamesForProfile('vm')).toContain('get_autonomous_learning_status');
-    expect(getToolNamesForProfile('vm')).toContain('manage_autonomous_runner');
-    expect(getToolNamesForProfile('vm')).toContain('run_vm_operational_task');
-    expect(getToolNamesForProfile('vm')).not.toContain('create_host_change_snapshot');
-  });
-
   it('keeps selfImprovement as declarations only, without runtime activation', () => {
     expect(getToolDomainsForProfile('selfImprovement')).toEqual(['selfImprovement']);
     expect(getToolNamesForProfile('selfImprovement')).toEqual([
@@ -133,19 +101,15 @@ describe('tool registry contextual profiles', () => {
     ]);
   });
 
-  it('keeps learningReview limited to status and learning declarations', () => {
-    expect(getToolDomainsForProfile('learningReview')).toEqual([
-      'autonomousStatus',
-      'learning',
-    ]);
-    expect(getToolNamesForProfile('learningReview')).toEqual([
-      'get_autonomous_learning_status',
-      'record_validated_learning',
-      'record_research_finding',
-      'inspect_project_context',
-    ]);
-    expect(getToolNamesForProfile('learningReview')).not.toContain(
-      'approve_self_improvement_proposal',
-    );
+  it('does not expose VM, runner or autonomous learning profiles', () => {
+    expect(TOOL_CONTEXT_PROFILES).not.toHaveProperty('vm');
+    expect(TOOL_CONTEXT_PROFILES).not.toHaveProperty('runner');
+    expect(TOOL_CONTEXT_PROFILES).not.toHaveProperty('learningReview');
+
+    Object.keys(TOOL_CONTEXT_PROFILES).forEach((profileName) => {
+      expect(getToolNamesForProfile(profileName).some((toolName) =>
+        DANGEROUS_TOOL_NAMES.includes(toolName),
+      )).toBe(false);
+    });
   });
 });

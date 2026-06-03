@@ -78,25 +78,6 @@ describe('resolveToolProfile', () => {
     expect(resolution.reason).toContain('sem pagina ativa');
   });
 
-  it('returns vm for app or install requests targeting the VM', () => {
-    const resolution = resolveToolProfile({
-      userText: 'Abrir o aplicativo Notepad e instalar ferramenta na VM',
-      targetEnvironment: 'vm',
-    });
-
-    expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('vm');
-  });
-
-  it('returns runner for queue, long task or runner requests', () => {
-    const resolution = resolveToolProfile({
-      userText: 'Coloca essa tarefa longa na fila do runner',
-    });
-
-    expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('runner');
-  });
-
   it('returns selfImprovement for Alice self-improvement requests', () => {
     const resolution = resolveToolProfile({
       userText: 'Crie uma proposta de auto-melhoria para o codigo da Alice',
@@ -104,15 +85,6 @@ describe('resolveToolProfile', () => {
 
     expectResolutionShape(resolution);
     expect(resolution.profile).toBe('selfImprovement');
-  });
-
-  it('returns learningReview for learning candidate or procedure review requests', () => {
-    const resolution = resolveToolProfile({
-      userText: 'Revise os candidatos de aprendizado e o procedimento sugerido',
-    });
-
-    expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('learningReview');
   });
 
   it('returns hostSafety for snapshot, rollback or real PC risk requests', () => {
@@ -132,10 +104,7 @@ describe('resolveToolProfile', () => {
       { userText: 'Oi Alice' },
       { userText: 'essa pagina', hasActiveWebPage: true },
       { userText: 'essa pagina', hasActiveWebPage: false },
-      { userText: 'abrir app na VM', targetEnvironment: 'vm' },
-      { userText: 'tarefa longa na fila do runner' },
       { userText: 'auto-melhoria da Alice' },
-      { userText: 'candidato de aprendizado' },
       { userText: 'rollback no PC real' },
     ];
 

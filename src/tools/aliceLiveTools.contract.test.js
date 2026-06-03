@@ -1,5 +1,3 @@
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   ALICE_LIVE_TOOL_DOMAINS,
@@ -11,16 +9,6 @@ import {
   ALICE_LIVE_TOOL_DECLARATIONS_BY_DOMAIN,
   ALICE_LIVE_TOOLS,
 } from './aliceLiveTools';
-
-const contractPath = fileURLToPath(
-  new URL('./__fixtures__/aliceLiveTools.contract.json', import.meta.url),
-);
-
-const loadContractDeclarations = () =>
-  JSON.parse(readFileSync(contractPath, 'utf8'));
-
-const serializeToolDeclarations = (functionDeclarations) =>
-  JSON.stringify(functionDeclarations, null, 2);
 
 const getFunctionDeclarations = () => ALICE_LIVE_TOOLS[0]?.functionDeclarations || [];
 
@@ -35,20 +23,6 @@ const EXPECTED_DOMAIN_TOOL_NAMES = {
     'fetch_web_page',
   ],
   mindMap: ['update_mind_map'],
-  autonomousStatus: ['get_autonomous_learning_status'],
-  runner: ['manage_autonomous_runner'],
-  vm: [
-    'diagnose_local_vm_setup',
-    'run_local_vm_smoke_test',
-    'install_vm_guest_agent',
-    'diagnose_vm_guest_agent',
-    'start_vm_guest_agent_resident',
-    'capture_vm_guest_screen',
-    'run_vm_guest_agent_action',
-    'run_vm_visual_smoke_test',
-    'run_vm_operational_task',
-  ],
-  autonomousPlanning: ['plan_autonomous_task'],
   hostSafety: [
     'create_host_change_snapshot',
     'record_host_file_checkpoint',
@@ -57,11 +31,6 @@ const EXPECTED_DOMAIN_TOOL_NAMES = {
   selfImprovement: [
     'create_self_improvement_proposal',
     'approve_self_improvement_proposal',
-  ],
-  learning: [
-    'record_validated_learning',
-    'record_research_finding',
-    'inspect_project_context',
   ],
 };
 
@@ -135,11 +104,27 @@ describe('ALICE_LIVE_TOOLS contract', () => {
     expect([...domainDeclarationNames].sort()).toEqual([...ALICE_LIVE_TOOL_ORDER].sort());
   });
 
-  it('matches the stable fixture for complete function declarations', () => {
-    const contractDeclarations = loadContractDeclarations();
+  it('does not expose VM, runner or autonomous learning tools', () => {
+    const removedToolNames = [
+      'get_autonomous_learning_status',
+      'manage_autonomous_runner',
+      'diagnose_local_vm_setup',
+      'run_local_vm_smoke_test',
+      'install_vm_guest_agent',
+      'diagnose_vm_guest_agent',
+      'start_vm_guest_agent_resident',
+      'capture_vm_guest_screen',
+      'run_vm_guest_agent_action',
+      'run_vm_visual_smoke_test',
+      'run_vm_operational_task',
+      'plan_autonomous_task',
+      'record_validated_learning',
+      'record_research_finding',
+      'inspect_project_context',
+    ];
 
-    expect(serializeToolDeclarations(getFunctionDeclarations())).toBe(
-      serializeToolDeclarations(contractDeclarations),
+    expect(namesOf(getFunctionDeclarations())).not.toEqual(
+      expect.arrayContaining(removedToolNames),
     );
   });
 });

@@ -20,25 +20,10 @@ const EXPECTED_TOOL_NAMES = [
   'search_web',
   'fetch_web_page',
   'update_mind_map',
-  'get_autonomous_learning_status',
-  'manage_autonomous_runner',
-  'diagnose_local_vm_setup',
-  'run_local_vm_smoke_test',
-  'install_vm_guest_agent',
-  'diagnose_vm_guest_agent',
-  'start_vm_guest_agent_resident',
-  'capture_vm_guest_screen',
-  'run_vm_guest_agent_action',
-  'run_vm_visual_smoke_test',
-  'run_vm_operational_task',
-  'plan_autonomous_task',
   'create_host_change_snapshot',
   'record_host_file_checkpoint',
   'create_self_improvement_proposal',
   'approve_self_improvement_proposal',
-  'record_validated_learning',
-  'record_research_finding',
-  'inspect_project_context',
   'report_unexpected_risk',
 ];
 
@@ -126,11 +111,10 @@ describe('ALICE_SYSTEM_INSTRUCTION', () => {
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('update_mind_map');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Nao faca resumo por iniciativa propria');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('responda diretamente a pergunta');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Pedido explicito do usuario tem prioridade maxima');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('VM playground real depende de provedor local configurado');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('Workspace local fallback usa copias e nao e VM real');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('run_vm_operational_task antes de pesquisar');
-    expect(ALICE_SYSTEM_INSTRUCTION).toContain('manage_autonomous_runner');
+    expect(ALICE_SYSTEM_INSTRUCTION).not.toContain('VM playground real');
+    expect(ALICE_SYSTEM_INSTRUCTION).not.toContain('run_vm_operational_task');
+    expect(ALICE_SYSTEM_INSTRUCTION).not.toContain('manage_autonomous_runner');
+    expect(ALICE_SYSTEM_INSTRUCTION).not.toContain('aprendizado operacional autonomo');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('snapshot, diff, validacao e rollback');
     expect(ALICE_SYSTEM_INSTRUCTION).toContain('Auto-melhoria da Alice deve virar proposta');
   });

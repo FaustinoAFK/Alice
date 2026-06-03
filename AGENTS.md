@@ -13,10 +13,9 @@ O foco do projeto e criar uma Alice confiavel para uso pessoal, com:
 - contexto de paginas web via extensao;
 - memoria local persistente;
 - HUD de diagnostico e controle;
-- autonomia supervisionada;
-- Runner de tarefas;
-- VM/local workspace;
-- evidencias, rollback e auditoria.
+- ferramentas web;
+- mapa mental;
+- snapshots, rollback e auditoria para acoes sensiveis no host.
 
 Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game design ou retencao de jogos aqui, a menos que o usuario peca explicitamente.
 
@@ -24,11 +23,10 @@ Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game 
 
 1. Confianca e controle do usuario.
 2. Privacidade local.
-3. Seguranca em comandos, arquivos, VM, shell e bridge local.
+3. Seguranca em comandos, arquivos, shell e bridge local.
 4. Memoria pessoal clara, editavel e recuperavel.
-5. Autonomia supervisionada, sempre com evidencias e possibilidade de rollback.
-6. UX simples para entender o que a Alice esta vendo, lembrando e fazendo.
-7. Manutencao incremental sem reescritas grandes.
+5. UX simples para entender o que a Alice esta vendo, lembrando e fazendo.
+6. Manutencao incremental sem reescritas grandes.
 
 ## Tecnologias Principais
 
@@ -37,23 +35,20 @@ Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game 
 - Modelo/conversa: Gemini Live API.
 - Testes JS: Vitest.
 - Extensao: Edge/Chrome Extension MV3.
-- VM/automacao: Hyper-V, VirtualBox, Python guest agent, PowerShell quando necessario.
 
 ## Regras de Engenharia
 
-- Preserve contratos existentes de memoria, Runner, tools e comandos Tauri.
+- Preserve contratos existentes de memoria, tools web, mapa mental e comandos Tauri ativos.
 - Antes de mudar comportamento sensivel, procure testes relacionados.
 - Nao enfraqueca validacoes de path, shell, rollback, evidencia ou policy.
-- Nao confunda workspace fallback com VM real.
-- Nao deixe task virar concluida sem evidencia/validacao quando o fluxo exigir.
-- Trate `src/App.jsx`, `src/aliceMemory.js`, `src/autonomousTaskRunner.js`, `src/autonomousRunnerState.js` e `src-tauri/src/lib.rs` como arquivos criticos.
+- Trate `src/App.jsx`, `src/aliceMemory.js`, `src/alice.js`, `src/tools/` e `src-tauri/src/lib.rs` como arquivos criticos.
 - Prefira refatoracoes pequenas, com testes, mantendo facades compativeis.
 
 ## Seguranca e Privacidade
 
 - Qualquer acao no PC real deve considerar snapshot, diff, validacao e rollback.
-- Acoes de shell, filesystem, VM e Guest Agent devem ser tratadas como sensiveis.
-- Bridge local, extensao web e Guest Agent devem usar autenticacao/limites quando possivel.
+- Acoes de shell e filesystem devem ser tratadas como sensiveis.
+- Bridge local e extensao web devem usar autenticacao/limites quando possivel.
 - Memoria local deve ter backup, migracao segura e possibilidade de recuperacao.
 - Nao salve segredos em arquivos versionados.
 
@@ -64,7 +59,6 @@ npm run lint
 npm test
 npm run build
 npm run audit:alice
-npm run runner:harness -- verify-safe-state
 ```
 
 Para backend Rust, quando arquivos em `src-tauri/` forem alterados:
