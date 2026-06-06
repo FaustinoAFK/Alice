@@ -23,10 +23,24 @@ const shouldSkipUrl = (url = '') =>
   url.startsWith('file://');
 
 function collectPageKnowledge() {
+  const MAX_SECTION_CONTENT = 1800;
+  const MAX_VISIBLE_TEXT_CHARS = 9000;
+  const MAX_LINKS = 60;
+  const MAX_INTERACTIVE_LABELS = 60;
+
   const normalize = (value = '') =>
     String(value || '')
       .replace(/\s+/g, ' ')
       .trim();
+
+  const truncate = (value = '', maxLength = MAX_SECTION_CONTENT) => {
+    const normalized = normalize(value);
+    if (normalized.length <= maxLength) {
+      return normalized;
+    }
+
+    return `${normalized.slice(0, maxLength - 1).trim()}...`;
+  };
 
   const absoluteUrl = (value) => {
     try {
@@ -36,9 +50,51 @@ function collectPageKnowledge() {
     }
   };
 
+  const isVisible = (node) => {
+    if (!node || !(node instanceof Element)) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(node);
+    if (
+      style.display === 'none' ||
+      style.visibility === 'hidden' ||
+      style.opacity === '0' ||
+      node.closest('[hidden], [aria-hidden="true"]')
+    ) {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const elementLabel = (node) =>
+    normalize(
+      node?.getAttribute?.('aria-label') ||
+        node?.getAttribute?.('title') ||
+        node?.getAttribute?.('alt') ||
+        node?.getAttribute?.('placeholder') ||
+        node?.textContent ||
+        node?.value ||
+        '',
+    );
+
+  const uniqueBy = (items, keyGetter) => {
+    const seen = new Set();
+    return items.filter((item) => {
+      const key = keyGetter(item);
+      if (!key || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  };
+
   const sections = [];
   const pushSection = (kind, heading, content) => {
-    const normalizedContent = normalize(content);
+    const normalizedContent = truncate(content);
     const normalizedHeading = normalize(heading);
     if (!normalizedHeading && !normalizedContent) {
       return;
@@ -52,25 +108,90 @@ function collectPageKnowledge() {
     });
   };
 
+  const pushVisibleTextChunks = (text) => {
+    const normalized = truncate(text, MAX_VISIBLE_TEXT_CHARS);
+    if (!normalized) {
+      return;
+    }
+
+    const sentences = normalized
+      .split(/(?<=[.!?])\s+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    let chunk = '';
+    for (const sentence of sentences) {
+      const next = `${chunk} ${sentence}`.trim();
+      if (next.length > MAX_SECTION_CONTENT) {
+        pushSection('visible_text', '', chunk);
+        chunk = sentence;
+      } else {
+        chunk = next;
+      }
+    }
+
+    if (chunk) {
+      pushSection('visible_text', '', chunk);
+    }
+  };
+
   const mainRoot =
     document.querySelector('main') ||
     document.querySelector('article') ||
     document.querySelector('[role="main"]') ||
     document.body;
 
+  const metaDescription =
+    document.querySelector("meta[name='description']")?.getAttribute('content') || '';
+  const canonicalUrl = document.querySelector("link[rel='canonical']")?.getAttribute('href') || '';
+  const openGraphTitle = document.querySelector("meta[property='og:title']")?.getAttribute('content') || '';
+  const openGraphDescription =
+    document.querySelector("meta[property='og:description']")?.getAttribute('content') || '';
+
+  pushSection(
+    'page_overview',
+    document.title || openGraphTitle || 'Pagina atual',
+    [
+      metaDescription || openGraphDescription,
+      canonicalUrl ? `Canonical: ${absoluteUrl(canonicalUrl)}` : '',
+      `URL: ${window.location.href}`,
+      `Idioma: ${document.documentElement?.lang || 'nao informado'}`,
+    ]
+      .filter(Boolean)
+      .join(' | '),
+  );
+
+  const visibleText = normalize(mainRoot?.innerText || document.body?.innerText || '');
+  pushVisibleTextChunks(visibleText);
+
   [...mainRoot.querySelectorAll('h1, h2, h3, h4, h5, h6')]
-    .slice(0, 20)
+    .filter(isVisible)
+    .slice(0, 24)
     .forEach((node) => {
-      pushSection(node.tagName.toLowerCase(), node.textContent || '', node.textContent || '');
+      const relatedText = [];
+      let sibling = node.nextElementSibling;
+      while (sibling && relatedText.length < 3) {
+        if (isVisible(sibling) && /^(P|UL|OL|DIV|SECTION|ARTICLE)$/i.test(sibling.tagName)) {
+          const text = normalize(sibling.innerText || sibling.textContent || '');
+          if (text) {
+            relatedText.push(text);
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+
+      pushSection(node.tagName.toLowerCase(), node.textContent || '', relatedText.join(' '));
     });
 
   [...mainRoot.querySelectorAll('p, blockquote, pre')]
+    .filter(isVisible)
     .slice(0, 30)
     .forEach((node) => {
       pushSection(node.tagName.toLowerCase(), '', node.textContent || '');
     });
 
   [...mainRoot.querySelectorAll('ul, ol')]
+    .filter(isVisible)
     .slice(0, 10)
     .forEach((list) => {
       const items = [...list.querySelectorAll('li')]
@@ -83,6 +204,7 @@ function collectPageKnowledge() {
     });
 
   [...mainRoot.querySelectorAll('table')]
+    .filter(isVisible)
     .slice(0, 6)
     .forEach((table) => {
       const rows = [...table.querySelectorAll('tr')]
@@ -99,18 +221,80 @@ function collectPageKnowledge() {
       }
     });
 
-  const links = [...mainRoot.querySelectorAll('a[href]')]
-    .map((link) => ({
-      text: normalize(link.textContent || ''),
-      url: absoluteUrl(link.getAttribute('href')),
-    }))
-    .filter((link) => link.text && link.url)
-    .slice(0, 40);
+  [...mainRoot.querySelectorAll('form')]
+    .filter(isVisible)
+    .slice(0, 8)
+    .forEach((form, index) => {
+      const fields = [...form.querySelectorAll('input, textarea, select, button')]
+        .filter(isVisible)
+        .map((field) => {
+          const name = field.getAttribute('name') || field.getAttribute('id') || '';
+          const type = field.getAttribute('type') || field.tagName.toLowerCase();
+          const label = elementLabel(field);
+          return normalize([type, name, label].filter(Boolean).join(': '));
+        })
+        .filter(Boolean)
+        .slice(0, 20);
 
-  const interactiveLabels = [...mainRoot.querySelectorAll('button, label, [role="button"]')]
-    .map((node) => normalize(node.textContent || ''))
+      if (fields.length > 0) {
+        pushSection('form', `Formulario ${index + 1}`, fields.join(' | '));
+      }
+    });
+
+  [...mainRoot.querySelectorAll('[role="dialog"], dialog, aside, nav')]
+    .filter(isVisible)
+    .slice(0, 8)
+    .forEach((node) => {
+      const label = elementLabel(node) || node.tagName.toLowerCase();
+      pushSection('page_region', label, node.innerText || node.textContent || '');
+    });
+
+  [...mainRoot.querySelectorAll('img')]
+    .filter(isVisible)
+    .slice(0, 20)
+    .forEach((image) => {
+      const alt = elementLabel(image);
+      const src = absoluteUrl(image.getAttribute('src') || image.currentSrc || '');
+      if (alt || src) {
+        pushSection('image', alt || 'Imagem', src);
+      }
+    });
+
+  const links = uniqueBy(
+    [...mainRoot.querySelectorAll('a[href]')]
+      .filter(isVisible)
+      .map((link) => {
+        const url = absoluteUrl(link.getAttribute('href'));
+        const text = normalize(
+          link.textContent ||
+            link.getAttribute('aria-label') ||
+            link.getAttribute('title') ||
+            link.querySelector('img')?.getAttribute('alt') ||
+            url,
+        );
+        return { text, url };
+      })
+      .filter((link) => link.text && link.url),
+    (link) => `${link.text}\n${link.url}`,
+  ).slice(0, MAX_LINKS);
+
+  const interactiveLabels = uniqueBy(
+    [
+      ...mainRoot.querySelectorAll(
+        'button, label, input, textarea, select, summary, [role="button"], [role="link"], [role="menuitem"], [tabindex]',
+      ),
+    ]
+      .filter(isVisible)
+      .map((node) => {
+        const tag = node.tagName.toLowerCase();
+        const type = node.getAttribute('type');
+        const label = elementLabel(node);
+        return normalize([tag, type, label].filter(Boolean).join(': '));
+      }),
+    (label) => label,
+  )
     .filter(Boolean)
-    .slice(0, 30);
+    .slice(0, MAX_INTERACTIVE_LABELS);
 
   return {
     navigationContext: {
@@ -123,8 +307,7 @@ function collectPageKnowledge() {
     snapshot: {
       url: window.location.href,
       title: document.title || '',
-      metaDescription:
-        document.querySelector("meta[name='description']")?.getAttribute('content') || '',
+      metaDescription: metaDescription || openGraphDescription,
       documentLanguage: document.documentElement?.lang || '',
       selectedText: normalize(window.getSelection?.().toString() || ''),
       interactiveLabels,
