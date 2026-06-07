@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { executeKnowledgeTool } from './knowledgePipeline';
-import { KNOWLEDGE_SCOPES, KNOWLEDGE_SUFFICIENCY } from './webKnowledge';
+import { KNOWLEDGE_SCOPES, KNOWLEDGE_SUFFICIENCY } from '../../webKnowledge';
 
 const buildContext = () => ({
   url: 'https://example.com/docs/page',

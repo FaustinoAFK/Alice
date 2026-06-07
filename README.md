@@ -56,8 +56,10 @@ reintroducao acidental.
 - `src/geminiLive.js`: WebSocket da Gemini Live API.
 - `src/liveSessionOrchestrator.js`: ciclo de vida, retomada e reconexao.
 - `src/screenFrameStreaming.js`: captura frames da tela para o Live.
-- `src/knowledgePipeline.js`: fluxo interno de conhecimento web.
-- `src/knowledgeToolExecutor.js`: executa apenas tools de conhecimento.
+- `src/tools/`: fronteira oficial de declaracoes, registry e execucao de tools.
+- `src/tools/knowledge/knowledgePipeline.js`: fluxo interno de conhecimento web.
+- `src/tools/knowledge/knowledgeToolExecutor.js`: executa apenas tools Live de
+  conhecimento e mantem busca/fetch como capacidade interna.
 - `src/aliceMemory.js`: schema e normalizacao da memoria local.
 - `src-tauri/src/alice_memory_store.rs`: leitura, escrita atomica e backups da
   memoria.

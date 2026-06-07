@@ -111,4 +111,5 @@ describe('updateLiveDiagnostics', () => {
     expect(diagnostics.lastCloseReason).toBe('timeout');
     expect(diagnostics.lastError).toBe('Tempo esgotado aguardando setup da Gemini Live API.');
   });
+
 });

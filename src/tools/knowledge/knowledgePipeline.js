@@ -6,7 +6,7 @@ import {
   KNOWLEDGE_SCOPES,
   KNOWLEDGE_SUFFICIENCY,
   normalizeNavigationContext,
-} from './webKnowledge';
+} from '../../webKnowledge';
 
 const DEFAULT_MAX_SECTIONS = 4;
 const DEFAULT_MAX_RESULTS = 5;

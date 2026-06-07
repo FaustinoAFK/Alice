@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   executeKnowledgeFunctionCall,
+  isInternalKnowledgeToolName,
   isKnowledgeToolName,
   normalizeKnowledgeToolResponse,
 } from './knowledgeToolExecutor';
@@ -59,6 +60,24 @@ describe('executeKnowledgeFunctionCall', () => {
 
     expect(result.handled).toBe(false);
     expect(result.toolName).toBe('unknown_tool');
+    expect(invokeTool).not.toHaveBeenCalled();
+  });
+
+  it('rejects broad web tools as direct Live tool calls while keeping them internal', async () => {
+    const invokeTool = vi.fn();
+
+    for (const toolName of ['search_same_domain', 'search_web', 'fetch_web_page']) {
+      const result = await executeKnowledgeFunctionCall({
+        functionCall: { name: toolName, args: {} },
+        invokeTool,
+      });
+
+      expect(isKnowledgeToolName(toolName)).toBe(false);
+      expect(isInternalKnowledgeToolName(toolName)).toBe(true);
+      expect(result.handled).toBe(false);
+      expect(result.toolName).toBe(toolName);
+    }
+
     expect(invokeTool).not.toHaveBeenCalled();
   });
 

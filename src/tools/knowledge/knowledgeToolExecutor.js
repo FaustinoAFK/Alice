@@ -3,12 +3,18 @@ import { executeKnowledgeTool } from './knowledgePipeline';
 export const KNOWLEDGE_TOOL_NAMES = [
   'get_navigation_context',
   'inspect_current_page',
+];
+
+export const INTERNAL_KNOWLEDGE_TOOL_NAMES = [
+  ...KNOWLEDGE_TOOL_NAMES,
   'search_same_domain',
   'search_web',
   'fetch_web_page',
 ];
 
 export const isKnowledgeToolName = (toolName) => KNOWLEDGE_TOOL_NAMES.includes(toolName);
+export const isInternalKnowledgeToolName = (toolName) =>
+  INTERNAL_KNOWLEDGE_TOOL_NAMES.includes(toolName);
 
 export const normalizeKnowledgeToolResponse = (toolName, nativeResponse) => {
   const artifacts = nativeResponse?.artifacts || {};

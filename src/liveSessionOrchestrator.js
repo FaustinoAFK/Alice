@@ -1,7 +1,11 @@
-import { LIVE_CLOSE_REASONS } from './geminiLive';
+﻿import { LIVE_CLOSE_REASONS } from './geminiLive';
 
 export const GO_AWAY_RENEW_BUFFER_MS = 5000;
 export const MAX_SETUP_TIMEOUT_RETRIES = 1;
+export const DEFAULT_RECONNECT_BASE_DELAY_MS = 1000;
+export const DEFAULT_RECONNECT_MAX_DELAY_MS = 30000;
+export const DEFAULT_RECONNECT_MAX_ATTEMPTS = 10;
+export const DEFAULT_RECONNECT_JITTER_FACTOR = 0.3;
 const timerHost = globalThis.window || globalThis;
 
 export const parseDurationToMs = (durationText) => {
@@ -28,6 +32,10 @@ export class LiveSessionOrchestrator {
     onSessionResumptionUpdate = () => {},
     goAwayRenewBufferMs = GO_AWAY_RENEW_BUFFER_MS,
     maxSetupTimeoutRetries = MAX_SETUP_TIMEOUT_RETRIES,
+    reconnectBaseDelayMs = DEFAULT_RECONNECT_BASE_DELAY_MS,
+    reconnectMaxDelayMs = DEFAULT_RECONNECT_MAX_DELAY_MS,
+    reconnectMaxAttempts = DEFAULT_RECONNECT_MAX_ATTEMPTS,
+    reconnectJitterFactor = DEFAULT_RECONNECT_JITTER_FACTOR,
   }) {
     this.buildSetup = buildSetup;
     this.createSession = createSession;
@@ -42,6 +50,13 @@ export class LiveSessionOrchestrator {
     this.onSessionResumptionUpdate = onSessionResumptionUpdate;
     this.goAwayRenewBufferMs = goAwayRenewBufferMs;
     this.maxSetupTimeoutRetries = maxSetupTimeoutRetries;
+    this.reconnectBaseDelayMs = reconnectBaseDelayMs;
+    this.reconnectMaxDelayMs = reconnectMaxDelayMs;
+    this.reconnectMaxAttempts = reconnectMaxAttempts;
+    this.reconnectJitterFactor = reconnectJitterFactor;
+
+    this.reconnectAttempt = 0;
+    this.lastSuccessfulConnectionAt = 0;
 
     this.currentSession = null;
     this.resumptionHandle = '';
@@ -68,6 +83,7 @@ export class LiveSessionOrchestrator {
   async startLiveSession() {
     this.clearReconnectTimer();
     this.manualStopRequested = false;
+    this.reconnectAttempt = 0;
     this.lifecycleToken += 1;
     return this.connectWithRecovery('fresh', this.lifecycleToken, true);
   }
@@ -170,11 +186,38 @@ export class LiveSessionOrchestrator {
       return this.reconnectPromise;
     }
 
+    // Increment attempt counter for this reconnection cycle
+    this.reconnectAttempt += 1;
+
+    // Apply exponential backoff with jitter before attempting reconnect
+    if (this.reconnectAttempt > 1) {
+      const backoffMs = this.calculateBackoffDelay(this.reconnectAttempt - 1);
+      await this.sleep(backoffMs);
+    }
+
     this.reconnectPromise = this.performReconnect(primaryMode, allowFallback).finally(() => {
       this.reconnectPromise = null;
     });
 
     return this.reconnectPromise;
+  }
+
+  calculateBackoffDelay(attempt) {
+    const baseDelay = this.reconnectBaseDelayMs;
+    const maxDelay = this.reconnectMaxDelayMs;
+    const jitterFactor = this.reconnectJitterFactor;
+
+    // Exponential backoff: baseDelay * 2^(attempt-1)
+    const exponentialDelay = Math.min(baseDelay * Math.pow(2, attempt - 1), maxDelay);
+
+    // Add jitter: ±jitterFactor * exponentialDelay
+    const jitter = exponentialDelay * jitterFactor * (Math.random() * 2 - 1);
+
+    return Math.max(0, Math.round(exponentialDelay + jitter));
+  }
+
+  sleep(ms) {
+    return new Promise((resolve) => timerHost.setTimeout(resolve, ms));
   }
 
   async performReconnect(primaryMode, allowFallback) {
@@ -205,7 +248,13 @@ export class LiveSessionOrchestrator {
 
   async connectWithRecovery(mode, token, allowFallback, attempt = 0) {
     try {
-      return await this.connectWithMode(mode, token);
+      const session = await this.connectWithMode(mode, token);
+
+      // Reset reconnect attempt counter on successful connection
+      this.reconnectAttempt = 0;
+      this.lastSuccessfulConnectionAt = Date.now();
+
+      return session;
     } catch (error) {
       if (this.shouldRetrySetupTimeout(error, attempt)) {
         return this.connectWithRecovery(mode, token, allowFallback, attempt + 1);
@@ -213,6 +262,13 @@ export class LiveSessionOrchestrator {
 
       if (this.getErrorCloseReason(error) === LIVE_CLOSE_REASONS.resumptionRejected) {
         this.resumptionHandle = '';
+      }
+
+      // Check if we've exceeded max reconnect attempts
+      if (this.reconnectAttempt >= this.reconnectMaxAttempts) {
+        this.onError(new Error('Max reconnect attempts () reached'));
+        this.onStatus('error');
+        throw error;
       }
 
       if (allowFallback && mode !== 'rehydrate' && !this.manualStopRequested) {

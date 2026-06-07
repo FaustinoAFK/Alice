@@ -32,7 +32,7 @@ import {
   createEmptyKnowledgeState,
   mergeKnowledgeState,
 } from './webKnowledge';
-import { executeKnowledgeFunctionCall } from './knowledgeToolExecutor';
+import { executeKnowledgeFunctionCall } from './tools/knowledge/knowledgeToolExecutor';
 import { AliceHud } from './hud/AliceHud';
 import { isTauriRuntime } from './tauriRuntime';
 import {

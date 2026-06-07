@@ -80,6 +80,8 @@ que memoria legada e podada.
   reduzido; nao use documentos ou nomes antigos como fonte de verdade.
 - Preserve a superficie Live minima: `get_navigation_context` e
   `inspect_current_page`.
+- Mantenha declaracoes, registry, executor e pipeline de tools dentro de
+  `src/tools/`.
 - Nao adicione tool Live, handler em `App.jsx` ou prompt que permita acao ampla
   sem necessidade concreta.
 - Nao enfraqueca validacoes de path, shell, rollback, memoria ou bridge local.
