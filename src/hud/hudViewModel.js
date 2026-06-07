@@ -2,9 +2,6 @@ export const HUD_PAGES = [
   { id: 'live', label: 'Ao vivo', subtitle: 'voz e tela', icon: 'live' },
   { id: 'knowledge', label: 'Conhecimento', subtitle: 'pagina e busca', icon: 'knowledge' },
   { id: 'mind-map', label: 'Mapa', subtitle: 'ideias e relacoes', icon: 'mind-map' },
-  { id: 'autonomy', label: 'Autonomia', subtitle: 'tarefas e VM/workspace', icon: 'autonomy' },
-  { id: 'learning', label: 'Aprendizado', subtitle: 'gaps e reuso', icon: 'autonomy' },
-  { id: 'runner', label: 'Runner', subtitle: 'fila e auditoria', icon: 'autonomy' },
   { id: 'debug', label: 'Debug', subtitle: 'diagnostico', icon: 'debug' },
 ];
 
@@ -99,11 +96,3 @@ export const buildDebugSummaryCards = (debugHud) => [
   ['Ult. erro', debugHud.diagnostics.lastError],
 ];
 
-export const buildAutonomySummaryCards = (debugHud) => [
-  ['Ambiente', debugHud.autonomous.display.vmExecutionMode],
-  ['Tarefas rodando', debugHud.autonomous.runningTasks],
-  ['Pausadas', debugHud.autonomous.pausedTasks],
-  ['Propostas', debugHud.autonomous.pendingProposals],
-  ['Aprovacoes', debugHud.autonomous.pendingApprovals],
-  ['Rollbacks', debugHud.autonomous.rollbacks === '-' ? 0 : debugHud.autonomous.rollbacks.split('\n').length],
-];

@@ -1,28 +1,78 @@
 # Alice Virtual
 
-Aplicativo desktop da Alice usando Gemini Live API para conversa por voz, contexto visual da tela compartilhada e leitura contextual de paginas web via extensao do Edge.
+Aplicativo desktop pessoal da Alice com Gemini Live API, conversa por voz,
+tela compartilhada, memoria local, mapa mental editavel no HUD e leitura de
+paginas web via extensao do Edge.
+
+O projeto e pessoal/local. Ele nao e preparado como produto publico e nao deve
+ganhar superficie automatica ampla sem necessidade real.
+
+## Escopo ativo
+
+- Voz ao vivo pela Gemini Live API.
+- Tela compartilhada enviada ao Live em baixa frequencia.
+- HUD com paginas `Ao vivo`, `Conhecimento`, `Mapa` e `Debug`.
+- Memoria local persistente em arquivo da aplicacao.
+- Mapa mental editavel manualmente no HUD.
+- Extensao Edge/Chrome MV3 para capturar contexto da aba ativa.
+- Bridge local em `127.0.0.1:38947` para receber contexto do navegador.
+- Pipeline interno de conhecimento para inspecionar pagina atual e, quando
+  necessario, buscar/fazer fetch de paginas pelo backend.
+
+## Tools Live expostas ao modelo
+
+O Gemini Live deve receber somente estas function declarations:
+
+- `get_navigation_context`
+- `inspect_current_page`
+
+Busca web ampla, fetch direto de URL, busca no mesmo dominio, edicao automatica
+do mapa mental, comandos de host safety e comandos desktop nao sao tools Live
+expostas nesta versao.
+
+## Removido do runtime ativo
+
+Estas camadas foram retiradas e nao devem voltar sem pedido explicito:
+
+- VM local, VirtualBox/Hyper-V e variaveis `ALICE_LOCAL_VM_*`.
+- Guest Agent Python de VM.
+- Autonomous Runner.
+- Aprendizado autonomo operacional.
+- Learning planner/harnesses.
+- Workspace fallback.
+- Auto-melhoria automatizada.
+- Edicao do mapa mental por tool call do modelo.
+
+Testes podem citar esses nomes apenas como verificacao negativa para impedir
+reintroducao acidental.
 
 ## Como funciona
 
-- `src/App.jsx`: orquestrador da sessao Live, captura de midia, memoria e tool calls.
-- `src/hud/`: shell visual do HUD, componentes, paginas e estado derivado de apresentacao.
-- `src/alice.js`: personalidade, modelo Live e declaracao das ferramentas de conhecimento web.
-- `src/geminiLive.js`: WebSocket da Gemini Live API com audio e frames de tela em `realtimeInput`.
-- `src/liveSessionOrchestrator.js`: ciclo de vida da sessao, retomada e reconexao.
-- `src/knowledgeToolExecutor.js`: adaptador entre tool calls da Gemini, comandos Tauri e o pipeline de conhecimento.
-- `src/knowledgePipeline.js`: decisao de escopo, refresh da pagina, leitura local, expansao por links, busca no dominio e busca web.
-- `src/autonomousLearning/`: implementa no stack real JS/Tauri os conceitos do plano `Alice Autonomous Playground Learning`: TurnContext, BehaviorContext, DecisionEngine, orquestradores, politica, validacao, pesquisa, aprendizado, propostas e auditoria.
-- `src/autonomousLearningToolExecutor.js`: integra as tools autonomas ao fluxo oficial do app, sem criar engine paralela.
-- `src/autonomousLearningLoop.js` e `src/autonomousCapabilityScanner.js`: ciclo leve de aprendizado governado. Ele detecta lacunas, tenta reusar procedures, cria tasks oficiais do Runner, valida evidencias e promove apenas candidates/guarded procedures.
-- `src/autonomousProcedureReuseEngine.js` e `src/autonomousProcedureOptimizer.js`: reuso, composicao simples e otimizacao governada de procedures ja aprendidas. Essas camadas tambem criam tasks do Runner; elas nao executam acoes diretamente.
-- `src/autonomousTaskRunner.js` e `src/autonomousRunner*.js`: executor principal para tarefas longas/multistep com fila, lease, heartbeat, retry, validacao, evidencias fisicas, recovery, HUD e sincronizacao com mapa mental.
-- `src-tauri/src/web_knowledge.rs`: ponte local com a extensao, snapshot da pagina, DuckDuckGo HTML, fetch e extracao de paginas.
-- `src-tauri/src/local_vm.rs`: detecta provedores de VM local real configuraveis, como Hyper-V ou VirtualBox.
-- `src-tauri/src/autonomous_playground.rs`: executor de `local workspace fallback`. Ele usa copias e comandos controlados, mas nao e VM real.
-- `src-tauri/src/host_versioning.rs`: snapshot fisico, diff e rollback de arquivos do PC real dentro dos escopos permitidos.
-- `edge-extension/`: extensao Edge que envia contexto leve e snapshot profundo da aba ativa para o app.
+- `src/App.jsx`: orquestra sessao Live, captura de midia, memoria, HUD e tool
+  calls permitidas.
+- `src/appLiveHelpers.js`: helpers de audio, microfone, PCM e debug Live.
+- `src/alice.js`: monta o setup Gemini Live, modelo e tools ativas.
+- `src/prompts/aliceSystemInstruction.js`: comportamento principal da Alice.
+- `src/geminiLive.js`: WebSocket da Gemini Live API.
+- `src/liveSessionOrchestrator.js`: ciclo de vida, retomada e reconexao.
+- `src/screenFrameStreaming.js`: captura frames da tela para o Live.
+- `src/knowledgePipeline.js`: fluxo interno de conhecimento web.
+- `src/knowledgeToolExecutor.js`: executa apenas tools de conhecimento.
+- `src/aliceMemory.js`: schema e normalizacao da memoria local.
+- `src-tauri/src/alice_memory_store.rs`: leitura, escrita atomica e backups da
+  memoria.
+- `src-tauri/src/gemini_live_access.rs`: cria a URL do Gemini Live a partir do
+  ambiente.
+- `src-tauri/src/web_knowledge.rs`: bridge local da extensao, snapshots da
+  pagina e comandos internos de busca/fetch.
+- `src-tauri/src/web_knowledge_matcher.rs`: selecao de secoes, links e
+  suficiencia do contexto da pagina.
+- `src-tauri/src/host_versioning.rs`: snapshot, diff, checkpoint e rollback
+  nativos. Existe no backend, mas nao e tool Live exposta ao modelo.
+- `edge-extension/`: extensao MV3 do Edge/Chrome.
 
-A chave da Gemini nao aparece na interface. O Tauri usa `GEMINI_API_KEY` ou `GOOGLE_API_KEY` do ambiente para montar a conexao local com a Gemini Live API.
+A chave da Gemini nao fica no codigo. O Tauri usa `GEMINI_API_KEY` ou
+`GOOGLE_API_KEY` do ambiente.
 
 ## Rodar
 
@@ -31,9 +81,11 @@ npm install
 .\start-alice.ps1
 ```
 
-Na janela da Alice, clique em `Iniciar`, escolha a tela ou janela para compartilhar e permita o microfone. Para parar, clique em `Parar`.
+Na janela da Alice, clique em `Iniciar`, escolha a tela ou janela para
+compartilhar e permita o microfone.
 
-Se a variavel `GEMINI_API_KEY` foi criada agora, reinicie o VS Code ou o terminal antes de abrir o app.
+Se a variavel `GEMINI_API_KEY` foi criada agora, reinicie o terminal ou o VS Code
+antes de abrir o app.
 
 ## Extensao Edge
 
@@ -41,178 +93,28 @@ Se a variavel `GEMINI_API_KEY` foi criada agora, reinicie o VS Code ou o termina
 2. Ative o modo de desenvolvedor.
 3. Clique em `Carregar sem compactacao`.
 4. Selecione a pasta `edge-extension`.
-5. Deixe o app Alice aberto para a extensao enviar o contexto para `127.0.0.1:38947`.
+5. Deixe a Alice aberta para a extensao enviar contexto para
+   `127.0.0.1:38947`.
 
-No HUD, use:
-
-- `Ao vivo`: estado da Alice, entrada de voz/tela, conexao com Gemini e resiliencia da sessao.
-- `Conhecimento`: URL atual, escopo escolhido, suficiência, origem final, timeline de investigacao e fontes consultadas.
-- `Autonomia`: tarefas, VM real quando configurada, workspace fallback, validacoes, propostas, riscos, rollbacks e logs auditaveis.
-- `Aprendizado`: gaps detectados, experimentos, tasks criadas, scripts controlados, candidates, procedures guarded/active, reuso e otimizacao.
-- `Debug`: transcricoes, geometria visual, contadores e memoria recente.
-
-## Autonomia, VM real e fallback
-
-O plano de autonomia foi integrado ao stack real JS/Tauri do projeto. Os conceitos oficiais ficam mapeados assim:
-
-- `TurnContext`, `BehaviorContext`, `DecisionEngine`, `centralOrchestrator`, `actionOrchestrator`, hooks e `InternalState` ficam em `src/autonomousLearning/`.
-- A entrada do usuario passa por contexto de turno, contexto comportamental, decisao/policy, orquestracao, execucao, validacao, rollback quando necessario, persistencia e HUD.
-- O estado auditavel e persistido em `aliceMemory.autonomousAudit`, junto da memoria oficial da Alice, para evitar banco paralelo.
-- Fronteira oficial nesta fase: `autonomousLearning` decide, classifica risco, aplica politicas, cria propostas, aprende e aprova procedimentos; o `Autonomous Task Runner` executa tarefas longas ou multistep com lease, heartbeat, retry, validacao, evidencia fisica e recovery.
-- O aprendizado autonomo novo nao executa comandos por conta propria. No startup, apos hidratar memoria e validar que o Runner esta seguro, ele pode criar uma task oficial com `metadata.createdBy = "autonomous_learning_loop"`. Reuso usa `autonomous_procedure_reuse`; otimizacao usa `autonomous_procedure_optimizer`.
-- Nenhum aprendizado vira `active` direto. Experimentos aprovados com `verify_runner_evidence` geram candidate/guarded procedure com refs de evidencia fisica. O HUD deve aprovar/promover/desativar antes de tratar como comportamento consolidado.
-- O `src/autonomousLearning/taskOrchestrator.js` permanece como fluxo legado/simples de autonomia. Ele nao deve concorrer como executor principal de tarefas longas; para esse caso use `manage_autonomous_runner`.
-- Antes de smoke real do Runner, use `npm run runner:harness -- verify-safe-state` e, se a memoria estiver perto/acima de 50 MiB, `npm run runner:harness -- compact-runner-memory`. A compactacao usa backup automatico e preserva evidencias fisicas por padrao.
-
-VM real e workspace fallback sao coisas diferentes:
-
-- VM local real: exige provedor local configurado por `ALICE_LOCAL_VM_PROVIDER` e `ALICE_LOCAL_VM_NAME`.
-- Provedores detectados nesta fase: `hyper_v` e `virtualbox`.
-- Execucao real dentro do guest exige tambem `ALICE_LOCAL_VM_USER`, `ALICE_LOCAL_VM_PASSWORD` e `ALICE_LOCAL_VM_ENABLE_GUEST_RUN=true`.
-- Hyper-V usa PowerShell Direct quando a VM e as credenciais permitem. VirtualBox usa `VBoxManage guestcontrol`, portanto precisa de Guest Additions e credenciais configuradas.
-- Para reduzir latencia visual no VirtualBox, a Alice pode iniciar o Guest Interaction Agent em modo residente (`start_vm_guest_agent_resident`). O host fala com ele por `127.0.0.1:38948` via NAT port-forward nomeado `alice-guest-agent`; se o residente nao responder, o fluxo volta ao `guestcontrol run` tradicional.
-- Se o provedor estiver apenas detectado/configurado, mas sem guest runner pronto, a tarefa fica bloqueada com `configured_not_ready`; ela nao e simulada no host.
-- Workspace local fallback: usa copias em workspace controlado, permite cancelamento por `taskId`, mas nao oferece isolamento forte de VM e nao deve ser tratado como VM real.
-
-Sem provedor configurado, tarefas que exigem VM real sao bloqueadas. Tarefas de baixo/medio risco podem usar o fallback se a politica permitir.
-
-### Configurar Hyper-V
-
-1. Ative Hyper-V no Windows e crie uma VM local.
-2. Garanta que a VM aceite PowerShell Direct com usuario/senha.
-3. Defina as variaveis no terminal antes de iniciar a Alice:
+Teste rapido do bridge:
 
 ```powershell
-$env:ALICE_LOCAL_VM_PROVIDER = "hyper_v"
-$env:ALICE_LOCAL_VM_NAME = "NomeDaSuaVM"
-$env:ALICE_LOCAL_VM_USER = "UsuarioDaVM"
-$env:ALICE_LOCAL_VM_PASSWORD = "SenhaDaVM"
-$env:ALICE_LOCAL_VM_ENABLE_GUEST_RUN = "true"
-.\start-alice.ps1
-```
-
-Estados comuns:
-
-- `not_detected`: Hyper-V/PowerShell nao esta disponivel.
-- `not_configured`: falta `ALICE_LOCAL_VM_PROVIDER` ou `ALICE_LOCAL_VM_NAME`.
-- `configured_not_ready`: VM foi apontada, mas falta credencial, opt-in ou acesso PowerShell Direct.
-- `ready`: diagnostico conseguiu validar guest command.
-
-### Configurar VirtualBox
-
-1. Instale VirtualBox. A Alice procura `VBoxManage` no `PATH`, em `ALICE_VBOXMANAGE_PATH` ou nos caminhos padrao do Windows (`C:\Program Files\Oracle\VirtualBox\VBoxManage.exe`).
-2. Crie uma VM local e instale Guest Additions.
-3. Configure credenciais de usuario do guest.
-4. Defina as variaveis:
-
-```powershell
-$env:ALICE_LOCAL_VM_PROVIDER = "virtualbox"
-$env:ALICE_LOCAL_VM_NAME = "NomeDaSuaVM"
-$env:ALICE_LOCAL_VM_USER = "UsuarioDaVM"
-$env:ALICE_LOCAL_VM_PASSWORD = "SenhaDaVM"
-$env:ALICE_LOCAL_VM_ENABLE_GUEST_RUN = "true"
-# Opcional, se o VirtualBox estiver fora do PATH e fora do caminho padrao:
-$env:ALICE_VBOXMANAGE_PATH = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-.\start-alice.ps1
-```
-
-`ALICE_LOCAL_VM_USERNAME` tambem e aceito como alias de `ALICE_LOCAL_VM_USER`, para compatibilidade com configuracoes locais antigas.
-
-VirtualBox fica `configured_not_ready` se `VBoxManage` nao encontrar a VM, Guest Additions nao aparecerem, credenciais faltarem ou `guestcontrol` falhar.
-
-### Diagnostico e smoke test
-
-A Alice tem tools internas para diagnostico:
-
-- `diagnose_local_vm_setup`: lista provider, status, requisitos faltando, comandos checados, ultimo erro e se e seguro rodar guest tasks.
-- `run_local_vm_smoke_test`: so roda quando a VM real esta pronta. Se nao estiver, retorna `skipped` com motivo claro. Nunca usa workspace fallback fingindo VM.
-
-No HUD em `Autonomia`, veja `Diagnostico VM`, `Smoke test VM`, `Guest command pronto?`, `Precisa configurar?`, provider e capacidades.
-
-### Guest Interaction Layer visual
-
-A camada visual da VM fica separada do executor de comandos:
-
-- `install_vm_guest_agent`: copia o agente visual para dentro da VM real em `C:\AliceGuestAgent`.
-- `diagnose_vm_guest_agent`: executa `get_status` no agente e mostra se ele esta online.
-- `capture_vm_guest_screen`: captura screenshot real dentro da VM e copia a imagem para `%LOCALAPPDATA%\AliceVirtual\vm_visual_replays`.
-- `run_vm_guest_agent_action`: executa acoes visuais governadas como `capture_screen`, `get_active_window`, `move_mouse`, `click`, `double_click`, `right_click`, `type_text`, `press_key`, `hotkey`, `wait`, `run_command`, `start_background_command`, `get_background_command_status`, `cancel_background_command` e `get_status`.
-- `run_vm_visual_smoke_test`: abre Notepad na VM, digita texto, captura screenshot e registra evidencia visual.
-- `run_vm_operational_task`: ferramenta de alto nivel para pedidos praticos na VM, como abrir apps, instalar/baixar via `winget` em background quando seguro, abrir URL, capturar tela e acompanhar/cancelar progresso. Use isso antes de pesquisa quando o pedido for operacional.
-
-Exemplos de pedidos que devem virar acao na VM, nao pesquisa solta:
-
-- "Alice, abra o explorador de arquivos na VM."
-- "Alice, instale o Visual Studio Code na VM."
-- "Alice, baixe o Visual Studio Community na VM e acompanhe o progresso."
-- "Alice, veja o status da instalacao `vm-bg-...`."
-
-Instalacoes grandes retornam um `backgroundTaskId`. Acompanhe com `run_vm_operational_task` usando `taskKind=check_background_task`; nao espere Visual Studio terminar em uma chamada curta.
-
-Instaladores que exigem elevacao/UAC dentro da VM, como Oracle VirtualBox, nao devem ser tratados como background automatico quando o agente nao esta elevado. A Alice marca esses casos como `requiresElevatedInstall` e so executa automaticamente se o Guest Interaction Agent reportar `can_run_elevated_commands`; caso contrario retorna `elevated_agent_required` para evitar falso progresso. Se uma tarefa em background retornar `failed`, `timeout` ou `cancelled`, a consulta de status deve ser registrada como falha operacional, mesmo que a chamada ao agente tenha funcionado.
-
-Requisitos dentro da VM:
-
-```powershell
-# Dentro da AliceVM
-winget install Python.Python.3.12
-py -m pip install pillow
-```
-
-Depois, no host, aponte o executavel Python do guest se `python.exe` nao estiver resolvendo pelo `guestcontrol`:
-
-```powershell
-$env:ALICE_VM_GUEST_PYTHON = "C:\Users\alice\AppData\Local\Programs\Python\Python312\python.exe"
-```
-
-OCR e pluggable: se `pytesseract` nao estiver instalado dentro da VM, o agente continua capturando tela e controlando mouse/teclado, mas marca OCR como indisponivel em vez de fingir leitura textual. Para OCR:
-
-```powershell
-# Dentro da AliceVM, opcional
-py -m pip install pytesseract
-```
-
-Coordenadas sao fallback controlado. Toda acao por coordenada deve registrar motivo, screenshot antes/depois, validacao e replay. Se o agente, Python ou screenshot estiverem indisponiveis, a tarefa visual e bloqueada com erro claro; o workspace fallback nunca substitui controle visual de VM.
-
-### Rollback e conflitos
-
-Para acoes relevantes no PC real, use snapshot fisico antes da escrita. O snapshot registra manifesto, hash, tamanho, data e checkpoints. Antes/depois de uma escrita controlada, a Alice pode registrar `record_host_file_checkpoint` para melhorar a classificacao do rollback.
-
-Classificacoes possiveis:
-
-- `expected_task_change`: a alteracao bate com checkpoint da tarefa.
-- `external_or_unknown_change`: houve mudanca, mas nao ha evidencia suficiente para atribuir.
-- `conflict_before_apply`: o arquivo ja mudou antes da escrita controlada.
-- `conflict_during_apply`: a escrita divergiu durante a janela controlada.
-- `conflict_after_apply_before_rollback`: algo mudou depois da escrita da tarefa e antes do rollback.
-- `unexpected_task_change`: arquivo fora da declaracao esperada mudou.
-
-Quando houver conflito provavel, o rollback preserva uma copia em `conflicts/` dentro do snapshot antes de restaurar. Isso evita apagar evidencia ou alteracao recente sem registro.
-
-## Comandos desktop legados
-
-O fluxo padrao atual da Alice usa apenas ferramentas de conhecimento web. A superficie antiga de comandos desktop/local fica desativada por padrao no runtime Tauri.
-
-Para compilar com esses comandos registrados novamente:
-
-```powershell
-cd src-tauri
-cargo test --features desktop-commands
+Invoke-WebRequest http://127.0.0.1:38947/health -UseBasicParsing
 ```
 
 ## Validar
 
 ```powershell
-npm test
 npm run lint
+npm test
 npm run build
+```
 
+Para backend Rust:
+
+```powershell
 cd src-tauri
 cargo test
-cargo test --features desktop-commands
-
-cd ..
-python -m unittest .\src-tauri\python_sidecar\tests\test_sidecar.py
 ```
 
 Para gerar executavel sem instalador:

@@ -78,51 +78,51 @@ describe('resolveToolProfile', () => {
     expect(resolution.reason).toContain('sem pagina ativa');
   });
 
-  it('returns vm for app or install requests targeting the VM', () => {
+  it('does not route VM requests to removed VM tools', () => {
     const resolution = resolveToolProfile({
       userText: 'Abrir o aplicativo Notepad e instalar ferramenta na VM',
       targetEnvironment: 'vm',
     });
 
     expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('vm');
+    expect(resolution.profile).toBe('conversation');
   });
 
-  it('returns runner for queue, long task or runner requests', () => {
+  it('does not route runner requests to removed runner tools', () => {
     const resolution = resolveToolProfile({
       userText: 'Coloca essa tarefa longa na fila do runner',
     });
 
     expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('runner');
+    expect(resolution.profile).toBe('conversation');
   });
 
-  it('returns selfImprovement for Alice self-improvement requests', () => {
+  it('does not route self-improvement requests to removed self-improvement tools', () => {
     const resolution = resolveToolProfile({
       userText: 'Crie uma proposta de auto-melhoria para o codigo da Alice',
     });
 
     expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('selfImprovement');
+    expect(resolution.profile).toBe('conversation');
   });
 
-  it('returns learningReview for learning candidate or procedure review requests', () => {
+  it('does not route learning review requests to removed learning tools', () => {
     const resolution = resolveToolProfile({
       userText: 'Revise os candidatos de aprendizado e o procedimento sugerido',
     });
 
     expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('learningReview');
+    expect(resolution.profile).toBe('conversation');
   });
 
-  it('returns hostSafety for snapshot, rollback or real PC risk requests', () => {
+  it('does not route host safety requests to removed host safety tools', () => {
     const resolution = resolveToolProfile({
       userText: 'Crie snapshot e plano de rollback por risco no PC real',
       riskLevel: 'high',
     });
-
+    
     expectResolutionShape(resolution);
-    expect(resolution.profile).toBe('hostSafety');
+    expect(resolution.profile).toBe('conversation');
   });
 
   it('returns only profiles that exist in TOOL_CONTEXT_PROFILES', () => {

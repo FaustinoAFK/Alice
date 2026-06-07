@@ -28,7 +28,7 @@ export const hasInvalidWindowsFolderNameCharacters = (value = '') =>
   WINDOWS_INVALID_FOLDER_CHAR_TEST.test(normalizeText(value)) || hasControlCharacter(value);
 
 export const sanitizeFolderName = (input = '', {
-  fallbackName = 'alice-learning-folder',
+  fallbackName = 'alice-folder',
   maxLength = 80,
   replacement = '-',
 } = {}) => {
@@ -38,7 +38,7 @@ export const sanitizeFolderName = (input = '', {
     .replace(WINDOWS_INVALID_FOLDER_CHARS, replacement)
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/[ .]+$/g, '') || 'alice-learning-folder';
+    .replace(/[ .]+$/g, '') || 'alice-folder';
   const boundedMaxLength = Math.max(8, Math.min(Number(maxLength) || 80, 120));
 
   let safeName = originalName;

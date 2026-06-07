@@ -26,7 +26,7 @@ describe('buildSessionRehydrationTurns', () => {
     const turns = buildSessionRehydrationTurns({
       trustedUtterance: { text: 'continuar daqui' },
       outputTranscript: 'Ja estou vendo a tela e ouvindo voce.',
-      memorySummary: 'Usuario quer continuar o plano da VM.',
+      memorySummary: 'Usuario quer continuar o plano da memoria.',
       knowledgeState: {
         navigationContext: {
           title: 'Docs',
@@ -34,31 +34,13 @@ describe('buildSessionRehydrationTurns', () => {
         },
         lastKnowledgeQuestion: 'onde esta o login?',
       },
-      autonomousLearningState: {
-        improvementProposals: [{ status: 'pending_approval' }],
-      },
-      autonomousLearningMemoryState: {
-        learningGoals: [{ description: 'Aprender fluxo de login' }],
-        knownGaps: [{ title: 'Gap de autenticacao' }],
-        recentExperiments: [{ summary: 'Teste visual aprovado' }],
-        procedureCandidates: [{ candidateId: 'candidate-1' }],
-      },
-      autonomousRunnerSummary: {
-        runnerState: 'running',
-        queueSize: 2,
-        readyCount: 1,
-        blockedCount: 0,
-        failedCount: 0,
-        activeTaskStatus: 'running',
-        activeTask: { title: 'Validar fluxo VM' },
-      },
       activeMindMap: {
         nodes: [
           { id: 'root', data: { label: 'Minha Ideia Central' } },
           { id: 'login', data: { label: 'Login' } },
-          { id: 'vm', data: { label: 'VM' } },
+          { id: 'memoria', data: { label: 'Memoria' } },
         ],
-        edges: [{ source: 'login', target: 'vm' }],
+        edges: [{ source: 'login', target: 'memoria' }],
       },
     });
 
@@ -74,10 +56,10 @@ describe('buildSessionRehydrationTurns', () => {
     ]);
     expect(turns[0].parts[0].text).toContain('Nao reative objetivos antigos nem projetos antigos');
     expect(turns[0].parts[0].text).toContain('Ultima fala do usuario: continuar daqui');
-    expect(turns[0].parts[0].text).toContain('Resumo persistido: Usuario quer continuar o plano da VM.');
-    expect(turns[0].parts[0].text).toContain('Runner: estado=running fila=2');
-    expect(turns[0].parts[0].text).toContain('Aprendizado: objetivos=1 gaps=1 experimentos=1 candidatos=1 propostas=1');
+    expect(turns[0].parts[0].text).toContain('Resumo persistido: Usuario quer continuar o plano da memoria.');
+    expect(turns[0].parts[0].text).not.toContain('Runner:');
+    expect(turns[0].parts[0].text).not.toContain('Aprendizado:');
     expect(turns[0].parts[0].text).toContain('Mapa mental ativo: topicos=3 conexoes=1');
-    expect(turns[0].parts[0].text).toContain('Relacoes do mapa: Login -> VM');
+    expect(turns[0].parts[0].text).toContain('Relacoes do mapa: Login -> Memoria');
   });
 });

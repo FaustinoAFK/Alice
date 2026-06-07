@@ -131,7 +131,6 @@ export function DebugHudPage({ debugHud }) {
                 ['Perto do limite', debugHud.persistence?.memoryNearLimit ? 'sim' : 'nao'],
                 ['Ult. save memoria', debugHud.persistence?.lastMemorySaveAt || '-'],
                 ['Erro memoria', debugHud.persistence?.lastMemorySaveError || '-'],
-                ['Erro evidencia', debugHud.persistence?.lastRunnerEvidenceError || '-'],
                 ['Ult. erro', debugHud.persistence?.lastError || '-'],
               ]}
             />

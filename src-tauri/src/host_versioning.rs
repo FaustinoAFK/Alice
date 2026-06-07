@@ -154,7 +154,7 @@ fn snapshot_root(app: &tauri::AppHandle, snapshot_id: &str) -> Result<PathBuf, S
         .app_data_dir()
         .map_err(|error| format!("Falha ao localizar app data da Alice: {error}"))?;
     Ok(app_data_dir
-        .join("autonomous-playground")
+        .join("host-versioning")
         .join("host-snapshots")
         .join(sanitize_path_segment(snapshot_id)))
 }

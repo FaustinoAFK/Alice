@@ -6,15 +6,6 @@ import { createStarterMindMap } from './mindMap/utils/mindMapData';
 const buildProps = (overrides = {}) => ({
   activeHudPage: 'mind-map',
   activeMindMap: createStarterMindMap(),
-  autonomousLearningState: {},
-  autonomousRunnerState: {
-    enabled: false,
-    runnerState: 'idle',
-    queue: [],
-    tasksById: {},
-    audits: [],
-    evidenceRefs: [],
-  },
   caption: '',
   debugHud: {},
   diagnostics: {},
@@ -23,11 +14,8 @@ const buildProps = (overrides = {}) => ({
   isBusy: false,
   isLive: false,
   mindMapRevision: 0,
-  onApproveProposal: vi.fn(),
   onMindMapChange: vi.fn(),
   onNavigate: vi.fn(),
-  onRejectProposal: vi.fn(),
-  onRunnerAction: vi.fn(),
   onToggleLiveSession: vi.fn(),
   onToggleSidebar: vi.fn(),
   sessionNotice: '',
@@ -42,9 +30,6 @@ describe('AliceHud lazy loading', () => {
     const modules = await Promise.all([
       import('./pages/KnowledgeHudPage'),
       import('./pages/MindMapHudPage'),
-      import('./pages/AutonomyHudPage'),
-      import('./pages/AutonomousLearningHudPage'),
-      import('./pages/AutonomousRunnerHudPage'),
       import('./pages/DebugHudPage'),
     ]);
 
@@ -65,15 +50,11 @@ describe('AliceHud lazy loading', () => {
     expect(html).toContain('Carregando mapa mental');
   });
 
-  it('renders the learning tab with a suspense fallback instead of eagerly loading the page', () => {
-    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'learning' })} />);
+  it('does not render removed autonomy, learning or runner pages', () => {
+    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'runner' })} />);
 
-    expect(html).toContain('Carregando aprendizado autonomo');
-  });
-
-  it('renders the runner tab with a suspense fallback instead of loading the audit page eagerly', () => {
-    const html = renderToString(<AliceHud {...buildProps({ activeHudPage: 'runner', debugHud: { runner: {} } })} />);
-
-    expect(html).toContain('Carregando runner autonomo');
+    expect(html).not.toContain('Carregando runner autonomo');
+    expect(html).not.toContain('Carregando aprendizado autonomo');
+    expect(html).not.toContain('Carregando autonomia');
   });
 });

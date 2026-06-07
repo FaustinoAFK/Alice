@@ -45,57 +45,6 @@ describe('buildDebugHudSnapshot', () => {
         lastVideoSourceHeight: 1080,
       },
       memorySummary: 'Usuario: continuar daqui | Alice: Certo.',
-      autonomousLearningState: {
-        autonomousLearningActive: true,
-        vm: {
-          status: 'active',
-          costMode: 'learning_light',
-        },
-        tasks: [
-          {
-            taskId: 'task-1',
-            status: 'paused',
-            priority: 'background_learning',
-            policyDecision: { reason: 'user_request_prioritized' },
-          },
-        ],
-        improvementProposals: [
-          {
-            proposalId: 'proposal-1',
-            status: 'pending_approval',
-            riskLevel: 'medium',
-            title: 'Melhorar teste',
-          },
-        ],
-        pendingApprovals: [{ approvalId: 'approval-1' }],
-        procedures: [{ procedureId: 'procedure-1', status: 'active' }],
-        risks: [{ reason: 'resultado divergiu' }],
-        rollbacks: [{ rollbackId: 'rollback-1', status: 'done', reason: 'resultado divergiu' }],
-        logs: [{ type: 'user_request_prioritized', reason: 'pausou background' }],
-      },
-      autonomousRunnerState: {
-        enabled: true,
-        runnerState: 'running',
-        activeTaskId: 'runner-task-1',
-        runnerLock: {
-          activeTaskId: 'runner-task-1',
-          activeStepId: 'step-1',
-          leaseId: 'lease-1',
-          heartbeatAt: '2026-04-28T10:00:00.000Z',
-        },
-        queue: ['runner-task-1'],
-        tasksById: {
-          'runner-task-1': {
-            id: 'runner-task-1',
-            title: 'Rodar testes',
-            status: 'running',
-            priority: 'high',
-            queueRank: 0,
-          },
-        },
-        audits: [{ timestamp: '2026-04-28T10:00:00.000Z', type: 'lease_acquired', taskId: 'runner-task-1', summary: 'ok' }],
-        evidenceRefs: [{ kind: 'metadata', taskId: 'runner-task-1', path: 'data/evidence/x/metadata.json' }],
-      },
       persistenceDiagnostics: {
         sizeBytes: 120000,
         maxBytes: 52428800,
@@ -104,9 +53,7 @@ describe('buildDebugHudSnapshot', () => {
         status: 'ok',
         lastMemorySaveAt: '2026-04-28T10:00:00.000Z',
         lastMemorySaveError: '',
-        lastRunnerEvidenceError: 'disk full',
-        lastRunnerEvidenceErrorAt: '2026-04-28T10:01:00.000Z',
-        lastError: 'disk full',
+        lastError: '',
       },
       knowledgeState: {
         navigationContext: {
@@ -150,12 +97,12 @@ describe('buildDebugHudSnapshot', () => {
           kind: 'tool',
           timestamp: 21000,
           status: 'failed',
-          toolName: 'run_vm_operational_task',
+          toolName: 'inspect_current_page',
           operation: 'open_app',
           ok: false,
           userText: 'abra o bloco de notas',
           message: 'Agente indisponivel.',
-          reason: 'guest_agent_not_ready',
+          reason: 'tool_failed',
         },
       ],
     });
@@ -188,25 +135,20 @@ describe('buildDebugHudSnapshot', () => {
     expect(snapshot.knowledge.display.refreshMode).toBe('captura em tempo real');
     expect(snapshot.knowledge.display.fallbackReason).toBe('usou snapshot recente apos timeout');
     expect(snapshot.knowledge.display.expansionSteps).toEqual(['leitura da pagina', 'busca no mesmo site']);
-    expect(snapshot.autonomous.vmStatus).toBe('active');
-    expect(snapshot.autonomous.pausedTasks).toBe(1);
-    expect(snapshot.autonomous.pendingProposals).toBe(1);
-    expect(snapshot.autonomous.validatedProcedures).toBe(1);
-    expect(snapshot.autonomous.display.rollbacks).toContain('rollback-1');
-    expect(snapshot.runner.enabled).toBe(true);
-    expect(snapshot.runner.runningCount).toBe(1);
-    expect(snapshot.runner.audits).toContain('lease_acquired');
+    expect(snapshot).not.toHaveProperty('autonomous');
+    expect(snapshot).not.toHaveProperty('runner');
+    expect(snapshot).not.toHaveProperty('learningLoop');
     expect(snapshot.persistence.memorySizeBytes).toBe(120000);
     expect(snapshot.persistence.memoryStatus).toBe('ok');
-    expect(snapshot.persistence.lastRunnerEvidenceError).toBe('disk full');
-    expect(snapshot.persistence.lastError).toBe('disk full');
+    expect(snapshot.persistence).not.toHaveProperty('lastRunnerEvidenceError');
+    expect(snapshot.persistence.lastError).toBe('-');
     expect(snapshot.interactions).toHaveLength(2);
     expect(snapshot.interactions[0]).toMatchObject({
       id: 'tool-1',
       kind: 'tool',
-      toolName: 'run_vm_operational_task',
+      toolName: 'inspect_current_page',
       ok: false,
-      reason: 'guest_agent_not_ready',
+      reason: 'tool_failed',
     });
     expect(snapshot.interactions[1]).toMatchObject({
       id: 'turn-1',
@@ -216,29 +158,4 @@ describe('buildDebugHudSnapshot', () => {
     });
   });
 
-  it('caps long runner lists so the HUD stays responsive', () => {
-    const tasksById = Object.fromEntries(Array.from({ length: 120 }, (_, index) => [
-      `task-${index}`,
-      {
-        id: `task-${index}`,
-        title: `Task ${index}`,
-        status: 'done',
-        priority: 'medium',
-        queueRank: index,
-      },
-    ]));
-    const snapshot = buildDebugHudSnapshot({
-      autonomousRunnerState: {
-        enabled: true,
-        queue: Object.keys(tasksById),
-        tasksById,
-        audits: [],
-        evidenceRefs: [],
-      },
-    });
-
-    expect(snapshot.runner.tasks).toContain('item(ns) ocultos');
-    expect(snapshot.runner.tasks).not.toContain('task-0 |');
-    expect(snapshot.runner.tasks).toContain('task-119 |');
-  });
 });

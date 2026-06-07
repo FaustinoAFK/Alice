@@ -34,51 +34,6 @@ const getContextText = (context) =>
     .filter(Boolean)
     .join(' ');
 
-const HOST_SAFETY_PATTERNS = [
-  /\bsnapshot\b/,
-  /\brollback\b/,
-  /\bcheckpoint\b/,
-  /\brisco\b.*\b(pc real|host|maquina real)\b/,
-  /\bpc real\b.*\b(risco|snapshot|rollback|checkpoint)\b/,
-];
-
-const SELF_IMPROVEMENT_PATTERNS = [
-  /\bauto[- ]?melhoria\b/,
-  /\bself[- ]?improvement\b/,
-  /\bmelhorar\b.*\balice\b/,
-  /\bcodigo da alice\b/,
-  /\bproposta\b.*\balice\b/,
-];
-
-const LEARNING_PATTERNS = [
-  /\baprendizado\b/,
-  /\blearning\b/,
-  /\bcandidato\b/,
-  /\bcandidatos\b/,
-  /\bprocedimento\b/,
-  /\brevisao\b.*\b(aprendizado|learning|procedimento)\b/,
-];
-
-const RUNNER_PATTERNS = [
-  /\brunner\b/,
-  /\bfila\b/,
-  /\btarefa longa\b/,
-  /\btask runner\b/,
-  /\benfileir/,
-  /\bpausar\b.*\btarefa\b/,
-  /\bcancelar\b.*\bfila\b/,
-];
-
-const VM_PATTERNS = [
-  /\bvm\b/,
-  /\bmaquina virtual\b/,
-  /\bvirtualbox\b/,
-  /\bhyper-v\b/,
-  /\bguest agent\b/,
-  /\babrir\b.*\b(app|aplicativo|programa)\b.*\b(vm|maquina virtual)\b/,
-  /\binstalar\b.*\b(vm|maquina virtual)\b/,
-];
-
 const WEB_PAGE_PATTERNS = [
   /\bessa pagina\b/,
   /\bnesta pagina\b/,
@@ -126,49 +81,6 @@ export const resolveToolProfile = (context = {}) => {
       FALLBACK_PROFILE,
       'Contexto vazio; usando full por seguranca.',
       0.3,
-    );
-  }
-
-  if (includesAny(text, HOST_SAFETY_PATTERNS)) {
-    return makeResolution(
-      'hostSafety',
-      'Pedido menciona snapshot, rollback, checkpoint ou risco no PC real.',
-      0.9,
-    );
-  }
-
-  if (includesAny(text, SELF_IMPROVEMENT_PATTERNS)) {
-    return makeResolution(
-      'selfImprovement',
-      'Pedido menciona auto-melhoria ou codigo da Alice.',
-      0.86,
-    );
-  }
-
-  if (includesAny(text, LEARNING_PATTERNS)) {
-    return makeResolution(
-      'learningReview',
-      'Pedido menciona aprendizado, candidatos, revisao ou procedimentos.',
-      0.84,
-    );
-  }
-
-  if (includesAny(text, RUNNER_PATTERNS)) {
-    return makeResolution(
-      'runner',
-      'Pedido menciona fila, tarefa longa ou Runner.',
-      0.84,
-    );
-  }
-
-  if (
-    normalizeText(safeContext.targetEnvironment) === 'vm' ||
-    includesAny(text, VM_PATTERNS)
-  ) {
-    return makeResolution(
-      'vm',
-      'Pedido menciona VM, maquina virtual ou operacao dentro da VM.',
-      0.86,
     );
   }
 

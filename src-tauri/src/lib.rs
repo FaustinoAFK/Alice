@@ -11,39 +11,20 @@ use std::time::Duration;
 use tauri::Manager;
 use wait_timeout::ChildExt;
 
-mod autonomous_playground;
+mod alice_memory_store;
+mod gemini_live_access;
 mod host_versioning;
 #[cfg(any(test, feature = "desktop-commands"))]
 mod legacy_desktop_commands;
-mod local_vm;
 mod python_sidecar;
-mod vm_visual;
 mod web_knowledge;
+mod web_knowledge_matcher;
 
-const GEMINI_LIVE_WS_ENDPOINT: &str =
-    "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
 const MAX_TARGET_CHARS: usize = 120;
 const MAX_TYPE_TEXT_CHARS: usize = 10_000;
-const MAX_MEMORY_JSON_BYTES: usize = 52_428_800;
-const MAX_RUNNER_EVIDENCE_TEXT_BYTES: usize = 1_048_576;
-const ALICE_MEMORY_FILE_NAME: &str = "alice-memory.json";
-const ALICE_MEMORY_BACKUP_COUNT: usize = 3;
 const MAX_SHELL_OUTPUT_CHARS: usize = 12_000;
 const DEFAULT_SHELL_TIMEOUT_MS: u64 = 10_000;
 const MAX_SHELL_TIMEOUT_MS: u64 = 600_000;
-const RUNNER_EVIDENCE_FILE_NAMES: [&str; 4] = [
-    "metadata.json",
-    "stdout.txt",
-    "stderr.txt",
-    "validation.json",
-];
-const DEV_RUNTIME_REQUEST_DIR: &str = "dev-runtime-requests";
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GeminiLiveAccess {
-    url: String,
-}
 
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -98,23 +79,6 @@ pub struct NativeCommandResult {
     stdout: Option<String>,
     stderr: Option<String>,
     artifacts: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerEvidencePersistRequest {
-    execution_id: String,
-    stdout: Option<String>,
-    stderr: Option<String>,
-    validation: Option<Value>,
-    metadata: Option<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RunnerEvidenceVerifyRequest {
-    execution_id: String,
-    files: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -257,181 +221,6 @@ pub enum ShellAction {
         timeout_ms: Option<u64>,
         env: Option<HashMap<String, String>>,
     },
-}
-
-fn gemini_api_key_from_env() -> Result<String, String> {
-    std::env::var("GEMINI_API_KEY")
-        .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-        .map_err(|_| {
-            "GEMINI_API_KEY nao encontrada nas variaveis de ambiente. Reinicie o VS Code/terminal depois de criar a variavel.".to_string()
-        })
-}
-
-fn validate_memory_json_payload(json: &str) -> Result<(), String> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() {
-        return Err("Memoria da Alice nao pode ser vazia.".to_string());
-    }
-
-    if trimmed.len() > MAX_MEMORY_JSON_BYTES {
-        return Err(format!(
-            "Memoria da Alice excede o limite de {} bytes.",
-            MAX_MEMORY_JSON_BYTES
-        ));
-    }
-
-    Ok(())
-}
-
-fn resolve_alice_memory_path(base_dir: &std::path::Path) -> PathBuf {
-    base_dir.join(ALICE_MEMORY_FILE_NAME)
-}
-
-fn resolve_alice_memory_backup_path(path: &Path, index: usize) -> PathBuf {
-    path.with_file_name(format!("alice-memory.backup-{index}.json"))
-}
-
-fn read_memory_backup_json(path: &Path) -> Result<Option<String>, String> {
-    for index in 1..=ALICE_MEMORY_BACKUP_COUNT {
-        let backup_path = resolve_alice_memory_backup_path(path, index);
-        match fs::read_to_string(&backup_path) {
-            Ok(json) => return Ok(Some(json)),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "Falha ao ler backup da memoria local da Alice em {}: {error}",
-                    backup_path.display()
-                ));
-            }
-        }
-    }
-
-    Ok(None)
-}
-
-fn read_memory_json(path: &std::path::Path) -> Result<Option<String>, String> {
-    match fs::read_to_string(path) {
-        Ok(json) => Ok(Some(json)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => read_memory_backup_json(path),
-        Err(error) => Err(format!(
-            "Falha ao ler a memoria local da Alice em {}: {error}",
-            path.display()
-        )),
-    }
-}
-
-fn rotate_memory_backups(path: &Path) -> Result<(), String> {
-    let oldest_backup = resolve_alice_memory_backup_path(path, ALICE_MEMORY_BACKUP_COUNT);
-    if oldest_backup.exists() {
-        fs::remove_file(&oldest_backup).map_err(|error| {
-            format!(
-                "Falha ao remover backup antigo da memoria local da Alice em {}: {error}",
-                oldest_backup.display()
-            )
-        })?;
-    }
-
-    for index in (1..ALICE_MEMORY_BACKUP_COUNT).rev() {
-        let from = resolve_alice_memory_backup_path(path, index);
-        let to = resolve_alice_memory_backup_path(path, index + 1);
-        if from.exists() {
-            fs::rename(&from, &to).map_err(|error| {
-                format!(
-                    "Falha ao rotacionar backup da memoria local da Alice de {} para {}: {error}",
-                    from.display(),
-                    to.display()
-                )
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-fn preserve_current_memory_backup(path: &Path) -> Result<Option<PathBuf>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    rotate_memory_backups(path)?;
-    let backup_path = resolve_alice_memory_backup_path(path, 1);
-    fs::copy(path, &backup_path).map_err(|error| {
-        format!(
-            "Falha ao criar backup da memoria local da Alice em {}: {error}",
-            backup_path.display()
-        )
-    })?;
-
-    Ok(Some(backup_path))
-}
-
-fn write_memory_json_atomic(path: &std::path::Path, json: &str) -> Result<(), String> {
-    validate_memory_json_payload(json)?;
-
-    let parent_dir = path.parent().ok_or_else(|| {
-        format!(
-            "Nao consegui resolver a pasta da memoria local da Alice em {}.",
-            path.display()
-        )
-    })?;
-    fs::create_dir_all(parent_dir).map_err(|error| {
-        format!(
-            "Falha ao criar a pasta da memoria local da Alice em {}: {error}",
-            parent_dir.display()
-        )
-    })?;
-
-    let temp_path = path.with_extension("json.tmp");
-    let mut temp_file = File::create(&temp_path).map_err(|error| {
-        format!(
-            "Falha ao criar arquivo temporario da memoria local da Alice em {}: {error}",
-            temp_path.display()
-        )
-    })?;
-    temp_file.write_all(json.as_bytes()).map_err(|error| {
-        format!(
-            "Falha ao gravar o arquivo temporario da memoria local da Alice em {}: {error}",
-            temp_path.display()
-        )
-    })?;
-    temp_file.sync_all().map_err(|error| {
-        format!(
-            "Falha ao sincronizar o arquivo temporario da memoria local da Alice em {}: {error}",
-            temp_path.display()
-        )
-    })?;
-    drop(temp_file);
-
-    let last_good_backup = preserve_current_memory_backup(path)?;
-
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| {
-            format!(
-                "Falha ao substituir a memoria local da Alice em {}: {error}",
-                path.display()
-            )
-        })?;
-    }
-
-    fs::rename(&temp_path, path).map_err(|error| {
-        if let Some(backup_path) = &last_good_backup {
-            let _ = fs::copy(backup_path, path);
-        }
-        let _ = fs::remove_file(&temp_path);
-        format!(
-            "Falha ao concluir a gravacao atomica da memoria local da Alice em {}: {error}",
-            path.display()
-        )
-    })?;
-
-    Ok(())
-}
-
-fn build_gemini_live_url(api_key: &str) -> String {
-    format!(
-        "{GEMINI_LIVE_WS_ENDPOINT}?key={}",
-        urlencoding::encode(api_key)
-    )
 }
 
 fn validate_app(app: &str) -> Result<(), String> {
@@ -2095,19 +1884,14 @@ pub(crate) fn perform_local_action(action: &LocalAction) -> Result<NativeCommand
 }
 
 #[tauri::command]
-fn create_gemini_live_url() -> Result<GeminiLiveAccess, String> {
-    Ok(GeminiLiveAccess {
-        url: build_gemini_live_url(&gemini_api_key_from_env()?),
-    })
-}
-
-#[tauri::command]
 fn load_alice_memory_json(app: tauri::AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = app
         .path()
         .app_data_dir()
         .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    read_memory_json(&resolve_alice_memory_path(&app_data_dir))
+    alice_memory_store::read_memory_json(&alice_memory_store::resolve_alice_memory_path(
+        &app_data_dir,
+    ))
 }
 
 #[tauri::command]
@@ -2116,319 +1900,10 @@ fn save_alice_memory_json(app: tauri::AppHandle, json: String) -> Result<(), Str
         .path()
         .app_data_dir()
         .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    write_memory_json_atomic(&resolve_alice_memory_path(&app_data_dir), &json)
-}
-
-fn dev_runtime_request_dir(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join(DEV_RUNTIME_REQUEST_DIR)
-}
-
-fn sanitize_dev_runtime_request_id(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "runtime-request".to_string()
-    } else {
-        trimmed.chars().take(96).collect()
-    }
-}
-
-#[tauri::command]
-fn load_dev_runtime_requests(app: tauri::AppHandle) -> Result<Vec<Value>, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    let request_dir = dev_runtime_request_dir(&app_data_dir);
-    if !request_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut requests = Vec::new();
-    for entry in fs::read_dir(&request_dir)
-        .map_err(|error| format!("Falha ao listar pedidos dev de runtime: {error}"))?
-    {
-        let entry =
-            entry.map_err(|error| format!("Falha ao ler pedido dev de runtime: {error}"))?;
-        let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-            continue;
-        }
-        let metadata = fs::metadata(&path)
-            .map_err(|error| format!("Falha ao ler metadata do pedido dev de runtime: {error}"))?;
-        if !metadata.is_file() || metadata.len() > 32_768 {
-            continue;
-        }
-        let raw = fs::read_to_string(&path)
-            .map_err(|error| format!("Falha ao ler arquivo de pedido dev de runtime: {error}"))?;
-        if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-            requests.push(value);
-        }
-    }
-
-    Ok(requests)
-}
-
-#[tauri::command]
-fn clear_dev_runtime_request(app: tauri::AppHandle, request_id: String) -> Result<(), String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    let request_dir = dev_runtime_request_dir(&app_data_dir);
-    let request_file = request_dir.join(format!(
-        "{}.json",
-        sanitize_dev_runtime_request_id(&request_id)
-    ));
-    if !request_file.starts_with(&request_dir) {
-        return Err("Pedido dev de runtime saiu da pasta permitida.".to_string());
-    }
-    match fs::remove_file(&request_file) {
-        Ok(_) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Falha ao limpar pedido dev de runtime: {error}")),
-    }
-}
-
-fn sanitize_runner_evidence_segment(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' || ch == '.' {
-                ch
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let trimmed = sanitized.trim_matches('-');
-    if trimmed.is_empty() {
-        "runner-evidence".to_string()
-    } else {
-        trimmed.chars().take(120).collect()
-    }
-}
-
-fn bounded_runner_evidence_text(value: Option<String>) -> String {
-    let text = value.unwrap_or_default();
-    if text.len() <= MAX_RUNNER_EVIDENCE_TEXT_BYTES {
-        return text;
-    }
-    text.chars().take(MAX_RUNNER_EVIDENCE_TEXT_BYTES).collect()
-}
-
-fn normalize_runner_evidence_file_names(files: Option<Vec<String>>) -> Result<Vec<String>, String> {
-    let source = files.unwrap_or_else(|| {
-        RUNNER_EVIDENCE_FILE_NAMES
-            .iter()
-            .map(|name| name.to_string())
-            .collect()
-    });
-    let mut normalized = Vec::new();
-
-    for raw_file in source {
-        let file = raw_file.trim();
-        if file.is_empty()
-            || file.contains('/')
-            || file.contains('\\')
-            || file == "."
-            || file == ".."
-            || !RUNNER_EVIDENCE_FILE_NAMES.contains(&file)
-        {
-            return Err(format!(
-                "Arquivo de evidencia do Runner nao permitido: {raw_file}"
-            ));
-        }
-        if !normalized.iter().any(|existing| existing == file) {
-            normalized.push(file.to_string());
-        }
-    }
-
-    if normalized.is_empty() {
-        return Err("Nenhum arquivo de evidencia do Runner foi informado.".to_string());
-    }
-
-    Ok(normalized)
-}
-
-fn runner_evidence_root(app_data_dir: &Path) -> PathBuf {
-    app_data_dir.join("data").join("evidence")
-}
-
-fn verify_runner_evidence_in_dir(
-    app_data_dir: &Path,
-    request: RunnerEvidenceVerifyRequest,
-) -> Result<Value, String> {
-    if request.execution_id.trim().is_empty() {
-        return Err("executionId da evidencia do Runner e obrigatorio.".to_string());
-    }
-
-    let execution_id = sanitize_runner_evidence_segment(&request.execution_id);
-    let expected_files = normalize_runner_evidence_file_names(request.files)?;
-    let evidence_root = runner_evidence_root(app_data_dir);
-    let evidence_dir = evidence_root.join(&execution_id);
-    let mut files = Vec::new();
-    let mut existing_files = Vec::new();
-    let mut missing_files = Vec::new();
-    let mut unavailable_files = Vec::new();
-
-    for file in &expected_files {
-        let path = evidence_dir.join(file);
-        if !path.starts_with(&evidence_dir) {
-            return Err("Caminho de evidencia do Runner saiu do diretorio esperado.".to_string());
-        }
-
-        match fs::metadata(&path) {
-            Ok(metadata) if metadata.is_file() => {
-                existing_files.push(file.clone());
-                files.push(json!({
-                    "file": file,
-                    "exists": true,
-                    "sizeBytes": metadata.len()
-                }));
-            }
-            Ok(_) => {
-                missing_files.push(file.clone());
-                files.push(json!({
-                    "file": file,
-                    "exists": false,
-                    "sizeBytes": Value::Null,
-                    "reason": "not_a_file"
-                }));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                missing_files.push(file.clone());
-                files.push(json!({
-                    "file": file,
-                    "exists": false,
-                    "sizeBytes": Value::Null
-                }));
-            }
-            Err(error) => {
-                unavailable_files.push(file.clone());
-                files.push(json!({
-                    "file": file,
-                    "exists": false,
-                    "sizeBytes": Value::Null,
-                    "reason": error.to_string()
-                }));
-            }
-        }
-    }
-
-    let status = if !unavailable_files.is_empty() {
-        "unavailable"
-    } else if missing_files.is_empty() {
-        "ok"
-    } else if existing_files.is_empty() {
-        "missing"
-    } else {
-        "partial"
-    };
-
-    Ok(json!({
-        "executionId": execution_id,
-        "status": status,
-        "expectedFiles": expected_files,
-        "files": files,
-        "existingFiles": existing_files,
-        "missingFiles": missing_files,
-        "unavailableFiles": unavailable_files,
-        "relativeDir": format!("data/evidence/{execution_id}")
-    }))
-}
-
-#[tauri::command]
-fn save_runner_evidence(
-    app: tauri::AppHandle,
-    request: RunnerEvidencePersistRequest,
-) -> Result<NativeCommandResult, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    let execution_id = sanitize_runner_evidence_segment(&request.execution_id);
-    let evidence_dir = app_data_dir
-        .join("data")
-        .join("evidence")
-        .join(&execution_id);
-    fs::create_dir_all(&evidence_dir)
-        .map_err(|error| format!("Falha ao criar pasta de evidencia do Runner: {error}"))?;
-
-    let stdout_path = evidence_dir.join("stdout.txt");
-    let stderr_path = evidence_dir.join("stderr.txt");
-    let validation_path = evidence_dir.join("validation.json");
-    let metadata_path = evidence_dir.join("metadata.json");
-
-    fs::write(&stdout_path, bounded_runner_evidence_text(request.stdout))
-        .map_err(|error| format!("Falha ao salvar stdout do Runner: {error}"))?;
-    fs::write(&stderr_path, bounded_runner_evidence_text(request.stderr))
-        .map_err(|error| format!("Falha ao salvar stderr do Runner: {error}"))?;
-
-    let validation_json =
-        serde_json::to_string_pretty(&request.validation.unwrap_or_else(|| json!({})))
-            .map_err(|error| format!("Falha ao serializar validacao do Runner: {error}"))?;
-    fs::write(&validation_path, validation_json)
-        .map_err(|error| format!("Falha ao salvar validacao do Runner: {error}"))?;
-
-    let metadata_json =
-        serde_json::to_string_pretty(&request.metadata.unwrap_or_else(|| json!({})))
-            .map_err(|error| format!("Falha ao serializar metadata do Runner: {error}"))?;
-    fs::write(&metadata_path, metadata_json)
-        .map_err(|error| format!("Falha ao salvar metadata do Runner: {error}"))?;
-
-    Ok(NativeCommandResult {
-        ok: true,
-        message: "Evidencia do Runner salva.".to_string(),
-        stdout: None,
-        stderr: None,
-        artifacts: Some(json!({
-            "executionId": execution_id,
-            "evidenceDir": evidence_dir.to_string_lossy(),
-            "stdoutPath": stdout_path.to_string_lossy(),
-            "stderrPath": stderr_path.to_string_lossy(),
-            "validationPath": validation_path.to_string_lossy(),
-            "metadataPath": metadata_path.to_string_lossy()
-        })),
-    })
-}
-
-#[tauri::command]
-fn verify_runner_evidence(
-    app: tauri::AppHandle,
-    request: RunnerEvidenceVerifyRequest,
-) -> Result<NativeCommandResult, String> {
-    let app_data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Falha ao localizar a pasta de dados da Alice: {error}"))?;
-    let artifacts = verify_runner_evidence_in_dir(&app_data_dir, request)?;
-    let status = artifacts
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("unavailable");
-
-    Ok(NativeCommandResult {
-        ok: status == "ok",
-        message: match status {
-            "ok" => "Evidencia fisica do Runner confirmada.".to_string(),
-            "partial" => "Evidencia fisica do Runner parcialmente ausente.".to_string(),
-            "missing" => "Evidencia fisica do Runner ausente.".to_string(),
-            _ => "Evidencia fisica do Runner indisponivel para verificacao.".to_string(),
-        },
-        stdout: None,
-        stderr: None,
-        artifacts: Some(artifacts),
-    })
+    alice_memory_store::write_memory_json_atomic(
+        &alice_memory_store::resolve_alice_memory_path(&app_data_dir),
+        &json,
+    )
 }
 
 #[cfg(test)]
@@ -2455,25 +1930,9 @@ pub fn run() {
 
     #[cfg(feature = "desktop-commands")]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        create_gemini_live_url,
+        gemini_live_access::create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
-        load_dev_runtime_requests,
-        clear_dev_runtime_request,
-        save_runner_evidence,
-        verify_runner_evidence,
-        local_vm::get_local_vm_status,
-        local_vm::diagnose_local_vm_setup,
-        local_vm::run_local_vm_guest_task,
-        local_vm::run_local_vm_smoke_test,
-        vm_visual::install_vm_guest_agent,
-        vm_visual::diagnose_vm_guest_agent,
-        vm_visual::start_vm_guest_agent_resident,
-        vm_visual::run_vm_guest_agent_action,
-        vm_visual::capture_vm_guest_screen,
-        vm_visual::run_vm_visual_smoke_test,
-        autonomous_playground::run_local_workspace_playground_task,
-        autonomous_playground::cancel_autonomous_task,
         host_versioning::create_host_file_snapshot,
         host_versioning::diff_host_file_snapshot,
         host_versioning::record_host_file_checkpoint,
@@ -2491,25 +1950,9 @@ pub fn run() {
 
     #[cfg(not(feature = "desktop-commands"))]
     let builder = builder.invoke_handler(tauri::generate_handler![
-        create_gemini_live_url,
+        gemini_live_access::create_gemini_live_url,
         load_alice_memory_json,
         save_alice_memory_json,
-        load_dev_runtime_requests,
-        clear_dev_runtime_request,
-        save_runner_evidence,
-        verify_runner_evidence,
-        local_vm::get_local_vm_status,
-        local_vm::diagnose_local_vm_setup,
-        local_vm::run_local_vm_guest_task,
-        local_vm::run_local_vm_smoke_test,
-        vm_visual::install_vm_guest_agent,
-        vm_visual::diagnose_vm_guest_agent,
-        vm_visual::start_vm_guest_agent_resident,
-        vm_visual::run_vm_guest_agent_action,
-        vm_visual::capture_vm_guest_screen,
-        vm_visual::run_vm_visual_smoke_test,
-        autonomous_playground::run_local_workspace_playground_task,
-        autonomous_playground::cancel_autonomous_task,
         host_versioning::create_host_file_snapshot,
         host_versioning::diff_host_file_snapshot,
         host_versioning::record_host_file_checkpoint,
@@ -2530,17 +1973,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn live_url_uses_v1beta_websocket_endpoint_with_encoded_api_key() {
-        let url = build_gemini_live_url("key with spaces");
-
-        assert_eq!(
-            url,
-            "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=key%20with%20spaces"
-        );
-        assert!(!url.contains(' '));
-    }
 
     #[cfg(not(feature = "desktop-commands"))]
     #[test]
@@ -2745,193 +2177,6 @@ mod tests {
         for action in actions {
             assert!(validate_desktop_action(&action).is_ok());
         }
-    }
-
-    #[test]
-    fn validate_memory_json_payload_rejects_empty_payload() {
-        assert!(validate_memory_json_payload("   ").is_err());
-    }
-
-    #[test]
-    fn resolve_alice_memory_path_appends_expected_file_name() {
-        let path = resolve_alice_memory_path(std::path::Path::new("C:\\temp\\alice"));
-
-        assert_eq!(
-            path,
-            PathBuf::from("C:\\temp\\alice").join(ALICE_MEMORY_FILE_NAME)
-        );
-    }
-
-    #[test]
-    fn read_memory_json_returns_none_for_missing_file() {
-        let base_dir =
-            std::env::temp_dir().join(format!("alice-memory-test-missing-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&base_dir);
-        let memory_path = resolve_alice_memory_path(&base_dir);
-
-        assert_eq!(read_memory_json(&memory_path), Ok(None));
-    }
-
-    #[test]
-    fn write_memory_json_atomic_creates_and_replaces_file_contents() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "alice-memory-test-write-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let memory_path = resolve_alice_memory_path(&base_dir);
-
-        write_memory_json_atomic(&memory_path, "{\"ok\":true}").unwrap();
-        assert_eq!(
-            read_memory_json(&memory_path),
-            Ok(Some("{\"ok\":true}".to_string()))
-        );
-
-        write_memory_json_atomic(&memory_path, "{\"ok\":false}").unwrap();
-        assert_eq!(
-            read_memory_json(&memory_path),
-            Ok(Some("{\"ok\":false}".to_string()))
-        );
-        assert_eq!(
-            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 1)).unwrap(),
-            "{\"ok\":true}".to_string()
-        );
-
-        write_memory_json_atomic(&memory_path, "{\"ok\":\"latest\"}").unwrap();
-        assert_eq!(
-            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 1)).unwrap(),
-            "{\"ok\":false}".to_string()
-        );
-        assert_eq!(
-            fs::read_to_string(resolve_alice_memory_backup_path(&memory_path, 2)).unwrap(),
-            "{\"ok\":true}".to_string()
-        );
-
-        let _ = fs::remove_dir_all(&base_dir);
-    }
-
-    #[test]
-    fn read_memory_json_falls_back_to_latest_backup_when_primary_is_missing() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "alice-memory-test-backup-read-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&base_dir).unwrap();
-        let memory_path = resolve_alice_memory_path(&base_dir);
-        fs::write(
-            resolve_alice_memory_backup_path(&memory_path, 1),
-            "{\"backup\":true}",
-        )
-        .unwrap();
-
-        assert_eq!(
-            read_memory_json(&memory_path),
-            Ok(Some("{\"backup\":true}".to_string()))
-        );
-
-        let _ = fs::remove_dir_all(&base_dir);
-    }
-
-    #[test]
-    fn normalize_runner_evidence_file_names_rejects_path_traversal() {
-        assert!(
-            normalize_runner_evidence_file_names(Some(vec!["../metadata.json".to_string()]))
-                .is_err()
-        );
-        assert!(normalize_runner_evidence_file_names(Some(vec![
-            "metadata.json".to_string(),
-            "stdout.txt".to_string(),
-        ]))
-        .is_ok());
-    }
-
-    #[test]
-    fn sanitize_dev_runtime_request_id_rejects_path_segments() {
-        assert_eq!(
-            sanitize_dev_runtime_request_id("../runtime smoke?"),
-            "runtime-smoke"
-        );
-        assert_eq!(sanitize_dev_runtime_request_id(""), "runtime-request");
-    }
-
-    #[test]
-    fn verify_runner_evidence_reports_ok_for_existing_files() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "alice-runner-evidence-ok-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let execution_id = "runner-exec-test-ok";
-        let evidence_dir = runner_evidence_root(&base_dir).join(execution_id);
-        fs::create_dir_all(&evidence_dir).unwrap();
-        fs::write(evidence_dir.join("metadata.json"), "{}").unwrap();
-        fs::write(evidence_dir.join("stdout.txt"), "ok").unwrap();
-
-        let summary = verify_runner_evidence_in_dir(
-            &base_dir,
-            RunnerEvidenceVerifyRequest {
-                execution_id: execution_id.to_string(),
-                files: Some(vec!["metadata.json".to_string(), "stdout.txt".to_string()]),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(summary["status"], "ok");
-        assert_eq!(summary["existingFiles"].as_array().unwrap().len(), 2);
-
-        let _ = fs::remove_dir_all(&base_dir);
-    }
-
-    #[test]
-    fn verify_runner_evidence_reports_partial_and_missing_files() {
-        let base_dir = std::env::temp_dir().join(format!(
-            "alice-runner-evidence-missing-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let execution_id = "runner-exec-test-partial";
-        let evidence_dir = runner_evidence_root(&base_dir).join(execution_id);
-        fs::create_dir_all(&evidence_dir).unwrap();
-        fs::write(evidence_dir.join("metadata.json"), "{}").unwrap();
-
-        let partial = verify_runner_evidence_in_dir(
-            &base_dir,
-            RunnerEvidenceVerifyRequest {
-                execution_id: execution_id.to_string(),
-                files: Some(vec![
-                    "metadata.json".to_string(),
-                    "validation.json".to_string(),
-                ]),
-            },
-        )
-        .unwrap();
-        let missing = verify_runner_evidence_in_dir(
-            &base_dir,
-            RunnerEvidenceVerifyRequest {
-                execution_id: "runner-exec-test-missing".to_string(),
-                files: Some(vec!["metadata.json".to_string()]),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(partial["status"], "partial");
-        assert_eq!(partial["missingFiles"][0], "validation.json");
-        assert_eq!(missing["status"], "missing");
-
-        let _ = fs::remove_dir_all(&base_dir);
     }
 
     #[test]

@@ -16,7 +16,6 @@ import {
   mergeActiveMindMap,
   mergeImportantFacts,
   mergeMindMapFromGoal,
-  mergeValidatedProcedures,
   pruneAliceMemory,
   rollbackMindMap,
   saveAliceMemory,
@@ -60,12 +59,11 @@ describe('alice memory persistence diagnostics', () => {
   });
 });
 
-describe('autonomous learning memory', () => {
-  it('preserves user-defined learning goals during pruning', () => {
+describe('legacy operational memory cleanup', () => {
+  it('drops autonomous learning and runner state during pruning', () => {
     const memory = pruneAliceMemory({
       ...createEmptyAliceMemory(),
       autonomousLearning: {
-        ...createEmptyAliceMemory().autonomousLearning,
         learningGoals: [
           {
             goalId: 'learning-goal-browser-search',
@@ -75,10 +73,19 @@ describe('autonomous learning memory', () => {
           },
         ],
       },
+      autonomousRunner: {
+        runnerState: 'running',
+        queue: ['task-1'],
+        tasksById: { 'task-1': { id: 'task-1' } },
+      },
+      proceduralMemory: {
+        procedures: [{ procedureId: 'procedure-1', title: 'Legado' }],
+      },
     });
 
-    expect(memory.autonomousLearning.learningGoals).toHaveLength(1);
-    expect(memory.autonomousLearning.learningGoals[0].stages[0].type).toBe('browser_search');
+    expect(memory).not.toHaveProperty('autonomousLearning');
+    expect(memory).not.toHaveProperty('autonomousRunner');
+    expect(memory).not.toHaveProperty('proceduralMemory');
   });
 });
 
@@ -470,11 +477,10 @@ describe('buildMemoryPrefixTurns', () => {
     expect(turns[0].parts[0].text).not.toContain('Task Antiga');
   });
 
-  it('includes learning, runner and mind map memory when they exist', () => {
+  it('includes mind map memory and ignores removed operational memory', () => {
     const turns = buildMemoryPrefixTurns({
       ...createEmptyAliceMemory(),
       autonomousLearning: {
-        ...createEmptyAliceMemory().autonomousLearning,
         learningGoals: [{ description: 'Aprender fluxo de login' }],
         knownGaps: [{ title: 'Gap de autenticacao' }],
         recentExperiments: [{ summary: 'Teste visual aprovado' }],
@@ -482,14 +488,13 @@ describe('buildMemoryPrefixTurns', () => {
         promotedProcedures: [{ procedureId: 'procedure-1', title: 'Validar login' }],
       },
       autonomousRunner: {
-        ...createEmptyAliceMemory().autonomousRunner,
         runnerState: 'running',
         activeTaskId: 'task-1',
         queue: ['task-1'],
         tasksById: {
           'task-1': {
             id: 'task-1',
-            title: 'Validar login na VM',
+            title: 'Validar login no painel',
             status: 'running',
             createdAt: '2026-04-23T12:00:00.000Z',
             updatedAt: '2026-04-23T12:00:00.000Z',
@@ -513,7 +518,7 @@ describe('buildMemoryPrefixTurns', () => {
             nodes: [
               { id: 'root', data: { label: 'Minha Ideia Central' }, position: { x: 0, y: 0 } },
               { id: 'login', data: { label: 'Login' }, position: { x: 1, y: 0 } },
-              { id: 'vm', data: { label: 'VM' }, position: { x: 2, y: 0 } },
+              { id: 'seguranca', data: { label: 'Seguranca' }, position: { x: 2, y: 0 } },
             ],
             edges: [{ id: 'e1', source: 'root', target: 'login' }],
             history: [],
@@ -525,13 +530,11 @@ describe('buildMemoryPrefixTurns', () => {
       },
     });
 
-    expect(turns[0].parts[0].text).toContain('Memoria de aprendizado:');
-    expect(turns[0].parts[0].text).toContain('Objetivos de aprendizado: Aprender fluxo de login.');
-    expect(turns[0].parts[0].text).toContain('Gaps conhecidos: Gap de autenticacao.');
-    expect(turns[0].parts[0].text).toContain('Experimentos recentes: Teste visual aprovado.');
-    expect(turns[0].parts[0].text).toContain('Resumo do Runner autonomo:');
-    expect(turns[0].parts[0].text).toContain('task_ativa=Validar login na VM');
-    expect(turns[0].parts[0].text).toContain('Topicos do mapa: Login; VM.');
+    expect(turns[0].parts[0].text).not.toContain('Memoria de aprendizado:');
+    expect(turns[0].parts[0].text).not.toContain('Objetivos de aprendizado:');
+    expect(turns[0].parts[0].text).not.toContain('Resumo do Runner autonomo:');
+    expect(turns[0].parts[0].text).not.toContain('task_ativa=Validar login no painel');
+    expect(turns[0].parts[0].text).toContain('Topicos do mapa: Login; Seguranca.');
     expect(turns[0].parts[0].text).toContain('Relacoes do mapa: Minha Ideia Central -> Login.');
   });
 });
@@ -576,7 +579,9 @@ describe('loadAliceMemory', () => {
 
     expect(memory.schemaVersion).toBe(ALICE_MEMORY_SCHEMA_VERSION);
     expect(memory.recentContextSummary.summary).toContain('continuar fase 5');
-    expect(memory.proceduralMemory.procedures).toEqual([]);
+    expect(memory).not.toHaveProperty('proceduralMemory');
+    expect(memory).not.toHaveProperty('autonomousLearning');
+    expect(memory).not.toHaveProperty('autonomousRunner');
     expect(memory).not.toHaveProperty('commandPreferences');
     expect(memory).not.toHaveProperty('commandFriction');
   });
@@ -599,32 +604,6 @@ describe('loadAliceMemory', () => {
 
     expect(validateAliceMemorySchema(memory)).toBe(true);
     expect(getActiveMindMap(memory).nodes).toEqual(createStarterMindMap().nodes);
-  });
-});
-
-describe('mergeValidatedProcedures', () => {
-  it('stores validated operational procedures in the official Alice memory shape', () => {
-    const memory = mergeValidatedProcedures(
-      createEmptyAliceMemory(),
-      [
-        {
-          procedureId: 'procedure:vm-validation',
-          title: 'Validar na VM local',
-          summary: 'Copia arquivos, testa e so depois aplica.',
-          steps: ['copiar arquivos', 'rodar testes', 'gerar rollback'],
-          status: 'active',
-          confidence: 0.9,
-          source: 'validated_operational_learning',
-        },
-      ],
-      { now: '2026-04-28T10:00:00.000Z' },
-    );
-
-    expect(validateAliceMemorySchema(memory)).toBe(true);
-    expect(memory.proceduralMemory.procedures).toHaveLength(1);
-    expect(memory.proceduralMemory.procedures[0].title).toBe('Validar na VM local');
-    expect(memory.bootstrapMeta.memoryRevision).toBe(1);
-    expect(buildMemoryPrefixTurns(memory)[0].parts[0].text).toContain('Procedimentos validados');
   });
 });
 

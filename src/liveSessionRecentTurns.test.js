@@ -12,10 +12,10 @@ describe('buildRecentSessionTurns', () => {
         },
         {
           kind: 'tool',
-          toolName: 'update_mind_map',
-          operation: 'add_edge',
+          toolName: 'inspect_current_page',
+          operation: 'inspect',
           status: 'done',
-          message: 'Conexoes adicionadas ao mapa mental.',
+          message: 'Pagina atual inspecionada.',
         },
       ],
     });
@@ -25,7 +25,7 @@ describe('buildRecentSessionTurns', () => {
     expect(turns[0].parts[0].text).toContain('Priorize estas interacoes recentes');
     expect(turns[0].parts[0].text).toContain('Usuario: vamos continuar o fluxo de login');
     expect(turns[0].parts[0].text).toContain('Alice: Certo, estou no passo da validacao.');
-    expect(turns[0].parts[0].text).toContain('Tool: update_mind_map operacao=add_edge status=done');
+    expect(turns[0].parts[0].text).toContain('Tool: inspect_current_page operacao=inspect status=done');
   });
 
   it('falls back to current transcripts when the interaction log is empty', () => {

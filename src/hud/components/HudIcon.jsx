@@ -27,15 +27,6 @@ export function HudIcon({ type }) {
     );
   }
 
-  if (type === 'autonomy') {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true" className="sidebar-icon">
-        <path d="M6.5 8.5h11A2.5 2.5 0 0 1 20 11v5.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5V11a2.5 2.5 0 0 1 2.5-2.5Z" />
-        <path d="M8 8.5V6.75A3.75 3.75 0 0 1 11.75 3h.5A3.75 3.75 0 0 1 16 6.75V8.5M8.5 13.25h.01M15.5 13.25h.01M10 16c1.25.75 2.75.75 4 0" />
-      </svg>
-    );
-  }
-
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true" className="sidebar-icon">
       <path d="M12 4.5v15M7.5 8.25v7.5M16.5 8.25v7.5M4.5 11v2M19.5 11v2" />

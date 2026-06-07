@@ -4,30 +4,66 @@ Estas instrucoes valem somente para o projeto `alice-virtual`.
 
 ## Identidade do Projeto
 
-Alice Virtual e uma assistente pessoal local feita com Tauri, React e Gemini Live API.
+Alice Virtual e uma assistente pessoal local feita com Tauri, React e Gemini
+Live API.
 
-O foco do projeto e criar uma Alice confiavel para uso pessoal, com:
+O foco ativo do projeto e:
 
 - conversa por voz;
-- contexto de tela;
-- contexto de paginas web via extensao;
+- contexto visual da tela compartilhada;
+- contexto textual de paginas web via extensao Edge/Chrome;
 - memoria local persistente;
+- mapa mental editavel manualmente no HUD;
 - HUD de diagnostico e controle;
-- autonomia supervisionada;
-- Runner de tarefas;
-- VM/local workspace;
-- evidencias, rollback e auditoria.
+- bridge local segura entre extensao e app;
+- superficie pequena de tools Live.
 
-Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game design ou retencao de jogos aqui, a menos que o usuario peca explicitamente.
+Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game
+design ou retencao de jogos aqui, a menos que o usuario peca explicitamente.
+
+## Superficie Ativa
+
+As unicas tools Live expostas ao Gemini devem ser:
+
+- `get_navigation_context`
+- `inspect_current_page`
+
+O pipeline interno pode usar comandos Tauri de refresh, busca e fetch web, mas
+isso nao significa que essas funcoes estejam liberadas como tools Live para o
+modelo.
+
+O mapa mental existe no HUD e pode ser editado pela interface. Nao ha tool Live
+ativa para editar mapa mental automaticamente.
+
+`host_versioning.rs` existe como capacidade nativa de snapshot, diff,
+checkpoint e rollback, mas nao deve ser exposto como tool Live sem pedido
+explicito.
+
+## Removido e Nao Deve Ser Reativado
+
+Nao reative sem pedido explicito:
+
+- VM local, VirtualBox/Hyper-V ou variaveis `ALICE_LOCAL_VM_*`;
+- Guest Agent Python de VM;
+- Autonomous Runner;
+- aprendizado autonomo operacional;
+- learning planner e harnesses;
+- workspace fallback;
+- auto-melhoria automatizada;
+- edicao automatica de mapa mental via tool call;
+- comandos desktop amplos no Gemini Live.
+
+Testes podem conter esses termos apenas para garantir que nao estao expostos ou
+que memoria legada e podada.
 
 ## Prioridades
 
 1. Confianca e controle do usuario.
 2. Privacidade local.
-3. Seguranca em comandos, arquivos, VM, shell e bridge local.
+3. Superficie pequena de tools ativas.
 4. Memoria pessoal clara, editavel e recuperavel.
-5. Autonomia supervisionada, sempre com evidencias e possibilidade de rollback.
-6. UX simples para entender o que a Alice esta vendo, lembrando e fazendo.
+5. UX simples para entender o que a Alice esta vendo e lembrando.
+6. Seguranca em bridge local, memoria e comandos nativos.
 7. Manutencao incremental sem reescritas grandes.
 
 ## Tecnologias Principais
@@ -37,25 +73,31 @@ Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game 
 - Modelo/conversa: Gemini Live API.
 - Testes JS: Vitest.
 - Extensao: Edge/Chrome Extension MV3.
-- VM/automacao: Hyper-V, VirtualBox, Python guest agent, PowerShell quando necessario.
 
 ## Regras de Engenharia
 
-- Preserve contratos existentes de memoria, Runner, tools e comandos Tauri.
-- Antes de mudar comportamento sensivel, procure testes relacionados.
-- Nao enfraqueca validacoes de path, shell, rollback, evidencia ou policy.
-- Nao confunda workspace fallback com VM real.
-- Nao deixe task virar concluida sem evidencia/validacao quando o fluxo exigir.
-- Trate `src/App.jsx`, `src/aliceMemory.js`, `src/autonomousTaskRunner.js`, `src/autonomousRunnerState.js` e `src-tauri/src/lib.rs` como arquivos criticos.
-- Prefira refatoracoes pequenas, com testes, mantendo facades compativeis.
+- Antes de alterar codigo, entenda a estrutura atual. O projeto acabou de ser
+  reduzido; nao use documentos ou nomes antigos como fonte de verdade.
+- Preserve a superficie Live minima: `get_navigation_context` e
+  `inspect_current_page`.
+- Nao adicione tool Live, handler em `App.jsx` ou prompt que permita acao ampla
+  sem necessidade concreta.
+- Nao enfraqueca validacoes de path, shell, rollback, memoria ou bridge local.
+- Trate `src/App.jsx`, `src/aliceMemory.js`, `src-tauri/src/lib.rs`,
+  `src-tauri/src/web_knowledge.rs` e `src/prompts/aliceSystemInstruction.js`
+  como arquivos criticos.
+- Prefira refatoracoes pequenas, com testes.
+- Use nomes neutros em exemplos e testes novos. Nao use VM/runner/learning como
+  exemplo generico.
 
 ## Seguranca e Privacidade
 
-- Qualquer acao no PC real deve considerar snapshot, diff, validacao e rollback.
-- Acoes de shell, filesystem, VM e Guest Agent devem ser tratadas como sensiveis.
-- Bridge local, extensao web e Guest Agent devem usar autenticacao/limites quando possivel.
+- A chave Gemini deve vir de `GEMINI_API_KEY` ou `GOOGLE_API_KEY`; nao salve
+  segredos em arquivos versionados.
+- Bridge local e extensao web devem ter limites claros.
 - Memoria local deve ter backup, migracao segura e possibilidade de recuperacao.
-- Nao salve segredos em arquivos versionados.
+- Qualquer acao real em arquivo deve considerar snapshot, diff, validacao e
+  rollback, mesmo que essa capacidade nao esteja exposta ao modelo.
 
 ## Comandos Uteis
 
@@ -63,8 +105,6 @@ Este projeto nao e um jogo Roblox. Nao aplique instrucoes de Roblox, Luau, game 
 npm run lint
 npm test
 npm run build
-npm run audit:alice
-npm run runner:harness -- verify-safe-state
 ```
 
 Para backend Rust, quando arquivos em `src-tauri/` forem alterados:
@@ -79,5 +119,7 @@ cargo test
 - Explique riscos de forma simples.
 - Separe problema real de melhoria futura.
 - Quando criar relatorios, use Markdown claro com prioridade, motivo e sugestao.
-- Para melhorias da Alice, pense como assistente pessoal local, nao como produto publico.
-- Para mudancas de codigo, implemente de forma incremental e verifique com testes quando possivel.
+- Para melhorias da Alice, pense como assistente pessoal local, nao como produto
+  publico.
+- Para mudancas de codigo, implemente de forma incremental e verifique com
+  testes quando possivel.
