@@ -91,6 +91,20 @@ que memoria legada e podada.
 - Prefira refatoracoes pequenas, com testes.
 - Use nomes neutros em exemplos e testes novos. Nao use VM/runner/learning como
   exemplo generico.
+  
+## Expansao Tecnica Permitida
+
+- Quando for necessario e viavel para melhorar a Alice, e permitido usar outras
+  linguagens de programacao, frameworks, bibliotecas, APIs e servicos locais,
+  desde que a escolha tenha motivo claro e respeite as prioridades deste
+  projeto.
+- Essa liberdade tecnica nao autoriza aumentar a superficie Live sem necessidade
+  concreta.
+- Qualquer adicao deve preservar controle do usuario, privacidade local,
+  manutencao razoavel e integracao coerente com a arquitetura atual.
+- Antes de introduzir nova tecnologia, avalie se ela realmente melhora a Alice
+  de forma pratica e se o ganho compensa custo, risco, dependencia e
+  complexidade operacional.
 
 ## Seguranca e Privacidade
 
