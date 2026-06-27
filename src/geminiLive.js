@@ -61,7 +61,10 @@ export const parseLiveMessageData = async (data) => {
   }
 
   if (data?.text) {
-    return JSON.parse(await data.text());
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Blob.text() timeout')), 5000)
+    );
+    return JSON.parse(await Promise.race([data.text(), timeout]));
   }
 
   return JSON.parse(String(data));

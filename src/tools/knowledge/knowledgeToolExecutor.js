@@ -19,6 +19,10 @@ export const isInternalKnowledgeToolName = (toolName) =>
 export const normalizeKnowledgeToolResponse = (toolName, nativeResponse) => {
   const artifacts = nativeResponse?.artifacts || {};
 
+  if (!nativeResponse) {
+    return { ok: false, message: 'Resposta nativa ausente.' };
+  }
+
   switch (toolName) {
     case 'get_navigation_context':
       return {

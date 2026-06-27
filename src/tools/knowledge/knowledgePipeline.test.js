@@ -367,4 +367,83 @@ describe('executeKnowledgeTool', () => {
     expect(response.consultedSources).toEqual(['https://site.dev/result']);
     expect(statePatch.lastKnowledgeSummaryHint).toContain('web geral');
   });
+
+  it('continues processing remaining fetch URLs when one individual fetch fails', async () => {
+    const invokeTool = vi.fn(async (toolName, payload) => {
+      switch (toolName) {
+        case 'search_web':
+          return {
+            ok: true,
+            results: [
+              { title: 'Pagina A', url: 'https://example.com/a', snippet: 'Trecho A' },
+              { title: 'Pagina B', url: 'https://example.com/b', snippet: 'Trecho B' },
+            ],
+          };
+        case 'fetch_web_page':
+          if (payload.url === 'https://example.com/a') {
+            throw new Error('fetch falhou para pagina A');
+          }
+          return {
+            ok: true,
+            page: {
+              url: payload.url,
+              title: 'Pagina B',
+              sections: [{ id: 's1', kind: 'p', heading: '', content: 'Conteudo da pagina B.' }],
+              links: [],
+            },
+          };
+        default:
+          throw new Error(`unexpected tool: ${toolName}`);
+      }
+    });
+
+    const { response } = await executeKnowledgeTool({
+      toolName: 'search_web',
+      args: { query: 'exemplo de busca web' },
+      invokeTool,
+    });
+
+    const fetchedUrls = (response.fetchedPages || []).map((p) => p.url);
+    expect(fetchedUrls).not.toContain('https://example.com/a');
+    expect(fetchedUrls).toContain('https://example.com/b');
+  });
+
+  it('records fallback metadata and continues the pipeline when the extension is offline', async () => {
+    const invokeTool = vi.fn(async (toolName) => {
+      switch (toolName) {
+        case 'refresh_current_page_snapshot':
+          return {
+            ok: false,
+            fallbackReason: 'extension_offline',
+            refreshMode: 'fallback_cached',
+          };
+        case 'inspect_current_page':
+          return {
+            ok: true,
+            context: buildContext(),
+            page: buildPage(),
+            matchedSections: [],
+            matchedLinks: [],
+            sufficiency: KNOWLEDGE_SUFFICIENCY.PARTIAL,
+          };
+        case 'search_same_domain':
+          return { ok: true, results: [] };
+        case 'search_web':
+          return { ok: true, results: [] };
+        default:
+          throw new Error(`unexpected tool: ${toolName}`);
+      }
+    });
+
+    const { statePatch } = await executeKnowledgeTool({
+      toolName: 'inspect_current_page',
+      args: { question: 'o que tem nessa pagina?' },
+      invokeTool,
+    });
+
+    expect(statePatch.lastSnapshotRefreshMode).toBe('fallback_cached');
+    expect(statePatch.lastFallbackReason).toBe('extension_offline');
+    // pipeline nao abortou — inspect_current_page foi chamado apos o refresh falhar
+    expect(invokeTool).toHaveBeenCalledWith('inspect_current_page', expect.anything());
+  });
 });

@@ -1,18 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { useEffect, useReducer, useRef, useState } from 'react';
-import { ALICE_LIVE_MODEL, createAliceLiveSetup } from './alice';
-import {
-  ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
-  ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
-  buildMemoryPrefixTurns,
-  createAliceMemoryPersistenceSnapshot,
-  createEmptyAliceMemory,
-  extractImportantFacts,
-  getActiveMindMap,
-  mergeActiveMindMap,
-  mergeImportantFacts,
-  saveAliceMemory,
-} from './aliceMemory';
+import { createAliceLiveSetup } from './alice';
 import {
   createInitialAppUiState,
   readyCaption,
@@ -21,28 +9,21 @@ import {
 } from './appUiState';
 import { GeminiLiveSession, LIVE_CLOSE_REASONS } from './geminiLive';
 import { LiveSessionOrchestrator } from './liveSessionOrchestrator';
-import { buildSessionRehydrationTurns } from './liveSessionRehydration';
-import { buildRecentSessionTurns } from './liveSessionRecentTurns';
+import { buildLiveMemoryPrefixTurns } from './liveMemoryPrefixTurns';
 import { createFunctionResponseEnvelope, LiveSessionTransport } from './liveSessionTransport';
-import { buildOperationalContextTurns } from './operationalContext';
-import { resolveScreenCaptureGeometry, SCREEN_SHARE_VIDEO_CONSTRAINTS } from './screenGeometry';
+import { SCREEN_SHARE_VIDEO_CONSTRAINTS } from './screenGeometry';
 import { startScreenFrameStreaming } from './screenFrameStreaming';
 import { buildDebugHudSnapshot } from './debugHud';
-import {
-  createEmptyKnowledgeState,
-  mergeKnowledgeState,
-} from './webKnowledge';
+import { createEmptyKnowledgeState } from './webKnowledge';
 import { executeKnowledgeFunctionCall } from './tools/knowledge/knowledgeToolExecutor';
 import { AliceHud } from './hud/AliceHud';
-import { isTauriRuntime } from './tauriRuntime';
-import {
-  flushAliceMemoryToRuntime,
-  loadAliceMemoryFromRuntime as loadAliceMemoryFromRuntimeBoundary,
-} from './aliceMemoryPersistence';
+import { useAliceMemory } from './useAliceMemory';
+import { useDebugInteractions } from './useDebugInteractions';
+import { useKnowledgeState } from './useKnowledgeState';
+import { useScreenCapture } from './useScreenCapture';
 import {
   appendTrustedUtterance,
   classifyToolDebugStatus,
-  createDebugInteractionId,
   createPcmOutputPlayer,
   startMicrophoneStreaming,
   stopStream,
@@ -53,239 +34,52 @@ import './App.css';
 const readyCheckPrompt =
   'Diga em uma frase curta, em portugues do Brasil, que voce esta ouvindo e recebendo a tela compartilhada. Nao descreva a tela ainda.';
 
-const ALICE_MEMORY_SAVE_DELAY_MS = 750;
-const MAX_DEBUG_INTERACTIONS = 80;
-
 function App() {
-  const videoRef = useRef(null);
-  const canvasRef = useRef(null);
-  const screenStreamRef = useRef(null);
   const voiceStreamRef = useRef(null);
   const liveSessionRef = useRef(null);
   const liveOrchestratorRef = useRef(null);
   const liveTransportRef = useRef(new LiveSessionTransport());
-  const aliceMemoryRef = useRef(createEmptyAliceMemory());
-  const memorySaveTimerRef = useRef(null);
-  const memoryHydratedRef = useRef(false);
   const microphoneCleanupRef = useRef(null);
   const screenCleanupRef = useRef(null);
   const outputPlayerRef = useRef(createPcmOutputPlayer());
   const trustedUtteranceRef = useRef(null);
   const outputTranscriptRef = useRef('');
   const toolQueueRef = useRef(Promise.resolve());
-  const knowledgeStateRef = useRef(createEmptyKnowledgeState());
-  const tauriRuntimeAvailableRef = useRef(false);
-  const persistenceDiagnosticsRef = useRef(
-    createAliceMemoryPersistenceSnapshot(createEmptyAliceMemory()),
-  );
-  const debugInteractionsRef = useRef([]);
-  const latestConversationInteractionIdRef = useRef('');
+  const startingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const {
+    aliceMemoryRef,
+    activeMindMap,
+    mindMapRevision,
+    persistenceDiagnostics,
+    canUseTauriRuntime,
+    clearAliceMemorySaveTimer,
+    flushAliceMemory,
+    rememberAliceContext,
+    handleMindMapChange,
+  } = useAliceMemory();
 
   const [uiState, dispatchUi] = useReducer(reduceAppUiState, undefined, createInitialAppUiState);
   const [activeHudPage, setActiveHudPage] = useState('live');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [knowledgeState, setKnowledgeState] = useState(createEmptyKnowledgeState);
-  const [activeMindMap, setActiveMindMap] = useState(() => getActiveMindMap(createEmptyAliceMemory()));
-  const [mindMapRevision, setMindMapRevision] = useState(0);
-  const [debugInteractions, setDebugInteractions] = useState([]);
-  const [persistenceDiagnostics, setPersistenceDiagnostics] = useState(
-    () => createAliceMemoryPersistenceSnapshot(createEmptyAliceMemory()),
-  );
-  const { status, caption, inputCaption, error, diagnostics, sessionNotice } = uiState;
 
-  useEffect(() => {
-    knowledgeStateRef.current = knowledgeState;
-  }, [knowledgeState]);
+  const { knowledgeState, knowledgeStateRef, updateKnowledgeState } = useKnowledgeState();
+
+  const {
+    debugInteractions,
+    debugInteractionsRef,
+    recordUserInteraction,
+    recordAliceInteraction,
+    recordToolInteraction,
+  } = useDebugInteractions({ trustedUtteranceRef });
+
+  const { videoRef, canvasRef, screenStreamRef, getScreenCaptureGeometry } = useScreenCapture();
+
+  const { status, caption, inputCaption, error, diagnostics, sessionNotice } = uiState;
 
   const noteDiagnostic = (event) => {
     dispatchUi({ type: 'diagnostic-event', event });
-  };
-
-  const commitDebugInteractions = (updater) => {
-    const nextInteractions = updater(debugInteractionsRef.current).slice(-MAX_DEBUG_INTERACTIONS);
-    debugInteractionsRef.current = nextInteractions;
-    setDebugInteractions(nextInteractions);
-  };
-
-  const canUseTauriRuntime = () => tauriRuntimeAvailableRef.current || isTauriRuntime();
-
-  const recordUserInteraction = (userText) => {
-    const normalizedText = String(userText || '').trim();
-    if (!normalizedText) {
-      return;
-    }
-
-    commitDebugInteractions((current) => {
-      const latestId = latestConversationInteractionIdRef.current;
-      const latest = current.find((interaction) => interaction.id === latestId);
-      if (latest && latest.kind === 'conversation' && !latest.aliceText) {
-        return current.map((interaction) =>
-          interaction.id === latestId
-            ? { ...interaction, userText: normalizedText, status: 'listening', timestamp: Date.now() }
-            : interaction,
-        );
-      }
-
-      const interaction = {
-        id: createDebugInteractionId(),
-        kind: 'conversation',
-        timestamp: Date.now(),
-        status: 'listening',
-        userText: normalizedText,
-        aliceText: '',
-      };
-      latestConversationInteractionIdRef.current = interaction.id;
-      return [...current, interaction];
-    });
-  };
-
-  const recordAliceInteraction = (aliceText) => {
-    const normalizedText = String(aliceText || '').trim();
-    if (!normalizedText) {
-      return;
-    }
-
-    commitDebugInteractions((current) => {
-      const latestId = latestConversationInteractionIdRef.current;
-      const latest = current.find((interaction) => interaction.id === latestId);
-      if (latest && latest.kind === 'conversation') {
-        return current.map((interaction) =>
-          interaction.id === latestId
-            ? { ...interaction, aliceText: normalizedText, status: 'answered', timestamp: Date.now() }
-            : interaction,
-        );
-      }
-
-      const interaction = {
-        id: createDebugInteractionId(),
-        kind: 'conversation',
-        timestamp: Date.now(),
-        status: 'answered',
-        userText: trustedUtteranceRef.current?.text || '',
-        aliceText: normalizedText,
-      };
-      latestConversationInteractionIdRef.current = interaction.id;
-      return [...current, interaction];
-    });
-  };
-
-  const recordToolInteraction = (functionCall, patch = {}) => {
-    const toolName = functionCall?.name || 'ferramenta_desconhecida';
-    const args = functionCall?.args || {};
-    const existingId = patch.id;
-
-    commitDebugInteractions((current) => {
-      if (existingId) {
-        return current.map((interaction) =>
-          interaction.id === existingId
-            ? {
-                ...interaction,
-                ...patch,
-                timestamp: Date.now(),
-              }
-            : interaction,
-        );
-      }
-
-      const interaction = {
-        id: createDebugInteractionId(),
-        kind: 'tool',
-        timestamp: Date.now(),
-        status: 'running',
-        toolName,
-        operation: args.operation || args.taskKind || args.action || '',
-        ok: null,
-        userText: trustedUtteranceRef.current?.text || '',
-        argsSummary: summarizeDebugPayload(args),
-        responseSummary: '',
-        message: '',
-        reason: '',
-      };
-      return [...current, interaction];
-    });
-
-    return existingId || debugInteractionsRef.current.at(-1)?.id || '';
-  };
-
-  const clearAliceMemorySaveTimer = () => {
-    if (memorySaveTimerRef.current) {
-      window.clearTimeout(memorySaveTimerRef.current);
-      memorySaveTimerRef.current = null;
-    }
-  };
-
-  const updatePersistenceDiagnostics = (patch = {}) => {
-    const nextDiagnostics = createAliceMemoryPersistenceSnapshot(aliceMemoryRef.current, {
-      ...persistenceDiagnosticsRef.current,
-      ...patch,
-    });
-    persistenceDiagnosticsRef.current = nextDiagnostics;
-    setPersistenceDiagnostics(nextDiagnostics);
-    return nextDiagnostics;
-  };
-
-  const flushAliceMemory = async () => {
-    clearAliceMemorySaveTimer();
-    aliceMemoryRef.current = await flushAliceMemoryToRuntime({
-      memory: aliceMemoryRef.current,
-      canUseTauriRuntime: canUseTauriRuntime(),
-      memoryHydrated: memoryHydratedRef.current,
-      saveMemory: saveAliceMemory,
-      onSkipped: () => {
-        updatePersistenceDiagnostics();
-      },
-      onSaved: () => {
-        updatePersistenceDiagnostics({
-          lastMemorySaveAt: new Date().toISOString(),
-          lastMemorySaveError: '',
-        });
-      },
-      onSaveError: (saveError) => {
-        updatePersistenceDiagnostics({
-          lastMemorySaveError: String(saveError?.message || saveError || 'Falha ao salvar memoria.'),
-        });
-      },
-    });
-    return aliceMemoryRef.current;
-  };
-
-  const scheduleAliceMemorySave = () => {
-    if (!canUseTauriRuntime()) {
-      return;
-    }
-
-    clearAliceMemorySaveTimer();
-    memorySaveTimerRef.current = window.setTimeout(() => {
-      void flushAliceMemory().catch(() => {
-        // Memory persistence should not break the live session flow.
-      });
-    }, ALICE_MEMORY_SAVE_DELAY_MS);
-  };
-
-  const loadAliceMemoryFromRuntime = async () => {
-    try {
-      const memory = await loadAliceMemoryFromRuntimeBoundary({ invokeFn: invoke });
-      tauriRuntimeAvailableRef.current = true;
-      return memory;
-    } catch (loadError) {
-      tauriRuntimeAvailableRef.current = false;
-      throw loadError;
-    }
-  };
-
-  const rememberAliceContext = ({
-    inputTranscript = trustedUtteranceRef.current?.text || '',
-    outputTranscript = outputTranscriptRef.current,
-  } = {}) => {
-    const extractedFacts = extractImportantFacts({
-      inputTranscript,
-      outputTranscript,
-      sessionModel: ALICE_LIVE_MODEL,
-    });
-
-    aliceMemoryRef.current = mergeImportantFacts(aliceMemoryRef.current, extractedFacts);
-    scheduleAliceMemorySave();
-    return aliceMemoryRef.current;
   };
 
   const stopStreamingPipelines = () => {
@@ -319,8 +113,7 @@ function App() {
     stopMediaStreams();
     outputPlayerRef.current?.close();
     outputPlayerRef.current = createPcmOutputPlayer();
-    setKnowledgeState(createEmptyKnowledgeState());
-    knowledgeStateRef.current = createEmptyKnowledgeState();
+    updateKnowledgeState(createEmptyKnowledgeState());
 
     resetRuntimeRefs();
 
@@ -334,18 +127,6 @@ function App() {
       generation,
       functionResponse: createFunctionResponseEnvelope(functionCall, response),
     });
-
-  const updateKnowledgeState = (patch) => {
-    const nextState = mergeKnowledgeState(knowledgeStateRef.current, patch);
-    knowledgeStateRef.current = nextState;
-    setKnowledgeState(nextState);
-  };
-
-  const handleMindMapChange = (mindMapData) => {
-    aliceMemoryRef.current = mergeActiveMindMap(aliceMemoryRef.current, mindMapData);
-    setActiveMindMap(getActiveMindMap(aliceMemoryRef.current));
-    scheduleAliceMemorySave();
-  };
 
   const rejectUnexpectedToolCall = async (functionCall, generation, debugInteractionId = '') => {
     noteDiagnostic({
@@ -370,11 +151,6 @@ function App() {
       },
       generation,
     );
-  };
-
-  const getScreenCaptureGeometry = () => {
-    const settings = screenStreamRef.current?.getVideoTracks()[0]?.getSettings?.() || {};
-    return resolveScreenCaptureGeometry(settings, videoRef.current);
   };
 
   const restartStreamingPipelines = (generation) => {
@@ -413,55 +189,16 @@ function App() {
     }
   };
 
-  const buildLiveMemoryPrefixTurns = ({ mode = 'fresh' } = {}) => {
-    const currentMemory = aliceMemoryRef.current;
-    const currentMindMap = getActiveMindMap(currentMemory);
-    const operationalTurns = buildOperationalContextTurns({
-      trustedUtterance: trustedUtteranceRef.current,
-      outputTranscript: outputTranscriptRef.current,
-      memorySummary: currentMemory.recentContextSummary?.summary || '',
-      knowledgeState: knowledgeStateRef.current,
-      activeMindMap: currentMindMap,
-      screenGeometry: getScreenCaptureGeometry(),
-    });
-    const recentSessionTurns = buildRecentSessionTurns({
+  const getLiveMemoryPrefixTurns = ({ mode = 'fresh' } = {}) =>
+    buildLiveMemoryPrefixTurns({
+      mode,
+      memory: aliceMemoryRef.current,
       interactions: debugInteractionsRef.current,
       trustedUtterance: trustedUtteranceRef.current,
       outputTranscript: outputTranscriptRef.current,
-    });
-    const persistentMemoryTurns = buildMemoryPrefixTurns(currentMemory, {
-      supplementalOnly: mode !== 'fresh',
-      includeRecentContext: mode === 'fresh',
-      includeActiveProjects: mode === 'fresh',
-      includeActiveTasks: mode === 'fresh',
-      filterActiveItemsByRecency: true,
-      activeProjectRecencyMs: ALICE_MEMORY_ACTIVE_PROJECT_RECENCY_MS,
-      activeTaskRecencyMs: ALICE_MEMORY_ACTIVE_TASK_RECENCY_MS,
-    });
-    const rehydrationTurns = buildSessionRehydrationTurns({
-      trustedUtterance: trustedUtteranceRef.current,
-      outputTranscript: outputTranscriptRef.current,
-      memorySummary: currentMemory.recentContextSummary?.summary || '',
       knowledgeState: knowledgeStateRef.current,
-      activeMindMap: currentMindMap,
+      screenGeometry: getScreenCaptureGeometry(),
     });
-
-    if (mode === 'resume') {
-      return [
-        ...operationalTurns,
-        ...recentSessionTurns,
-        ...persistentMemoryTurns,
-        ...rehydrationTurns,
-      ];
-    }
-
-    return [
-      ...operationalTurns,
-      ...recentSessionTurns,
-      ...persistentMemoryTurns,
-      ...rehydrationTurns,
-    ];
-  };
 
   const executeLocalToolCall = async (functionCall, generation) => {
     const debugInteractionId = recordToolInteraction(functionCall);
@@ -537,7 +274,7 @@ function App() {
           onCloseReason,
           onError,
         }),
-      getMemoryPrefixTurns: async ({ mode } = {}) => buildLiveMemoryPrefixTurns({ mode }),
+      getMemoryPrefixTurns: async ({ mode } = {}) => getLiveMemoryPrefixTurns({ mode }),
       onEvent: handleLiveEvent,
       onStatus: (nextStatus) => {
         if (nextStatus !== 'idle') {
@@ -645,7 +382,7 @@ function App() {
       outputTranscriptRef.current = event.outputTranscript;
       recordAliceInteraction(event.outputTranscript);
       dispatchUi({ type: 'session-caption', caption: event.outputTranscript });
-      rememberAliceContext({ outputTranscript: event.outputTranscript });
+      rememberAliceContext({ inputTranscript: trustedUtteranceRef.current?.text || '', outputTranscript: event.outputTranscript });
     }
 
     if (event.toolCallCancellation) {
@@ -667,10 +404,14 @@ function App() {
       // Ignore persistence errors during shutdown to keep stop responsive.
     });
     releaseLiveResources();
+    if (!mountedRef.current) return;
     dispatchUi({ type: 'session-stopped' });
   };
 
   const startLiveSession = async () => {
+    if (startingRef.current) return;
+    startingRef.current = true;
+
     if (liveOrchestratorRef.current || screenStreamRef.current || voiceStreamRef.current) {
       await stopLiveSession();
     }
@@ -726,6 +467,8 @@ function App() {
         error: sessionError.message || 'Nao foi possivel iniciar a sessao Live.',
         caption: 'Nao consegui abrir a sessao ainda.',
       });
+    } finally {
+      startingRef.current = false;
     }
   };
 
@@ -739,41 +482,8 @@ function App() {
   };
 
   useEffect(() => {
-    let disposed = false;
-
-    void loadAliceMemoryFromRuntime().then((memory) => {
-        if (!disposed) {
-          aliceMemoryRef.current = memory;
-          setActiveMindMap(getActiveMindMap(memory));
-          setMindMapRevision((current) => current + 1);
-          memoryHydratedRef.current = true;
-          updatePersistenceDiagnostics();
-          scheduleAliceMemorySave();
-        }
-      })
-      .catch((loadError) => {
-        memoryHydratedRef.current = true;
-        // Browser-only previews cannot persist diagnostics, but this console line helps local debugging.
-        console.info('[Alice] app_runtime_not_tauri', {
-          message: loadError?.message || String(loadError),
-        });
-      });
-
     return () => {
-      disposed = true;
-      if (memorySaveTimerRef.current) {
-        window.clearTimeout(memorySaveTimerRef.current);
-        memorySaveTimerRef.current = null;
-      }
-      if (canUseTauriRuntime() && memoryHydratedRef.current) {
-        void saveAliceMemory(aliceMemoryRef.current)
-          .then((memory) => {
-            aliceMemoryRef.current = memory;
-          })
-          .catch(() => {
-            // Ignore persistence errors during unmount.
-          });
-      }
+      mountedRef.current = false;
       void liveOrchestratorRef.current?.stopLiveSession();
       microphoneCleanupRef.current?.();
       screenCleanupRef.current?.();
@@ -781,7 +491,7 @@ function App() {
       stopStream(screenStreamRef.current);
       stopStream(voiceStreamRef.current);
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   const isBusy = status === 'starting' || status === 'configuring';
   const isLive = status === 'connected' || status === 'configuring' || status === 'starting' || status === 'reconnecting';

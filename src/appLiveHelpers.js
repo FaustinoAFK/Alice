@@ -157,19 +157,26 @@ export const startMicrophoneStreaming = (voiceStream, onChunk) => {
   }
 
   const audioContext = new AudioContext({ latencyHint: 'interactive' });
-  const source = audioContext.createMediaStreamSource(new MediaStream(audioTracks));
-  const processor = audioContext.createScriptProcessor(4096, 1, 1);
-  const mutedOutput = audioContext.createGain();
+  let source, processor, mutedOutput;
 
-  mutedOutput.gain.value = 0;
-  processor.onaudioprocess = (event) => {
-    const channel = event.inputBuffer.getChannelData(0);
-    onChunk(encodePcm16Base64(channel, audioContext.sampleRate), calculateRms(channel));
-  };
+  try {
+    source = audioContext.createMediaStreamSource(new MediaStream(audioTracks));
+    processor = audioContext.createScriptProcessor(4096, 1, 1);
+    mutedOutput = audioContext.createGain();
 
-  source.connect(processor);
-  processor.connect(mutedOutput);
-  mutedOutput.connect(audioContext.destination);
+    mutedOutput.gain.value = 0;
+    processor.onaudioprocess = (event) => {
+      const channel = event.inputBuffer.getChannelData(0);
+      onChunk(encodePcm16Base64(channel, audioContext.sampleRate), calculateRms(channel));
+    };
+
+    source.connect(processor);
+    processor.connect(mutedOutput);
+    mutedOutput.connect(audioContext.destination);
+  } catch (err) {
+    audioContext.close();
+    throw err;
+  }
 
   return () => {
     processor.disconnect();

@@ -136,16 +136,20 @@ const buildFetchedPages = async ({ results, invokeTool, limit }) => {
   const fetchedPages = [];
 
   for (const result of results.slice(0, limit)) {
-    const pageResponse = await invokeTool('fetch_web_page', {
-      url: result.url,
-    });
-    if (pageResponse?.ok && pageResponse.page) {
-      fetchedPages.push({
-        url: pageResponse.page.url,
-        title: pageResponse.page.title,
-        sections: pageResponse.page.sections || [],
-        links: pageResponse.page.links || [],
+    try {
+      const pageResponse = await invokeTool('fetch_web_page', {
+        url: result.url,
       });
+      if (pageResponse?.ok && pageResponse.page) {
+        fetchedPages.push({
+          url: pageResponse.page.url,
+          title: pageResponse.page.title,
+          sections: pageResponse.page.sections || [],
+          links: pageResponse.page.links || [],
+        });
+      }
+    } catch {
+      // URL individual falhou — continuar com as demais
     }
   }
 
