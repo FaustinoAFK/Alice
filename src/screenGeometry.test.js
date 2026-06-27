@@ -4,7 +4,7 @@ import { resolveScreenCaptureGeometry, SCREEN_SHARE_VIDEO_CONSTRAINTS } from './
 describe('SCREEN_SHARE_VIDEO_CONSTRAINTS', () => {
   it('does not force a lower capture resolution for screen sharing', () => {
     expect(SCREEN_SHARE_VIDEO_CONSTRAINTS).toEqual({
-      frameRate: { ideal: 5, max: 10 },
+      frameRate: { ideal: 30, max: 30 },
     });
   });
 });

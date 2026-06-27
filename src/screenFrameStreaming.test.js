@@ -85,7 +85,7 @@ describe('startScreenFrameStreaming', () => {
 
     const cleanup = startScreenFrameStreaming(video, canvas, onFrame, { timerHost });
 
-    expect(timerHost.setInterval).toHaveBeenCalledWith(expect.any(Function), 1500);
+    expect(timerHost.setInterval).toHaveBeenCalledWith(expect.any(Function), 33);
     expect(onFrame).toHaveBeenCalledTimes(1);
 
     intervalIds[0].callback();

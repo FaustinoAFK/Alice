@@ -1,5 +1,5 @@
 export const DEFAULT_SCREEN_FRAME_MAX_WIDTH = Number.POSITIVE_INFINITY;
-export const DEFAULT_SCREEN_FRAME_INTERVAL_MS = 1500;
+export const DEFAULT_SCREEN_FRAME_INTERVAL_MS = 33;
 export const DEFAULT_SCREEN_FRAME_JPEG_QUALITY = 1;
 
 export const calculateScreenFrameSize = (

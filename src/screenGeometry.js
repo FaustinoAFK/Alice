@@ -1,5 +1,5 @@
 export const SCREEN_SHARE_VIDEO_CONSTRAINTS = {
-  frameRate: { ideal: 5, max: 10 },
+  frameRate: { ideal: 30, max: 30 },
 };
 
 const toPositiveNumber = (value) => {
