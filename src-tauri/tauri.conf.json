@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: data:; connect-src 'self' ipc: wss://generativelanguage.googleapis.com; object-src 'none'; base-uri 'self'"
     }
   },
   "bundle": {

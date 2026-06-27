@@ -11,6 +11,7 @@ use std::io::{Cursor, Read};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::time::{sleep, timeout};
 use tauri::State;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use url::Url;
@@ -787,9 +788,10 @@ fn duckduckgo_search(query: &str, max_results: usize) -> Result<Vec<SearchResult
 
 fn parse_duckduckgo_results(html: &str, max_results: usize) -> Vec<SearchResult> {
     let document = Html::parse_document(html);
-    let result_selector = Selector::parse(".result").unwrap();
-    let title_selector = Selector::parse(".result__title a, a.result__a").unwrap();
-    let snippet_selector = Selector::parse(".result__snippet").unwrap();
+    let result_selector = Selector::parse(".result").expect("seletor CSS estático válido");
+    let title_selector =
+        Selector::parse(".result__title a, a.result__a").expect("seletor CSS estático válido");
+    let snippet_selector = Selector::parse(".result__snippet").expect("seletor CSS estático válido");
     let mut unique_urls = HashSet::new();
     let mut results = Vec::new();
 
@@ -874,19 +876,23 @@ fn extract_page_snapshot_from_html(url: &str, html: &str) -> Result<PageSnapshot
     let normalized_url =
         normalize_url(url).ok_or_else(|| "URL final da pagina web invalida.".to_string())?;
     let document = Html::parse_document(html);
-    let title_selector = Selector::parse("title").unwrap();
-    let meta_description_selector = Selector::parse("meta[name='description']").unwrap();
-    let html_selector = Selector::parse("html").unwrap();
-    let link_selector = Selector::parse("a[href]").unwrap();
-    let heading_selector = Selector::parse("h1, h2, h3, h4, h5, h6").unwrap();
+    let title_selector = Selector::parse("title").expect("seletor CSS estático válido");
+    let meta_description_selector =
+        Selector::parse("meta[name='description']").expect("seletor CSS estático válido");
+    let html_selector = Selector::parse("html").expect("seletor CSS estático válido");
+    let link_selector = Selector::parse("a[href]").expect("seletor CSS estático válido");
+    let heading_selector =
+        Selector::parse("h1, h2, h3, h4, h5, h6").expect("seletor CSS estático válido");
     let text_block_selector =
-        Selector::parse("main p, article p, section p, p, blockquote, pre").unwrap();
-    let list_selector = Selector::parse("ul, ol").unwrap();
-    let list_item_selector = Selector::parse("li").unwrap();
-    let table_selector = Selector::parse("table").unwrap();
-    let row_selector = Selector::parse("tr").unwrap();
-    let cell_selector = Selector::parse("th, td").unwrap();
-    let interactive_selector = Selector::parse("button, label, [role='button']").unwrap();
+        Selector::parse("main p, article p, section p, p, blockquote, pre")
+            .expect("seletor CSS estático válido");
+    let list_selector = Selector::parse("ul, ol").expect("seletor CSS estático válido");
+    let list_item_selector = Selector::parse("li").expect("seletor CSS estático válido");
+    let table_selector = Selector::parse("table").expect("seletor CSS estático válido");
+    let row_selector = Selector::parse("tr").expect("seletor CSS estático válido");
+    let cell_selector = Selector::parse("th, td").expect("seletor CSS estático válido");
+    let interactive_selector =
+        Selector::parse("button, label, [role='button']").expect("seletor CSS estático válido");
 
     let title = document
         .select(&title_selector)
@@ -1078,35 +1084,41 @@ fn native_fail(message: impl Into<String>) -> NativeCommandResult {
     }
 }
 
-fn refresh_current_page_snapshot_impl(
+async fn refresh_current_page_snapshot_impl(
     timeout_ms: Option<u64>,
     state: &WebKnowledgeState,
 ) -> NativeCommandResult {
     let started_at = current_timestamp_ms();
     let requested_timeout = timeout_ms.unwrap_or(DEFAULT_REFRESH_TIMEOUT_MS);
     let request = state.begin_capture_request(requested_timeout, "inspect_current_page");
-    let deadline = request.expires_at;
 
-    while current_timestamp_ms() < deadline {
-        if state.has_completed_capture_request(&request.request_id) {
-            let runtime = state.fresh_snapshot();
-            if let (Some(context), Some(page)) = (runtime.navigation_context, runtime.page_snapshot)
-            {
-                return native_ok(
-                    "Snapshot da pagina atual atualizado sob demanda.",
-                    json!({
-                        "requestId": request.request_id,
-                        "context": context,
-                        "page": page,
-                        "refreshMode": runtime.last_capture_transport.unwrap_or_else(|| "reactive_sse".to_string()),
-                        "refreshLatencyMs": current_timestamp_ms().saturating_sub(started_at),
-                        "extensionSeenAt": runtime.last_extension_seen_at,
-                    }),
-                );
+    let poll_result = timeout(
+        Duration::from_millis(requested_timeout),
+        async {
+            loop {
+                if state.has_completed_capture_request(&request.request_id) {
+                    return state.fresh_snapshot();
+                }
+                sleep(Duration::from_millis(CAPTURE_WAIT_POLL_MS)).await;
             }
-        }
+        },
+    )
+    .await;
 
-        thread::sleep(Duration::from_millis(CAPTURE_WAIT_POLL_MS));
+    if let Ok(runtime) = poll_result {
+        if let (Some(context), Some(page)) = (runtime.navigation_context, runtime.page_snapshot) {
+            return native_ok(
+                "Snapshot da pagina atual atualizado sob demanda.",
+                json!({
+                    "requestId": request.request_id,
+                    "context": context,
+                    "page": page,
+                    "refreshMode": runtime.last_capture_transport.unwrap_or_else(|| "reactive_sse".to_string()),
+                    "refreshLatencyMs": current_timestamp_ms().saturating_sub(started_at),
+                    "extensionSeenAt": runtime.last_extension_seen_at,
+                }),
+            );
+        }
     }
 
     let runtime = state.fresh_snapshot();
@@ -1133,14 +1145,12 @@ fn refresh_current_page_snapshot_impl(
 }
 
 #[tauri::command]
-pub fn refresh_current_page_snapshot(
+pub async fn refresh_current_page_snapshot(
     timeout_ms: Option<u64>,
     state: State<'_, WebKnowledgeState>,
 ) -> Result<NativeCommandResult, String> {
-    Ok(refresh_current_page_snapshot_impl(
-        timeout_ms,
-        state.inner(),
-    ))
+    let state = state.inner().clone();
+    Ok(refresh_current_page_snapshot_impl(timeout_ms, &state).await)
 }
 
 #[tauri::command]
@@ -1564,8 +1574,8 @@ mod tests {
         assert!(runtime.last_extension_seen_at.is_some());
     }
 
-    #[test]
-    fn refresh_current_page_snapshot_uses_fresh_cached_snapshot_as_fallback() {
+    #[tokio::test]
+    async fn refresh_current_page_snapshot_uses_fresh_cached_snapshot_as_fallback() {
         let state = WebKnowledgeState::default();
         let now = current_timestamp_ms();
         state.apply_page_state(
@@ -1596,7 +1606,7 @@ mod tests {
             None,
         );
 
-        let result = refresh_current_page_snapshot_impl(Some(1), &state);
+        let result = refresh_current_page_snapshot_impl(Some(1), &state).await;
 
         assert!(result.ok);
         assert_eq!(
@@ -1617,8 +1627,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refresh_current_page_snapshot_resolves_with_reactive_transport_when_request_is_completed() {
+    #[tokio::test]
+    async fn refresh_current_page_snapshot_resolves_with_reactive_transport_when_request_is_completed() {
         let state = WebKnowledgeState::default();
         let receiver = state.subscribe_capture_events();
         let state_for_thread = state.clone();
@@ -1663,7 +1673,7 @@ mod tests {
             );
         });
 
-        let result = refresh_current_page_snapshot_impl(Some(250), &state);
+        let result = refresh_current_page_snapshot_impl(Some(250), &state).await;
 
         assert!(result.ok);
         assert_eq!(
@@ -1676,11 +1686,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn refresh_current_page_snapshot_fails_without_fresh_cache_or_request_resolution() {
+    #[tokio::test]
+    async fn refresh_current_page_snapshot_fails_without_fresh_cache_or_request_resolution() {
         let state = WebKnowledgeState::default();
 
-        let result = refresh_current_page_snapshot_impl(Some(1), &state);
+        let result = refresh_current_page_snapshot_impl(Some(1), &state).await;
 
         assert!(!result.ok);
         assert!(result
@@ -1734,5 +1744,33 @@ mod tests {
             .links
             .iter()
             .any(|link| link.url == "https://example.com/docs/authentication"));
+    }
+
+    #[test]
+    fn css_selectors_used_in_parsing_are_all_valid() {
+        let selectors = [
+            "title",
+            "meta[name='description']",
+            "html",
+            "a[href]",
+            "h1, h2, h3, h4, h5, h6",
+            "main p, article p, section p, p, blockquote, pre",
+            "ul, ol",
+            "li",
+            "table",
+            "tr",
+            "th, td",
+            "button, label, [role='button']",
+            ".result",
+            ".result__title a, a.result__a",
+            ".result__snippet",
+        ];
+
+        for selector in selectors {
+            assert!(
+                Selector::parse(selector).is_ok(),
+                "seletor CSS inválido: {selector}"
+            );
+        }
     }
 }

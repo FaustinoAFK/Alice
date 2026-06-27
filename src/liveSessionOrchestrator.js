@@ -266,7 +266,7 @@ export class LiveSessionOrchestrator {
 
       // Check if we've exceeded max reconnect attempts
       if (this.reconnectAttempt >= this.reconnectMaxAttempts) {
-        this.onError(new Error('Max reconnect attempts () reached'));
+        this.onError(new Error(`Max reconnect attempts (${this.reconnectMaxAttempts}) reached`));
         this.onStatus('error');
         throw error;
       }

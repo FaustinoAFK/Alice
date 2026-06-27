@@ -379,4 +379,28 @@ describe('LiveSessionOrchestrator', () => {
       rehydrated: false,
     });
   });
+
+  it('includes the actual attempt limit in the max-attempts error message', async () => {
+    const errors = [];
+    const { createSession } = createSessionFactory({
+      connectBehaviors: [
+        {},
+        { connectError: buildConnectError('network failure') },
+      ],
+    });
+
+    const orchestrator = new LiveSessionOrchestrator({
+      buildSetup: buildSetupStub,
+      createSession,
+      onError: (error) => errors.push(error),
+      reconnectMaxAttempts: 1,
+      reconnectBaseDelayMs: 0,
+      reconnectJitterFactor: 0,
+    });
+
+    await orchestrator.startLiveSession();
+    await orchestrator.reconnectWithFallback('rehydrate').catch(() => {});
+
+    expect(errors[0].message).toMatch(/Max reconnect attempts \(1\) reached/);
+  });
 });
